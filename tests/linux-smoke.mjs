@@ -68,6 +68,11 @@ try {
   assert.ok(firstCheck && secondCheck, "Background monitor must continue checking without a browser");
   const quoteStatus = (await fetch(`${base}/api/quote`, { headers })).status;
   assert.ok([200, 503].includes(quoteStatus));
+  const fundingResponse = await fetch(`${base}/api/monitors/hynix/funding`, { headers });
+  assert.equal(fundingResponse.status, 200);
+  const fundingHistory = await fundingResponse.json();
+  assert.ok(["live", "snapshot"].includes(fundingHistory.status));
+  assert.ok(fundingHistory.rows.length >= 1512 && fundingHistory.metadata.pairedHours >= 1512);
   const oilStatus = await fetch(`${base}/api/monitors/oil/status`, { headers }).then(r=>r.json());
   assert.ok(oilStatus.lastAttemptAt, "Oil monitor runs independently of page visits");
   await stop(); start(); await ready();

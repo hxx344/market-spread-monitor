@@ -1,6 +1,7 @@
 import { getMonitor } from "./monitors.ts";
 import { loadQuote } from "./quote-service.ts";
 import { loadMarket } from "./market-service.ts";
+import { loadHynixFunding } from "./hynix-funding-service.ts";
 import { fetchMarket, fetchSnapshot } from "../modules/oil/hyperliquid.mjs";
 import { fetchFundingSnapshot } from "../modules/oil/funding-history.mjs";
 import oilArchive from "../public/oil/data/hyperliquid-2026.json" with { type: "json" };
@@ -13,7 +14,7 @@ export interface DataAdapter {
 }
 /** Add a data adapter here and a descriptor in monitors.ts to expose a new module. */
 export const dataAdapters: Record<string, DataAdapter> = {
-  hynix: { quote: loadQuote, history: loadMarket },
+  hynix: { quote: loadQuote, history: loadMarket, funding: loadHynixFunding },
   oil: {
     quote: fetchMarket,
     async history() {

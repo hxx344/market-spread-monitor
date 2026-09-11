@@ -30,6 +30,7 @@ interface DataAdapter {
 | --- | --- |
 | `hynix/quote` | `ordinary, adr, equivalent, spread, premium, fetchedAt` |
 | `hynix/history` | `points, fetchedAt, status, interval, firstAvailable, warnings` |
+| `hynix/funding` | `rows, metadata, status, error?`；每行 `time, adr, ordinary` 为已结算小时费率，缺腿为 `null` |
 | `oil/quote` | `brent, wti, fetchedAt`，每腿含 `markPx, oraclePx, funding` |
 | `oil/history` | `data, market, metadata, status` |
 | `oil/funding` | `data, metadata, status`，UTC 小时资金费 |
