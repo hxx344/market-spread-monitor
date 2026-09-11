@@ -6,7 +6,8 @@ import { Activity, ArrowUpRight, Layers3 } from "lucide-react";
 import Link from "next/link";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import { monitors } from "../lib/monitors";
-import { hynixSummary, oilSummary, summaryExpired, summaryStatusLabels, summaryTimestamp, type MonitorSummary } from "../lib/monitor-summary";
+import { summaryExpired, summaryStatusLabels, summaryTimestamp, type MonitorSummary } from "../lib/monitor-summary";
+import { initialSummaries, type InitialMarketData } from "../lib/initial-market";
 import Dashboard from "./dashboard";
 import OilPanel from "./oil-panel";
 import MonitorSparkline from "./monitor-sparkline";
@@ -17,8 +18,8 @@ import { monitorAlertAdapters } from "../lib/monitor-alerts";
 
 const panels = { oil: memo(OilPanel), hynix: memo(Dashboard) };
 
-function CardSummary({ summary, intervalMs }: { summary: MonitorSummary; intervalMs: number }) {
-  const [now, setNow] = useState(Date.now);
+function CardSummary({ summary, intervalMs, renderedAt }: { summary: MonitorSummary; intervalMs: number; renderedAt?: number }) {
+  const [now, setNow] = useState(() => renderedAt ?? Date.now());
   useEffect(() => {
     const updateClock = () => setNow(Date.now());
     const timer = setInterval(updateClock, 10_000);
@@ -34,10 +35,10 @@ function CardSummary({ summary, intervalMs }: { summary: MonitorSummary; interva
   </>;
 }
 
-export default function MonitorHub() {
+export default function MonitorHub({ initial = null }: { initial?: InitialMarketData | null }) {
   const [active, setActive] = useState("oil");
-  const [oil, setOil] = useState(oilSummary);
-  const [hynix, setHynix] = useState(() => hynixSummary(null));
+  const [oil, setOil] = useState(() => initialSummaries(initial).oil);
+  const [hynix, setHynix] = useState(() => initialSummaries(initial).hynix);
   const summaries: Record<string, MonitorSummary> = { oil, hynix };
   // Stable setters keep mounted panels and their pollers intact on every quote.
   const summaryHandlers = { oil: setOil, hynix: setHynix };
@@ -66,9 +67,9 @@ export default function MonitorHub() {
     <div className="hub-intro"><div><p className="eyebrow">跨市场价差观察</p><h1>市场监控</h1></div><a href="https://github.com/hxx344/market-spread-monitor" target="_blank" rel="noreferrer"><Layers3 size={16}/>项目与扩展说明<ArrowUpRight size={15}/></a></div>
     <NotificationSettings/>
     <Tabs value={active} onValueChange={value => setActive(String(value))} className="hub-tabs">
-      <TabsList className="hub-tab-list" aria-label="选择监控市场">{monitors.map(monitor => <TabsTrigger key={monitor.id} value={monitor.id} className="hub-tab" aria-label={monitor.title}><span className="hub-card-heading"><i style={{background:monitor.accent}}/><span>{monitor.title}<small>{monitor.subtitle}</small></span><em>{monitor.category}</em></span>{summaries[monitor.id] && <CardSummary summary={summaries[monitor.id]} intervalMs={monitor.quoteIntervalMs} />}</TabsTrigger>)}</TabsList>
+      <TabsList className="hub-tab-list" aria-label="选择监控市场">{monitors.map(monitor => <TabsTrigger key={monitor.id} value={monitor.id} className="hub-tab" aria-label={monitor.title}><span className="hub-card-heading"><i style={{background:monitor.accent}}/><span>{monitor.title}<small>{monitor.subtitle}</small></span><em>{monitor.category}</em></span>{summaries[monitor.id] && <CardSummary summary={summaries[monitor.id]} intervalMs={monitor.quoteIntervalMs} renderedAt={initial?.renderedAt} />}</TabsTrigger>)}</TabsList>
       <div className="hub-alert-settings">{monitors.filter(monitor => monitor.capabilities.includes("alerts")).map(monitor => <div key={monitor.id} hidden={active !== monitor.id}>{monitorAlertAdapters[monitor.id] ? <AlertSettings monitorId={monitor.id} title={monitor.title} adapter={monitorAlertAdapters[monitor.id]}/> : <p role="alert">该监控模块尚未接入统一告警设置。</p>}</div>)}</div>
-      {monitors.map(monitor => { const id = monitor.id as keyof typeof panels; const Panel = panels[id]; return <TabsContent key={monitor.id} value={monitor.id} forceMount className="hub-content">{Panel ? <Panel onSummary={summaryHandlers[id]} active={active === id} /> : <p role="alert">该监控模块尚未提供面板。</p>}</TabsContent>; })}
+      {monitors.map(monitor => { const id = monitor.id as keyof typeof panels; const Panel = panels[id]; return <TabsContent key={monitor.id} value={monitor.id} forceMount className="hub-content">{Panel ? <Panel initial={initial} onSummary={summaryHandlers[id]} active={active === id} /> : <p role="alert">该监控模块尚未提供面板。</p>}</TabsContent>; })}
     </Tabs>
   </div>;
 }

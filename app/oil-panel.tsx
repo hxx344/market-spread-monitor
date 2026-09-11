@@ -3,9 +3,10 @@
 import { useEffect, useRef, useState } from "react";
 import { mount as mountChart } from "../modules/oil/app.mjs";
 import { oilSummary, type SummaryProps } from "../lib/monitor-summary";
+import { initialSummaries, type InitialMarketData } from "../lib/initial-market";
 type Mounted = { dispose: () => void };
 
-export default function OilPanel({ onSummary }: SummaryProps) {
+export default function OilPanel({ onSummary, initial = null }: SummaryProps & { initial?: InitialMarketData | null }) {
   const host = useRef<HTMLDivElement>(null);
   const [error, setError] = useState("");
   useEffect(() => {
@@ -21,17 +22,17 @@ export default function OilPanel({ onSummary }: SummaryProps) {
         controller.signal.throwIfAborted();
         // This markup is a checked-in first-party asset, never user/API HTML.
         root.innerHTML = `<style>${css}</style>${html}`;
-        mounted.push(mountChart(root, { onSummary: update => onSummary?.(oilSummary(update)) }));
+        mounted.push(mountChart(root, { initial: initial?.oil, onSummary: update => onSummary?.(oilSummary(update)) }));
         root.querySelectorAll<HTMLAnchorElement>("[data-local-anchor]").forEach(anchor => anchor.addEventListener("click", event => { event.preventDefault(); root.getElementById(anchor.hash.slice(1))?.scrollIntoView({ behavior: "smooth" }); }, { signal: controller.signal }));
       } catch (cause) {
         if (!controller.signal.aborted) {
           setError(cause instanceof Error ? cause.message : "原油面板加载失败。");
-          onSummary?.(oilSummary({ status: "error", spread: null, fundingHourlyRate: null, fundingBasis: "quantity", fetchedAt: null }));
+          onSummary?.({ ...initialSummaries(initial).oil, status: initial?.oil.quote ? "stale" : "error" });
         }
       }
     }
     void load();
     return () => { controller.abort(); mounted.forEach(panel => panel.dispose()); root.replaceChildren(); };
-  }, [onSummary]);
+  }, [onSummary, initial]);
   return <>{error && <p role="alert" className="notice error">{error}</p>}<div ref={host} data-monitor="oil" /></>;
 }

@@ -3,6 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 import { retainHistoryPoints, type LiveQuote, type MarketData } from "../lib/market";
 import { HISTORY_REFRESH_MS, QUOTE_REFRESH_MS, startPolling } from "../lib/polling";
+import type { InitialMarketData } from "../lib/initial-market";
+
+const retainedQuote = "后台尚未取得新报价，显示上次保存的数据；请留意采集时间。";
 
 async function request<T>(path: string, signal: AbortSignal): Promise<T> {
   const response = await fetch(path, { cache: "no-store", signal: AbortSignal.any([signal,AbortSignal.timeout(15_000)]) });
@@ -10,13 +13,13 @@ async function request<T>(path: string, signal: AbortSignal): Promise<T> {
   return response.json();
 }
 
-export function useMarketFeed() {
-  const [data,setData] = useState<MarketData | null>(null);
-  const [quote,setQuote] = useState<LiveQuote | null>(null);
-  const [historyLoading,setHistoryLoading] = useState(true);
-  const [quoteLoading,setQuoteLoading] = useState(true);
+export function useMarketFeed(initial?: InitialMarketData["hynix"]) {
+  const [data,setData] = useState<MarketData | null>(initial?.history ?? null);
+  const [quote,setQuote] = useState<LiveQuote | null>(initial?.quote ?? null);
+  const [historyLoading,setHistoryLoading] = useState(!initial?.history);
+  const [quoteLoading,setQuoteLoading] = useState(!initial?.quote);
   const [error,setError] = useState("");
-  const [quoteError,setQuoteError] = useState("");
+  const [quoteError,setQuoteError] = useState(initial?.quote?.status === "snapshot" ? retainedQuote : "");
   const controls = useRef<{ refresh: () => void } | null>(null);
 
   useEffect(() => {
@@ -34,7 +37,7 @@ export function useMarketFeed() {
     const live = startPolling({
       intervalMs: QUOTE_REFRESH_MS,
       load: signal => request<LiveQuote>("/api/monitors/hynix/quote",signal),
-      onData: next => { setQuote(next); setQuoteError(next.status === "snapshot" ? "后台尚未取得新报价，显示上次保存的数据；请留意采集时间。" : ""); },
+      onData: next => { setQuote(next); setQuoteError(next.status === "snapshot" ? retainedQuote : ""); },
       onError: () => setQuoteError("实时报价更新失败，10 秒后自动重试；请留意报价获取时间。"),
       onSettled: () => setQuoteLoading(false),
     });

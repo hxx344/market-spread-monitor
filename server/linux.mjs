@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import next from "next";
 import { createMonitorServices } from "./monitor-services.mjs";
 import { createHandler } from "./http.mjs";
+import { registerInitialMarket } from "./initial-market.mjs";
 
 const host = process.env.HOST ?? "127.0.0.1";
 const port = Number(process.env.PORT ?? 3000);
@@ -13,6 +14,7 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("PORT �
 const directory = resolve(process.env.ALERT_DATA_DIR ?? "./runtime-data");
 if (process.platform === "linux" && process.env.MONITOR_EXTERNAL_LOCK !== "1") throw new Error("请通过 bash server/entrypoint.sh 启动，确保运行数据目录持有内核锁。");
 const services = await createMonitorServices(directory, { externallyLocked: process.env.MONITOR_EXTERNAL_LOCK === "1" });
+const releaseInitialMarket = registerInitialMarket(services);
 const app = next({ dev: false, hostname: host, port });
 let server;
 try {
@@ -23,7 +25,7 @@ await new Promise((accept, reject) => { server.once("error", reject); server.lis
 services.market.start();
 for (const service of services.values()) service.start();
 console.log(`Market Monitor is listening on http://${host}:${port}; oil and Hynix monitors are running.`);
-} catch (error) { await Promise.allSettled([...services.values()].map(service => service.stop())); await services.market.stop(); await services.notifications.stop(); throw error; }
+} catch (error) { releaseInitialMarket(); await Promise.allSettled([...services.values()].map(service => service.stop())); await services.market.stop(); await services.notifications.stop(); throw error; }
 let closing = false;
 async function shutdown() {
   if (closing) return;
@@ -31,6 +33,7 @@ async function shutdown() {
   const timeout = setTimeout(() => process.exit(1), 28_000).unref();
   const closed = new Promise(accept => server.close(accept));
   await closed;
+  releaseInitialMarket();
   // Drain active configuration requests before stopping persistence or releasing locks.
   await Promise.all([...services.values()].map(service => service.stop()));
   await services.market.stop();

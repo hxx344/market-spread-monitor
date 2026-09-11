@@ -40,6 +40,9 @@ try {
   const page = await fetch(base, { headers });
   assert.equal(page.status, 200);
   const markup = await page.text();
+  assert.ok(markup.includes('spark-line'), 'Initial HTML must include persisted trends before any browser JavaScript');
+  assert.equal((markup.match(/加载走势/g) ?? []).length, 0, 'Both histories are available directly from SQLite on first render');
+  assert.match(page.headers.get('cache-control') ?? '', /no-store|private/, 'Database-backed HTML must not be reused as a static build snapshot');
   for (const id of ["oil", "hynix"]) assert.ok(markup.includes(`data-alert-monitor="${id}"`), `${id} must render the shared alert editor`);
   const initial = await state();
   assert.equal(initial.available, true); assert.equal(initial.config.enabled, false);

@@ -3,8 +3,8 @@ import { calculateShortSpreadFunding, DAY } from './hyperliquid.mjs';
 import { createFundingSnapshot, dailyFundingRates, analyzeFundingRange } from './funding-history.mjs';
 
 import { createLifecycle } from './lifecycle.mjs';
-/** @param {ShadowRoot} root @param {{ onSummary?: (summary: import('../../lib/monitor-summary').OilSummaryUpdate) => void }} options */
-export function mount(root, { onSummary } = {}) {
+/** @param {ShadowRoot} root @param {{ initial?: import('../../lib/initial-market').InitialMarketData['oil'], onSummary?: (summary: import('../../lib/monitor-summary').OilSummaryUpdate) => void }} options */
+export function mount(root, { onSummary, initial } = {}) {
 const life = createLifecycle();
 const $ = id => root.getElementById(id);
 const state = { rows: [], rawDates: [], range: 'ytd', view: 'spread', visible: [], chart: null, selectedDate: null, market: null, metadata: null, basis: 'quantity', marketMode: 'snapshot', historyMode: 'snapshot', refreshing: false, fundingSnapshot: null, fundingDaily: new Map(), fundingChart: null, fundingHistoryMode: 'loading', fundingRefreshing: false };
@@ -527,7 +527,10 @@ let resizeFrame;
 const resizeObserver = new ResizeObserver(() => { if (life.signal.aborted) return; cancelAnimationFrame(resizeFrame); resizeFrame = requestAnimationFrame(() => { if (!life.signal.aborted && state.visible.length) renderChart(); }); }); resizeObserver.observe($('chart-area'));
 
 
-publishSummary('loading');
+// Hydrate persisted data before starting refreshes; preserve the server-rendered cards.
+if (initial?.quote) applyLiveMarket(initial.quote);
+if (initial?.history) applySnapshot(initial.history, initial.history.status === 'snapshot' ? 'snapshot' : 'live');
+if (!state.market) publishSummary('loading');
 loadData();
 loadHistoricalFunding();
 return { setView(input) { if (!['1m','3m','ytd'].includes(input.range) || !['spread','prices'].includes(input.view)) throw new Error('Invalid chart view'); if (!state.rows.length) throw new Error('行情尚未加载'); state.range=input.range; state.view=input.view; render(); return summarize(state.visible); }, dispose() { life.dispose(); clearInterval(refreshTimer); resizeObserver.disconnect(); cancelAnimationFrame(resizeFrame); } };
