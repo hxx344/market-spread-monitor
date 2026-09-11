@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { LiveQuote, MarketData } from "../lib/market";
+import { retainHistoryPoints, type LiveQuote, type MarketData } from "../lib/market";
 import { HISTORY_REFRESH_MS, QUOTE_REFRESH_MS, startPolling } from "../lib/polling";
 
 async function request<T>(path: string, signal: AbortSignal): Promise<T> {
@@ -27,7 +27,7 @@ export function useMarketFeed() {
         if (!next.points?.length) throw new Error("暂时没有可对齐的历史行情。");
         return next;
       },
-      onData: next => { setData(next); setError(""); },
+      onData: next => { setData(previous => retainHistoryPoints(previous, next)); setError(""); },
       onError: error => setError(error instanceof Error ? error.message : "历史行情加载失败。"),
       onSettled: () => setHistoryLoading(false),
     });

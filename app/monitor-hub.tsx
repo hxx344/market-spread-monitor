@@ -65,7 +65,7 @@ export default function MonitorHub() {
     <NotificationSettings/>
     <Tabs value={active} onValueChange={value => setActive(String(value))} className="hub-tabs">
       <TabsList className="hub-tab-list" aria-label="选择监控市场">{monitors.map(monitor => <TabsTrigger key={monitor.id} value={monitor.id} className="hub-tab" aria-label={monitor.title}><span className="hub-card-heading"><i style={{background:monitor.accent}}/><span>{monitor.title}<small>{monitor.subtitle}</small></span><em>{monitor.category}</em></span>{summaries[monitor.id] && <CardSummary summary={summaries[monitor.id]} intervalMs={monitor.quoteIntervalMs} />}</TabsTrigger>)}</TabsList>
-      {monitors.map(monitor => { const id = monitor.id as keyof typeof panels; const Panel = panels[id]; return <TabsContent key={monitor.id} value={monitor.id} forceMount className="hub-content">{Panel ? <Panel onSummary={summaryHandlers[id]} /> : <p role="alert">该监控模块尚未提供面板。</p>}</TabsContent>; })}
+      {monitors.map(monitor => { const id = monitor.id as keyof typeof panels; const Panel = panels[id]; return <TabsContent key={monitor.id} value={monitor.id} forceMount className="hub-content">{Panel ? <Panel onSummary={summaryHandlers[id]} active={active === id} /> : <p role="alert">该监控模块尚未提供面板。</p>}</TabsContent>; })}
     </Tabs>
   </div>;
 }

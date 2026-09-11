@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { Activity, Check, Info } from "lucide-react";
 import {
   Area, CartesianGrid, ComposedChart, Line, ReferenceArea, ReferenceLine,
@@ -8,8 +8,8 @@ import {
 } from "recharts";
 import { selectRange, type Point } from "../lib/market";
 import { calculateIndicators, type IndicatorPoint, type SpreadMetric } from "../lib/indicators";
+import { ranges } from "../lib/chart-ranges";
 
-export const ranges = [{ label: "1 周", days: 7 }, { label: "1 月", days: 30 }, { label: "全部", days: null }];
 type Mode = SpreadMetric | "price";
 type Toggles = { sma: boolean; bands: boolean; zscore: boolean };
 const options = [
@@ -55,7 +55,7 @@ function IndicatorTooltip({ active, payload, mode, enabled, zOnly = false }: {
   </div>;
 }
 
-export default function SpreadChart({ data, loading, range, onRangeChange }: {
+function SpreadChart({ data, loading, range, onRangeChange }: {
   data: Point[];
   loading: boolean;
   range: number | null;
@@ -158,3 +158,5 @@ export default function SpreadChart({ data, loading, range, onRangeChange }: {
     </div></details>}
   </section>;
 }
+
+export default memo(SpreadChart);

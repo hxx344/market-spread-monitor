@@ -23,6 +23,14 @@ export type MarketData = {
   warnings: string[];
 };
 
+/** Keep chart inputs stable when a poll changes only metadata, without hiding corrections. */
+export function retainHistoryPoints(previous: MarketData | null, next: MarketData): MarketData {
+  if (!previous || previous.points.length !== next.points.length) return next;
+  const fields = ["time", "adr", "ordinary", "equivalent", "spread", "premium"] as const;
+  if (!next.points.every((point, index) => fields.every(field => point[field] === previous.points[index][field]))) return next;
+  return { ...next, points: previous.points };
+}
+
 // Align identical, completed UTC buckets. Never forward-fill a missing quote.
 export function alignCandles(ordinary: Candle[], adr: Candle[], now = Date.now()): Point[] {
   const valid = (c: Candle) => Number.isFinite(c.t) && c.t >= FIRST_FULL_HOUR && c.T < now && Number.isFinite(Number(c.c)) && Number(c.c) > 0;

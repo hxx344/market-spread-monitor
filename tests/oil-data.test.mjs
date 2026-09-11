@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { validateRows, filterRows, summarize, monthlyAverages, chartDomain } from '../modules/oil/data-utils.mjs';
-import { ASSETS, DAY, YEAR_START, parseMarketResponse, pairDailyCandles, calculateShortSpreadFunding, requestInfo } from '../modules/oil/hyperliquid.mjs';
+import { ASSETS, DAY, YEAR_START, parseMarketResponse, pairDailyCandles, calculateShortSpreadFunding, requestInfo, fetchSnapshot } from '../modules/oil/hyperliquid.mjs';
 
 const snapshot = JSON.parse(await readFile(new URL('../public/oil/data/hyperliquid-2026.json', import.meta.url), 'utf8'));
 const rows = validateRows(snapshot.data.filter(row => row.brent !== null && row.wti !== null));
@@ -133,4 +133,46 @@ test('API calls are read-only and surface transport errors without returning fak
   assert.equal(request.options.credentials, 'omit');
   assert.deepEqual(JSON.parse(request.options.body), { type: 'metaAndAssetCtxs', dex: 'xyz' });
   await assert.rejects(() => requestInfo({}, { fetcher: async () => ({ ok: false, status: 500 }) }), /HTTP 500/);
+});
+
+test('current oil quotes publish before slow daily candles finish', async () => {
+  const pending = new Map(), updates = [];
+  let finished = false;
+  const loading = fetchSnapshot({
+    fetcher: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      return new Promise(resolve => pending.set(body.type === 'metaAndAssetCtxs' ? 'market' : body.req.coin, resolve));
+    },
+    onMarket: value => updates.push(value),
+  }).then(value => { finished = true; return value; });
+  assert.equal(pending.size, 3);
+  pending.get('market')(Response.json([{universe:[{name:ASSETS.brent.coin},{name:ASSETS.wti.coin}]}, [{markPx:'102',oraclePx:'102',funding:'0.0001'},{markPx:'99',oraclePx:'99',funding:'0'}]]));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].brent.markPx, 102);
+  assert.equal(finished, false);
+  pending.get(ASSETS.brent.coin)(Response.json([candle(ASSETS.brent.coin, YEAR_START, 101)]));
+  pending.get(ASSETS.wti.coin)(Response.json([candle(ASSETS.wti.coin, YEAR_START, 98)]));
+  const snapshot = await loading;
+  assert.equal(snapshot.market, updates[0]);
+  assert.equal(snapshot.metadata.pairedObservationRows, 1);
+});
+
+test('a failed historical leg does not discard the separately delivered live oil quote', async () => {
+  let failHistory;
+  const updates = [];
+  const loading = fetchSnapshot({
+    fetcher: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.type === 'metaAndAssetCtxs') return Response.json([{universe:[{name:ASSETS.brent.coin},{name:ASSETS.wti.coin}]}, [{markPx:'102',oraclePx:'102',funding:'0'},{markPx:'99',oraclePx:'99',funding:'0'}]]);
+      if (body.req.coin === ASSETS.brent.coin) return new Promise(resolve => { failHistory = resolve; });
+      return Response.json([candle(ASSETS.wti.coin, YEAR_START, 98)]);
+    },
+    onMarket: value => updates.push(value),
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(updates.length, 1);
+  failHistory(Response.json({}, {status:503}));
+  await assert.rejects(loading, /HTTP 503/);
+  assert.equal(updates[0].brent.markPx, 102);
 });

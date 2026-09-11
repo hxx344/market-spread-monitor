@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { alignCandles, selectRange, dailyPoints, FIRST_FULL_HOUR } from "../lib/market.ts";
+import { alignCandles, selectRange, dailyPoints, retainHistoryPoints, FIRST_FULL_HOUR } from "../lib/market.ts";
 import { loadMarket } from "../lib/market-service.ts";
 import archive from "../data/archive.json" with { type: "json" };
 
@@ -36,6 +36,31 @@ test("range filtering and daily summaries use data timestamps", () => {
   const daily=dailyPoints(points);
   assert.equal(daily.at(-1),points.at(-1));
   assert.equal(daily[0],points[9]);
+});
+
+test("unchanged candles retain chart inputs while metadata and recovery status update", () => {
+  const previous = { points: [{ time: FIRST_FULL_HOUR, adr: 12, ordinary: 100, equivalent: 10, spread: 2, premium: 20 }], fetchedAt: "2026-07-10T16:00:00Z", status: "snapshot" };
+  const next = { ...previous, points: structuredClone(previous.points), fetchedAt: "2026-07-10T17:00:00Z", status: "live" };
+  const retained = retainHistoryPoints(previous, next);
+  assert.equal(retained.points, previous.points);
+  assert.equal(retained.status, "live");
+  assert.equal(retained.fetchedAt, next.fetchedAt);
+  assert.equal(retainHistoryPoints(null, next), next);
+});
+
+test("historical corrections, additions and deletions always reach the chart", () => {
+  const points = alignCandles([candle(FIRST_FULL_HOUR,100), candle(FIRST_FULL_HOUR+hour,100)], [candle(FIRST_FULL_HOUR,12), candle(FIRST_FULL_HOUR+hour,12)], FIRST_FULL_HOUR+2*hour);
+  const previous = { points };
+  for (const field of ["time", "adr", "ordinary", "equivalent", "spread", "premium"]) {
+    const next = { points: structuredClone(points) };
+    next.points[0][field] += 1;
+    assert.equal(retainHistoryPoints(previous, next), next);
+    assert.notEqual(next.points, previous.points);
+  }
+  for (const changed of [points.slice(1), [...points, {...points.at(-1), time:FIRST_FULL_HOUR+2*hour}]]) {
+    const next = { points: changed };
+    assert.equal(retainHistoryPoints(previous, next), next);
+  }
 });
 test("network failure returns actual, completed, timestamped archive",async()=>{
   const data=await loadMarket(async()=>{throw new Error("offline")},Date.parse(archive.fetchedAt)+1_000);

@@ -83,7 +83,7 @@ export async function fetchSnapshot(options = {}) {
   const responses = await Promise.all([
     requestInfo({ type: 'candleSnapshot', req: { coin: ASSETS.brent.coin, interval: '1d', startTime: YEAR_START, endTime: now } }, options),
     requestInfo({ type: 'candleSnapshot', req: { coin: ASSETS.wti.coin, interval: '1d', startTime: YEAR_START, endTime: now } }, options),
-    fetchMarket(options)
+    fetchMarket(options).then(market => { options.onMarket?.(market); return market; })
   ]);
   const paired = pairDailyCandles(responses[0], responses[1], now);
   return {

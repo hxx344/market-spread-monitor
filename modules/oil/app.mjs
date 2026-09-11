@@ -16,6 +16,9 @@ const priceClass = value => value < 0 ? 'negative' : value > 0 ? 'positive' : ''
 const ns = 'http://www.w3.org/2000/svg';
 const percent = (value, digits = 5) => `${value > 0 ? '+' : value < 0 ? '−' : ''}${Math.abs(value * 100).toFixed(digits)}%`;
 const beijingTime = iso => new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(iso));
+let tableDirty = true;
+let refreshGeneration = 0;
+const tableDetails = $('data-table').closest('details');
 
 function publishSummary(status = state.marketMode) {
   if (life.signal.aborted) return;
@@ -57,9 +60,10 @@ function renderFunding() {
 }
 
 function renderStatus() {
-  if (!state.market || !state.metadata) return;
+  if (!state.market) return;
   $('connection-status').textContent = state.marketMode === 'live' ? '行情已更新' : state.marketMode === 'stale' ? '更新失败 · 保留数据' : '备用快照';
   $('data-through').textContent = `${beijingTime(state.market.fetchedAt)} 北京时间`;
+  if (!state.metadata) return;
   $('data-notice').textContent = `历史图表：${state.metadata.firstCommonObservation} — ${state.metadata.lastCommonObservation} 的已收盘 UTC 日 K。两合约共同历史从 ${state.metadata.firstCommonObservation} 开始，此前不补值。${state.historyMode === 'snapshot' ? '历史当前使用备用快照。' : ''}${state.marketMode !== 'live' ? '当前价格与资金费为保留快照，请留意采集时间。' : ''}`;
   $('data-notice').hidden = false;
   $('source-note').textContent = `历史采用 Hyperliquid 已收盘日 K（UTC），缺失日期断线，不拼接其他来源。历史采集：${beijingTime(state.metadata.fetchedAt)} 北京时间。资金费以预言机价格计算，API 小时率已含 XYZ 倍率。`;
@@ -73,11 +77,13 @@ function svgElement(tag, attributes = {}, content) {
 }
 
 function fillMetrics() {
-  const { first, latest } = summarize(state.rows);
+  if (!state.market) return;
   $('latest-spread').innerHTML = money(state.market.brent.markPx - state.market.wti.markPx);
   $('latest-brent').innerHTML = money(state.market.brent.markPx);
   $('latest-wti').innerHTML = money(state.market.wti.markPx);
   $('spread-change').textContent = '当前布伦特标记价 − WTI 标记价';
+  if (!state.rows.length) return;
+  const { first, latest } = summarize(state.rows);
   const yearChange = round(latest.spread - first.spread);
   $('ytd-change').innerHTML = `${signed(yearChange)}<small>美元 / 桶</small>`;
   $('ytd-change').classList.toggle('negative', yearChange < 0);
@@ -121,7 +127,11 @@ function renderMonthly() {
   $('monthly-note').textContent = `${labels[state.range]} · 按所选区间内的有效报价日计算；首尾月份可能不完整。`;
 }
 
-function renderTable() {
+function renderTable(changed = true) {
+  if (changed) tableDirty = true;
+  $('table-count').textContent = `${state.visible.length} 条记录`;
+  // The default-collapsed detail table must not compete with the visible charts.
+  if (!tableDetails.open || !tableDirty) return;
   const tbody = $('data-table');
   tbody.replaceChildren();
   const fragment = document.createDocumentFragment();
@@ -135,7 +145,7 @@ function renderTable() {
     fragment.append(tr);
   }
   tbody.append(fragment);
-  $('table-count').textContent = `${state.visible.length} 条记录`;
+  tableDirty = false;
 }
 
 function renderChart() {
@@ -322,7 +332,7 @@ function hideTooltip() {
   state.fundingChart?.crosshair.setAttribute('visibility', 'hidden');
 }
 
-function render() {
+function render(full = true) {
   state.visible = filterRows(state.rows, state.range);
   const summary = summarize(state.visible);
   $('range-caption').textContent = `${displayDate(summary.first.date)} — ${displayDate(summary.latest.date)} · UTC 日 K 收盘`;
@@ -332,7 +342,8 @@ function render() {
   root.querySelectorAll('[data-range]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.range === state.range)));
   root.querySelectorAll('[data-view]').forEach(button => { const active = button.dataset.view === state.view; button.setAttribute('aria-selected', String(active)); button.tabIndex = active ? 0 : -1; });
   $('chart-content').setAttribute('aria-labelledby', `${state.view}-tab`);
-  renderSummary(summary); renderMonthly(); renderTable(); renderChart();
+  if (full) { renderSummary(summary); renderMonthly(); renderTable(); }
+  renderChart();
 }
 
 function applySnapshot(snapshot, mode) {
@@ -343,40 +354,60 @@ function applySnapshot(snapshot, mode) {
   calculateShortSpreadFunding(snapshot.market);
   if (![snapshot.market.brent.markPx, snapshot.market.wti.markPx].every(value => Number.isFinite(value) && value > 0)) throw new Error('Invalid mark prices');
   state.rows = rows; state.rawDates = snapshot.data.map(row => row.date);
-  state.market = snapshot.market; state.metadata = snapshot.metadata;
-  state.marketMode = mode; state.historyMode = mode;
+  // A slow fallback/history response cannot overwrite a newer live quote.
+  if (!state.market || Date.parse(snapshot.market.fetchedAt) > Date.parse(state.market.fetchedAt)) {
+    state.market = snapshot.market; state.marketMode = mode;
+  }
+  state.metadata = snapshot.metadata; state.historyMode = mode;
   $('loading').hidden = true; $('error').hidden = true; $('dashboard').hidden = false;
   fillMetrics(); renderFunding(); renderStatus(); render();
 }
 
+function applyLiveMarket(market) {
+  if (life.signal.aborted) return;
+  state.market = market; state.marketMode = 'live';
+  fillMetrics(); renderFunding(); renderStatus();
+}
+
 async function refreshData(full = true) {
   if (life.signal.aborted || state.refreshing) return;
+  const generation = ++refreshGeneration;
+  let receivedLiveMarket = false;
   state.refreshing = true; $('refresh-data').disabled = true;
   $('connection-status').textContent = '正在更新';
   if (!state.rows.length) { $('loading').hidden = false; $('error').hidden = true; }
   try {
-    if (full || !state.rows.length) applySnapshot(await fetchSnapshot({ fetcher: life.fetch }), 'live');
+    if (full || !state.rows.length) applySnapshot(await fetchSnapshot({ fetcher: life.fetch, onMarket: market => {
+      if (generation === refreshGeneration) { applyLiveMarket(market); receivedLiveMarket = true; }
+    } }), 'live');
     else {
       const market = await fetchMarket({ fetcher: life.fetch });
-      if (life.signal.aborted) return;
-      state.market = market; state.marketMode = 'live';
-      fillMetrics(); renderFunding(); renderStatus();
+      applyLiveMarket(market);
+      receivedLiveMarket = true;
     }
   } catch (error) { if (life.signal.aborted) return;
     console.warn('Unable to refresh Hyperliquid observations:', error);
     if (full && state.rows.length) state.historyMode = 'stale';
-    if (state.rows.length) { state.marketMode = 'stale'; renderFunding(); renderStatus(); }
-    else { $('loading').hidden = true; $('error').hidden = false; $('dashboard').hidden = true; $('data-through').textContent = '数据暂不可用'; $('connection-status').textContent = '连接失败'; publishSummary('error'); }
+    if (state.market) {
+      if (!receivedLiveMarket) state.marketMode = 'stale';
+      renderFunding(); renderStatus();
+    }
+    if (!state.rows.length) {
+      $('loading').hidden = true; $('error').hidden = false; $('dashboard').hidden = true;
+      if (!state.market) { $('data-through').textContent = '数据暂不可用'; $('connection-status').textContent = '连接失败'; publishSummary('error'); }
+    }
   } finally { if (life.signal.aborted) return; state.refreshing = false; $('refresh-data').disabled = false; }
 }
 
 async function loadData() {
+  // Start live I/O immediately while the small local snapshot fills the history.
+  const live = refreshData(true);
   try {
     const response = await life.fetch('/oil/data/hyperliquid-2026.json');
     if (!response.ok) throw new Error(`Snapshot HTTP ${response.status}`);
     applySnapshot(await response.json(), 'snapshot');
   } catch (error) { if (life.signal.aborted) return; console.warn('Local fallback snapshot unavailable:', error); }
-  await refreshData(true);
+  await live;
 }
 
 function applyFundingSnapshot(snapshot, mode) {
@@ -412,14 +443,15 @@ async function loadHistoricalFunding() {
 root.querySelectorAll('[data-range]').forEach(button => button.addEventListener('click', () => { state.range = button.dataset.range; render(); }));
 const tabs = [...root.querySelectorAll('[data-view]')];
 for (const button of tabs) {
-  button.addEventListener('click', () => { state.view = button.dataset.view; render(); });
+  button.addEventListener('click', () => { state.view = button.dataset.view; render(false); });
   button.addEventListener('keydown', event => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
     const next = event.key === 'Home' ? tabs[0] : event.key === 'End' ? tabs.at(-1) : tabs[(tabs.indexOf(button) + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
-    state.view = next.dataset.view; render(); next.focus();
+    state.view = next.dataset.view; render(false); next.focus();
   });
 }
+life.on(tableDetails, 'toggle', () => { if (tableDetails.open) renderTable(false); });
 function handleChartPointer(event) {
   if (!state.chart) return;
   const rect = event.currentTarget.getBoundingClientRect();
