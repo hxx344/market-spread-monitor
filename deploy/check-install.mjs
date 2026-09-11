@@ -1,6 +1,7 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { isAbsolute } from "node:path";
 import { execFileSync } from "node:child_process";
+import { validateWebhook } from "../server/oil/feishu.mjs";
 
 const host = process.env.HOST ?? "127.0.0.1";
 const port = process.env.PORT ?? "3000";
@@ -8,6 +9,14 @@ if (!isAbsolute(process.env.ALERT_DATA_DIR ?? "")) {
   console.error("请先将 /etc/market-spread-monitor.env 中 ALERT_DATA_DIR 设为原有数据目录的绝对路径，再重新运行；原服务未切换。");
   process.exit(1);
 }
+const numericPort = Number(port);
+const oilInterval = Number(process.env.OIL_POLL_INTERVAL_SECONDS || 30);
+if (!Number.isInteger(numericPort) || numericPort < 1 || numericPort > 65535 || (process.env.APP_PASSWORD ?? "").length < 12 || (process.env.APP_USERNAME ?? "admin").includes(":") || !Number.isInteger(oilInterval) || oilInterval < 10 || oilInterval > 3600) {
+  console.error("配置无效：请检查 PORT、APP_PASSWORD（至少 12 字符）、APP_USERNAME 及 OIL_POLL_INTERVAL_SECONDS（10–3600）。原服务尚未切换。");
+  process.exit(1);
+}
+try { validateWebhook(process.env.OIL_FEISHU_WEBHOOK_URL || ""); }
+catch { console.error("OIL_FEISHU_WEBHOOK_URL 配置无效。原服务尚未切换。"); process.exit(1); }
 if (process.argv.includes("--config-only")) process.exit(0);
 if (process.argv.includes("--describe")) {
   if (["127.0.0.1", "localhost", "::1"].includes(host)) {
@@ -24,7 +33,9 @@ const base = `http://${address}:${port}`;
 const credentials = `${process.env.APP_USERNAME ?? "admin"}:${process.env.APP_PASSWORD ?? ""}`;
 const headers = { Authorization: `Basic ${Buffer.from(credentials).toString("base64")}` };
 let ready = false;
-for (let attempt = 0; attempt < 30; attempt++) {
+const quiet = process.argv.includes("--quiet");
+const attempts = process.argv.includes("--once") ? 1 : 30;
+for (let attempt = 0; attempt < attempts; attempt++) {
   try {
     const responses = await Promise.all(["/api/monitors/hynix/alerts", "/api/monitors/oil/status", "/healthz"].map(path => fetch(`${base}${path}`, { headers, signal: AbortSignal.timeout(1500) })));
     const [hynix, oil, health] = await Promise.all(responses.map(response => response.json()));
@@ -37,11 +48,11 @@ for (let attempt = 0; attempt < 30; attempt++) {
       }
     }
   } catch { /* Wait for the new service to listen. */ }
-  await delay(1000);
+  if (attempt + 1 < attempts) await delay(1000);
 }
 if (!ready) {
-  console.error("新服务未通过登录及告警 API 检查，请查看服务日志。");
+  if (!quiet) console.error("服务未通过登录及告警 API 检查，请查看服务日志。");
   process.exitCode = 1;
 } else {
-  console.log("统一登录、原油与海力士后台检查通过。");
+  if (!quiet) console.log("统一登录、原油与海力士后台检查通过。");
 }

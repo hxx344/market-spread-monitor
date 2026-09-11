@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, rm, stat, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -18,10 +18,12 @@ const installer = join(root, "deploy/install.sh");
 const scratch = await mkdtemp(join(tmpdir(), "market-spread-installer-test-"));
 const base = "http://127.0.0.1:31877";
 let headers;
+const timings = [];
 async function run(command, args) {
   return exec(command, args, { timeout: 600_000, maxBuffer: 8_000_000 });
 }
 async function install(source, succeeds = true) {
+  const started = Date.now();
   let result, failed = false;
   try {
     // Exercise the documented pipe form and automatic sudo elevation, not just bash file.sh.
@@ -29,6 +31,7 @@ async function install(source, succeeds = true) {
   } catch (error) { result = error; failed = true; }
   const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.replace(/登录密码：[^\r\n]*/g, "登录密码：[redacted]");
   assert.equal(failed, !succeeds, output.slice(-6000));
+  timings.push({ source: source.split("/").at(-1), seconds: Number(((Date.now() - started) / 1000).toFixed(2)), success: !failed });
   return output;
 }
 async function state() {
@@ -43,7 +46,7 @@ async function oilState() {
 }
 async function ready() {
   for (let i = 0; i < 40; i++) {
-    try { if ((await state()).available) return; } catch { /* Wait for rollback restart. */ }
+    try { if ((await state()).available && (await fetch(`${base}/api/monitors/oil/status`, { headers })).ok) return; } catch { /* Wait for rollback restart. */ }
     await delay(500);
   }
   throw new Error("Service did not recover");
@@ -51,6 +54,14 @@ async function ready() {
 async function current() { return (await run("readlink", ["-f", "/opt/market-spread-monitor/current"])).stdout.trim(); }
 async function active() { await run("systemctl", ["is-active", "--quiet", "market-spread-monitor.service"]); }
 async function config() { return (await run("sudo", ["cat", "/etc/market-spread-monitor.env"])).stdout; }
+async function pid() { return (await run("systemctl", ["show", "--property=MainPID", "--value", "market-spread-monitor.service"])).stdout; }
+async function replaceConfig(value) {
+  const path = join(scratch, "config.env");
+  await writeFile(path, value, { mode: 0o600 });
+  await run("sudo", ["install", "-m", "0600", path, "/etc/market-spread-monitor.env"]);
+}
+async function buildCount() { return (await run("sudo", ["cat", "/var/cache/market-spread-monitor/install-test-builds"])).stdout.trim().split("\n").length; }
+async function releases() { return (await run("find", ["/opt/market-spread-monitor/releases", "-mindepth", "1", "-maxdepth", "1", "-type", "d"])).stdout.trim().split("\n").sort(); }
 async function copySource(name) {
   const target = join(scratch, name);
   await run("mkdir", ["-p", target]);
@@ -58,8 +69,21 @@ async function copySource(name) {
   return target;
 }
 try {
+  const baseline = await copySource("baseline");
+  const manifestPath = join(baseline, "package.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  manifest.scripts["build:linux"] = "node tests/install-build-wrapper.mjs";
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  await writeFile(join(baseline, "tests/install-build-wrapper.mjs"), `import { appendFileSync, existsSync, readFileSync, writeFileSync, cpSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+appendFileSync('/var/cache/market-spread-monitor/install-test-builds', 'build\\n');
+const mode = existsSync('install-fixture-mode') ? readFileSync('install-fixture-mode','utf8').trim() : '';
+if (mode === 'fail-build') { writeFileSync('node_modules/.isolation-probe', 'new release only'); process.exit(42); }
+if (mode === 'reuse-build') { cpSync('/opt/market-spread-monitor/current/.next', '.next', {recursive:true}); }
+else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/next','build','--webpack'], {stdio:'inherit'}); process.exit(result.status ?? 1); }
+`);
   console.log("Installer: fresh install through stdin and sudo");
-  await install(root);
+  await install(baseline);
   await active();
   const originalConfig = await config();
   const values = Object.fromEntries(originalConfig.trim().split("\n").map(line => {
@@ -79,50 +103,115 @@ try {
   const oilSaved = await fetch(`${base}/api/monitors/oil/config`, { method: "PUT", headers: { ...headers, "Content-Type": "application/json", Origin: base }, body: JSON.stringify({ revision: oilInitial.revision, config: oilConfig }) });
   assert.equal(oilSaved.status, 200);
   const firstRelease = await current();
+  const firstPid = await pid();
+  assert.equal(await buildCount(), 1);
+  const firstDependencyTime = (await stat(join(firstRelease, "node_modules/.package-lock.json"))).mtimeMs;
 
-  console.log("Installer: repeat upgrade preserves password, config, and alert state");
-  await install(root);
+  console.log("Installer: unchanged source (even after touch) performs no build, install, release switch or restart");
+  await utimes(join(baseline, "README.md"), new Date(), new Date());
+  const unchanged = await install(baseline);
   await active();
-  const secondRelease = await current();
-  assert.notEqual(firstRelease, secondRelease);
+  assert.equal(firstRelease, await current());
+  assert.equal(firstPid, await pid());
+  assert.equal(await buildCount(), 1);
+  assert.equal((await releases()).length, 1);
+  assert.match(unchanged, /跳过源码下载、依赖安装、构建和重启/);
   assert.equal(await config(), originalConfig);
   assert.deepEqual((await state()).config.rules, rules);
   assert.equal((await state()).revision, savedState.revision);
   assert.deepEqual((await oilState()).config, oilConfig); assert.equal((await oilState()).revision, oilInitial.revision+1);
 
-  console.log("Installer: build failure keeps the old process running");
-  const failedBuild = await copySource("failed-build");
-  const manifestPath = join(failedBuild, "package.json");
-  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-  manifest.scripts["build:linux"] = 'node -e "process.exit(42)"';
-  await writeFile(manifestPath, JSON.stringify(manifest));
-  const pidBefore = (await run("systemctl", ["show", "--property=MainPID", "--value", "market-spread-monitor.service"])).stdout;
-  await install(failedBuild, false);
-  assert.equal(await current(), secondRelease);
-  assert.equal((await run("systemctl", ["show", "--property=MainPID", "--value", "market-spread-monitor.service"])).stdout, pidBefore);
+  console.log("Installer: configuration changes only restart, and invalid configuration leaves the old process running");
+  const expectedConfig = originalConfig.replace("OIL_POLL_INTERVAL_SECONDS=30", "OIL_POLL_INTERVAL_SECONDS=45");
+  await replaceConfig(expectedConfig);
+  const configured = await install(baseline);
+  assert.equal(await current(), firstRelease);
+  assert.notEqual(await pid(), firstPid);
+  assert.equal(await buildCount(), 1);
+  assert.match(configured, /仅应用配置或恢复服务/);
+  assert.equal((await (await fetch(`${base}/api/monitors/oil/status`, { headers })).json()).pollSeconds, 45);
+  const configuredPid = await pid();
+  await replaceConfig(expectedConfig.replace(/APP_PASSWORD=.*/, "APP_PASSWORD=short"));
+  await install(baseline, false);
+  assert.equal(await pid(), configuredPid);
+  await replaceConfig(expectedConfig);
+
+  console.log("Installer: a changed systemd override is applied even after daemon-reload");
+  const overridePath = join(scratch, "override.conf");
+  await writeFile(overridePath, "[Service]\nRestartSec=6s\n");
+  await run("sudo", ["install", "-D", "-m", "0644", overridePath, "/etc/systemd/system/market-spread-monitor.service.d/override.conf"]);
+  await run("sudo", ["systemctl", "daemon-reload"]);
+  await install(baseline);
+  assert.notEqual(await pid(), configuredPid);
+  assert.equal(await buildCount(), 1);
+
+  console.log("Installer: stopped or disabled services recover without rebuilding");
+  const overridePid = await pid();
+  await run("sudo", ["systemctl", "disable", "market-spread-monitor.service"]);
+  await install(baseline);
+  assert.equal(await pid(), overridePid);
+  await run("systemctl", ["is-enabled", "--quiet", "market-spread-monitor.service"]);
+  await run("sudo", ["systemctl", "stop", "market-spread-monitor.service"]);
+  await install(baseline);
   await active();
-  assert.equal(await config(), originalConfig);
+  assert.equal(await current(), firstRelease);
+  assert.equal(await buildCount(), 1);
+
+  console.log("Installer: new source reuses independent dependency copies and builds changed code");
+  await writeFile(join(baseline, "public/install-version-marker.txt"), "upgraded-source");
+  const upgraded = await install(baseline);
+  const secondRelease = await current();
+  assert.notEqual(firstRelease, secondRelease);
+  assert.match(upgraded, /依赖未变，复用已安装依赖/);
+  assert.ok(!upgraded.includes("正在安装依赖"));
+  assert.equal(await buildCount(), 2);
+  assert.equal((await stat(join(secondRelease, "node_modules/.package-lock.json"))).mtimeMs, firstDependencyTime);
+  assert.notEqual((await stat(join(firstRelease, "node_modules/next/package.json"))).ino, (await stat(join(secondRelease, "node_modules/next/package.json"))).ino);
+  assert.equal(await (await fetch(`${base}/install-version-marker.txt`, { headers })).text(), "upgraded-source");
+  assert.equal(await config(), expectedConfig);
+  const releaseSet = await releases();
+
+  console.log("Installer: build failure keeps the old process running");
+  await writeFile(join(baseline, "install-fixture-mode"), "fail-build");
+  const pidBefore = await pid();
+  const failedBuildOutput = await install(baseline, false);
+  assert.ok(!failedBuildOutput.includes("正在安装依赖"));
+  assert.equal(await current(), secondRelease);
+  assert.equal(await pid(), pidBefore);
+  assert.equal(existsSync(join(secondRelease, "node_modules/.isolation-probe")), false);
+  await active();
+  assert.equal(await config(), expectedConfig);
 
   console.log("Installer: failed startup restores the old release and service");
-  const failedStart = await copySource("failed-start");
-  const startupManifestPath = join(failedStart, "package.json");
-  const startupManifest = JSON.parse(await readFile(startupManifestPath, "utf8"));
-  // Application builds were verified twice above. Reuse one to isolate activation failure.
-  startupManifest.scripts["build:linux"] = "cp -a /opt/market-spread-monitor/current/.next .next";
-  await writeFile(startupManifestPath, JSON.stringify(startupManifest));
-  await writeFile(join(failedStart, "server/linux.mjs"), 'throw new Error("intentional installer rollback test");\n');
+  await writeFile(join(baseline, "install-fixture-mode"), "reuse-build");
+  const originalServer = await readFile(join(baseline, "server/linux.mjs"), "utf8");
+  await writeFile(join(baseline, "server/linux.mjs"), 'throw new Error("intentional installer rollback test");\n');
   const unitBefore = await readFile("/etc/systemd/system/market-spread-monitor.service", "utf8");
-  await install(failedStart, false);
+  await install(baseline, false);
   assert.equal(await current(), secondRelease);
   assert.equal(await readFile("/etc/systemd/system/market-spread-monitor.service", "utf8"), unitBefore);
   await ready(); await active();
-  assert.equal(await config(), originalConfig);
+  assert.equal(await config(), expectedConfig);
   assert.deepEqual((await state()).config.rules, rules);
   assert.equal((await state()).revision, savedState.revision);
-  const directories = (await run("find", ["/opt/market-spread-monitor/releases", "-mindepth", "1", "-maxdepth", "1", "-type", "d"])).stdout.trim().split("\n");
   assert.deepEqual((await oilState()).config, oilConfig); assert.equal((await oilState()).revision, oilInitial.revision+1);
-  assert.equal(directories.length, 2, "Failed releases must be removed after recovery");
-  console.log("Installer smoke passed: install, upgrade, build failure, startup rollback; no Feishu messages sent.");
+  assert.deepEqual(await releases(), releaseSet, "Failed releases must be removed after recovery");
+
+  console.log("Installer: changed npm configuration invalidates dependencies");
+  await writeFile(join(baseline, "server/linux.mjs"), originalServer);
+  await rm(join(baseline, "install-fixture-mode"));
+  await writeFile(join(baseline, ".npmrc"), "audit=false\n");
+  const changedDependencies = await install(baseline);
+  assert.match(changedDependencies, /正在安装依赖/);
+  assert.ok(!changedDependencies.includes("依赖未变"));
+  assert.notEqual(await readFile(join(await current(), ".install-dependencies"), "utf8"), await readFile(join(secondRelease, ".install-dependencies"), "utf8"));
+  assert.notEqual((await stat(join(await current(), "node_modules/.package-lock.json"))).mtimeMs, firstDependencyTime);
+  await active();
+  assert.equal(await config(), expectedConfig);
+  assert.deepEqual((await state()).config.rules, rules);
+  assert.deepEqual((await oilState()).config, oilConfig);
+  console.log("Installer timings:", JSON.stringify(timings));
+  console.log("Installer smoke passed: no-op, cache reuse, config-only restart, recovery and rollback; no Feishu messages sent.");
 } finally {
   await run("sudo", ["systemctl", "stop", "market-spread-monitor.service"]).catch(() => {});
   assert.ok(resolve(scratch).startsWith(resolve(tmpdir()) + "/market-spread-installer-test-"));
