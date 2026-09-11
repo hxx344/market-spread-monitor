@@ -1,8 +1,9 @@
 import type { LiveQuote } from "./market";
+import { createTrend, type MonitorTrend, type TrendHistory } from "./monitor-trend.ts";
 
 export type SummaryStatus = "loading" | "live" | "snapshot" | "stale" | "error";
 export type SummaryMetric = { label: string; value: string; tone?: "positive" | "negative" };
-export type MonitorSummary = { status: SummaryStatus; fetchedAt: string | null; metrics: SummaryMetric[]; note?: string };
+export type MonitorSummary = { status: SummaryStatus; fetchedAt: string | null; metrics: SummaryMetric[]; note?: string; trend?: MonitorTrend };
 export type SummaryProps = { onSummary?: (summary: MonitorSummary) => void };
 export type OilSummaryUpdate = {
   status: SummaryStatus;
@@ -10,6 +11,7 @@ export type OilSummaryUpdate = {
   fundingHourlyRate: number | null;
   fundingBasis: "quantity" | "notional";
   fetchedAt: string | null;
+  history?: TrendHistory;
 };
 
 function metric(label: string, value: number | null | undefined, digits: number, unit: string): SummaryMetric {
@@ -19,12 +21,13 @@ function metric(label: string, value: number | null | undefined, digits: number,
   return { label, value: `${sign}${Math.abs(rounded).toFixed(digits)}${unit}`, tone: rounded > 0 ? "positive" : rounded < 0 ? "negative" : undefined };
 }
 
-export function hynixSummary(quote: LiveQuote | null, error = ""): MonitorSummary {
+export function hynixSummary(quote: LiveQuote | null, error = "", trend?: MonitorTrend): MonitorSummary {
   return {
     status: quote ? error ? "stale" : "live" : error ? "error" : "loading",
     fetchedAt: quote?.fetchedAt ?? null,
     metrics: [metric("ADR 溢价率", quote?.premium, 2, "%"), metric("每份价差 · 美元", quote?.spread, 2, "")],
     note: "1 股正股 = 10 份 ADR",
+    trend: trend ?? createTrend(undefined, { days: 7, intervalMs: 3_600_000, label: "7 天小时线", shortLabel: "7天", unit: "%" }),
   };
 }
 
@@ -37,6 +40,7 @@ export function oilSummary(update?: OilSummaryUpdate): MonitorSummary {
       metric("净资金费 / 小时", update?.fundingHourlyRate == null ? null : update.fundingHourlyRate * 100, 5, "%"),
     ],
     note: `空布伦特、多 WTI · ${update?.fundingBasis === "notional" ? "等名义" : "等桶数"}`,
+    trend: createTrend(update?.history, { days: 30, intervalMs: 86_400_000, label: "30 日日线", shortLabel: "30日", unit: " 美元 / 桶" }, update?.status === "error"),
   };
 }
 

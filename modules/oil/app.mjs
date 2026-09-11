@@ -25,6 +25,7 @@ function publishSummary(status = state.marketMode) {
     fundingHourlyRate: state.market ? calculateShortSpreadFunding(state.market, state.basis).hourlyRate : null,
     fundingBasis: state.basis,
     fetchedAt: state.market?.fetchedAt ?? null,
+    history: state.metadata ? { points: state.rows.map(row => ({ time: Date.parse(`${row.date}T00:00:00Z`), value: row.spread })), status: state.historyMode, fetchedAt: state.metadata.fetchedAt } : undefined,
   });
 }
 
@@ -363,6 +364,7 @@ async function refreshData(full = true) {
     }
   } catch (error) { if (life.signal.aborted) return;
     console.warn('Unable to refresh Hyperliquid observations:', error);
+    if (full && state.rows.length) state.historyMode = 'stale';
     if (state.rows.length) { state.marketMode = 'stale'; renderFunding(); renderStatus(); }
     else { $('loading').hidden = true; $('error').hidden = false; $('dashboard').hidden = true; $('data-through').textContent = '数据暂不可用'; $('connection-status').textContent = '连接失败'; publishSummary('error'); }
   } finally { if (life.signal.aborted) return; state.refreshing = false; $('refresh-data').disabled = false; }

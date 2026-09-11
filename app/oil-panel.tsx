@@ -28,7 +28,7 @@ export default function OilPanel({ onSummary }: SummaryProps) {
       } catch (cause) {
         if (!controller.signal.aborted) {
           setError(cause instanceof Error ? cause.message : "原油面板加载失败。");
-          onSummary?.({ ...oilSummary(), status: "error" });
+          onSummary?.(oilSummary({ status: "error", spread: null, fundingHourlyRate: null, fundingBasis: "quantity", fetchedAt: null }));
         }
       }
     }

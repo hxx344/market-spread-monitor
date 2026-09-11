@@ -8,6 +8,7 @@ import AlertSettings from "./alert-settings";
 import { dailyPoints, selectRange } from "../lib/market";
 import { useMarketFeed } from "../hooks/use-market-feed";
 import { hynixSummary, type SummaryProps } from "../lib/monitor-summary";
+import { createTrend } from "../lib/monitor-trend";
 
 const EMPTY_POINTS: never[] = [];
 const money = (v: number | undefined) => v === undefined ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v);
@@ -18,7 +19,8 @@ const stamp = (t: number | string) => `${date(t,true)} ${new Date(t).toISOString
 
 export default function Dashboard({ onSummary }: SummaryProps) {
   const { data, quote, loading, error, quoteError, refresh } = useMarketFeed();
-  useEffect(() => { onSummary?.(hynixSummary(quote, quoteError)); }, [onSummary, quote, quoteError]);
+  const trend = useMemo(() => createTrend(data ? { points: data.points.map(point => ({ time: point.time, value: point.premium })), status: data.status, fetchedAt: data.fetchedAt } : undefined, { days: 7, intervalMs: 3_600_000, label: "7 天小时线", shortLabel: "7天", unit: "%" }, Boolean(error)), [data, error]);
+  useEffect(() => { onSummary?.(hynixSummary(quote, quoteError, trend)); }, [onSummary, quote, quoteError, trend]);
   const [range,setRange] = useState<number | null>(null);
   const [details,setDetails] = useState(false);
   const points = useMemo(() => selectRange(data?.points ?? [],range),[data,range]);

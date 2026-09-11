@@ -9,6 +9,8 @@ import { monitors } from "../lib/monitors";
 import { hynixSummary, oilSummary, summaryExpired, summaryStatusLabels, summaryTimestamp, type MonitorSummary } from "../lib/monitor-summary";
 import Dashboard from "./dashboard";
 import OilPanel from "./oil-panel";
+import MonitorSparkline from "./monitor-sparkline";
+import { trendExpired } from "../lib/monitor-trend";
 
 const panels = { oil: memo(OilPanel), hynix: memo(Dashboard) };
 
@@ -23,7 +25,7 @@ function CardSummary({ summary, intervalMs }: { summary: MonitorSummary; interva
   const timestamp = summaryTimestamp(summary.fetchedAt);
   const expired = summaryExpired(summary, intervalMs, now);
   return <>
-    <span className="hub-card-metrics">{summary.metrics.map(metric => <span key={metric.label}><small>{metric.label}</small><strong className={metric.tone}>{metric.value}</strong></span>)}</span>
+    <span className="hub-card-metrics">{summary.metrics.map((metric, index) => <span key={metric.label}><small>{metric.label}</small><span className="hub-metric-reading"><strong className={metric.tone}>{metric.value}</strong>{index === 0 && summary.trend && <MonitorSparkline trend={summary.trend} expired={trendExpired(summary.trend, now)}/>}</span></span>)}</span>
     {summary.note && <span className="hub-card-note">{summary.note}</span>}
     <span className={`hub-card-status ${expired ? "stale" : summary.status}`}><span><i aria-hidden="true"/>{expired ? "报价待更新" : summaryStatusLabels[summary.status]}</span>{timestamp && <time dateTime={summary.fetchedAt!}>{timestamp} 北京时间</time>}</span>
   </>;
