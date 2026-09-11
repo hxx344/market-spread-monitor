@@ -34,7 +34,7 @@ export function useMarketFeed() {
     const live = startPolling({
       intervalMs: QUOTE_REFRESH_MS,
       load: signal => request<LiveQuote>("/api/monitors/hynix/quote",signal),
-      onData: next => { setQuote(next); setQuoteError(""); },
+      onData: next => { setQuote(next); setQuoteError(next.status === "snapshot" ? "后台尚未取得新报价，显示上次保存的数据；请留意采集时间。" : ""); },
       onError: () => setQuoteError("实时报价更新失败，10 秒后自动重试；请留意报价获取时间。"),
       onSettled: () => setQuoteLoading(false),
     });

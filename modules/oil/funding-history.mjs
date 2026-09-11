@@ -111,9 +111,15 @@ export async function fetchFundingHistory(coin, startTime, endTime, options = {}
 
 /** @param {{ data: Array<{time: number, brent: number | null, wti: number | null}>, metadata: {fetchedAt: string} } | null} existing */
 export async function fetchFundingSnapshot(existing = null, options = {}) {
-  const now = Date.now(), endTime = Math.min(now, YEAR_END - 1);
+  const now = options.now ?? Date.now(), endTime = Math.min(now, YEAR_END - 1);
   const previous = existing ? createFundingSnapshot(existing.data, existing.metadata.fetchedAt) : null;
-  const startTime = previous ? Math.max(YEAR_START, previous.metadata.lastSettlementTime - 2 * DAY) : YEAR_START;
+  let missing = Infinity, expected = previous?.data[0]?.time;
+  for (const row of previous?.data ?? []) {
+    if (row.time > expected) missing = Math.min(missing, expected);
+    if (row.brent === null || row.wti === null) missing = Math.min(missing, row.time);
+    expected = row.time + HOUR;
+  }
+  const startTime = previous ? Math.max(YEAR_START, Math.min(previous.metadata.lastSettlementTime - 2 * DAY, missing)) : YEAR_START;
   const [brent, wti] = await Promise.all([
     fetchFundingHistory(ASSETS.brent.coin, startTime, endTime, options),
     fetchFundingHistory(ASSETS.wti.coin, startTime, endTime, options)

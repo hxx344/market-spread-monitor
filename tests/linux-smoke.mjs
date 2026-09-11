@@ -5,6 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { DatabaseSync } from "node:sqlite";
 
 const directory = await mkdtemp(join(tmpdir(), "market-spread-linux-smoke-"));
 const probe = createServer();
@@ -73,9 +74,21 @@ try {
   const fundingHistory = await fundingResponse.json();
   assert.ok(["live", "snapshot"].includes(fundingHistory.status));
   assert.ok(fundingHistory.rows.length >= 1512 && fundingHistory.metadata.pairedHours >= 1512);
+  assert.equal(fundingHistory.collection.source, "database");
+  const databasePath = join(directory, "market.sqlite");
+  const inspect = () => {
+    const database = new DatabaseSync(databasePath, { readOnly: true });
+    try { return { datasets: database.prepare('SELECT key,attempt_ms FROM market_datasets ORDER BY key').all(), funding: database.prepare("SELECT count(*) AS count FROM market_observations WHERE dataset='hynix/funding'").get().count }; }
+    finally { database.close(); }
+  };
+  let collected = inspect();
+  for (let attempt = 0; attempt < 90 && collected.datasets.some(dataset => !dataset.attempt_ms); attempt++) { await delay(500); collected = inspect(); }
+  assert.equal(collected.datasets.length, 6);
+  assert.ok(collected.datasets.every(dataset => dataset.attempt_ms), "All six datasets collect in the background");
   const oilStatus = await fetch(`${base}/api/monitors/oil/status`, { headers }).then(r=>r.json());
   assert.ok(oilStatus.lastAttemptAt, "Oil monitor runs independently of page visits");
   await stop(); start(); await ready();
+  assert.ok(inspect().funding >= collected.funding, "Database observations survive server restart");
   const restarted = await state();
   assert.equal(restarted.config.rules.length, 2); assert.equal(restarted.revision, 1);
   assert.equal(restarted.config.rules[0].cooldownSeconds, 90); assert.equal(restarted.config.rules[0].hysteresis, 0.25);

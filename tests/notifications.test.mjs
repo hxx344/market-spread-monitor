@@ -182,7 +182,7 @@ test("oil also checks freshness after waiting behind other modules in the shared
 
 test("runtime migration preserves the legacy file for failed-first-start rollback and future rule saves persist without local credentials", async t => {
   let restarted;
-  t.after(async () => { if (restarted) await Promise.all([...restarted.values()].map(service => service.stop())); });
+  t.after(async () => { if (restarted) { await Promise.all([...restarted.values()].map(service => service.stop())); await restarted.market.stop(); } });
   const directory = await temporary(t), hynixDirectory = join(directory, "hynix");
   const oldStore = await openStore(hynixDirectory), old = initialState();
   old.config = { ...old.config, ...first, enabled: true, rules }; old.revision = 7;
@@ -193,6 +193,7 @@ test("runtime migration preserves the legacy file for failed-first-start rollbac
   let deliveries = 0;
   const services = await createMonitorServices(directory, { env: {}, notificationOptions: { deliver: async () => { deliveries++; } } });
   await Promise.all([...services.values()].map(service => service.stop()));
+  await services.market.stop();
   assert.equal(await readFile(join(hynixDirectory, "alerts.json"), "utf8"), previousFile);
   assert.deepEqual((await openStore(hynixDirectory)).get(), old);
   assert.equal(services.notifications.view().webhookConfigured, true); assert.equal(deliveries, 0);
@@ -206,7 +207,7 @@ test("runtime migration preserves the legacy file for failed-first-start rollbac
 
 test("the global API authenticates and validates writes, hides credentials, and keeps module test aliases on one throttle", async t => {
   let server, services;
-  t.after(async () => { if (server) await new Promise(resolve => server.close(resolve)); if (services) await Promise.all([...services.values()].map(service => service.stop())); });
+  t.after(async () => { if (server) await new Promise(resolve => server.close(resolve)); if (services) { await Promise.all([...services.values()].map(service => service.stop())); await services.market.stop(); } });
   const directory = await temporary(t); let deliveries = 0;
   services = await createMonitorServices(directory, { env: {}, notificationOptions: { deliver: async () => { deliveries++; } } });
   server = createServer(createHandler({ services, username: "admin", password: "test-password-123", nextHandler: (_request, response) => { response.writeHead(404); response.end(); } }));

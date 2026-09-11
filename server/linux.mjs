@@ -20,9 +20,10 @@ await app.prepare();
 server = createServer(createHandler({ services, username, password, nextHandler: app.getRequestHandler() }));
 server.requestTimeout = 30_000;
 await new Promise((accept, reject) => { server.once("error", reject); server.listen(port, host, accept); });
+services.market.start();
 for (const service of services.values()) service.start();
 console.log(`Market Monitor is listening on http://${host}:${port}; oil and Hynix monitors are running.`);
-} catch (error) { await Promise.allSettled([...services.values()].map(service => service.stop())); throw error; }
+} catch (error) { await Promise.allSettled([...services.values()].map(service => service.stop())); await services.market.stop(); await services.notifications.stop(); throw error; }
 let closing = false;
 async function shutdown() {
   if (closing) return;
@@ -32,6 +33,7 @@ async function shutdown() {
   await closed;
   // Drain active configuration requests before stopping persistence or releasing locks.
   await Promise.all([...services.values()].map(service => service.stop()));
+  await services.market.stop();
   await services.notifications.stop();
   await app.close();
   clearTimeout(timeout);

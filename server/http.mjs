@@ -25,7 +25,7 @@ export function createHandler({ service, services, username, password, nextHandl
     try {
       const path = new URL(request.url, "http://localhost").pathname;
       if (path === "/healthz" && request.method === "GET") {
-        const healthy = !services || ([...services.values()].every(service => !service.healthy || service.healthy()) && (!services.notifications || services.notifications.healthy()));
+        const healthy = !services || ([...services.values()].every(service => !service.healthy || service.healthy()) && (!services.notifications || services.notifications.healthy()) && (!services.market || services.market.healthy()));
         return json(response, healthy ? 200 : 503, { status: healthy ? "ok" : "degraded", service: "market-spread-monitor", monitors: services ? [...services.keys()] : ["hynix"] });
       }
       if (!equal(request.headers.authorization ?? "", `Basic ${credential}`)) {
@@ -71,6 +71,10 @@ export function createHandler({ service, services, username, password, nextHandl
       if (path === "/api/quote" && request.method === "GET") {
         try { return json(response, 200, await service.quote()); }
         catch { return json(response, 503, { error: "实时行情暂不可用" }); }
+      }
+      if (services && path === "/api/market" && request.method === "GET") {
+        request.url = "/api/monitors/hynix/history";
+        return createHandler({ services, username, password, nextHandler })(request, response);
       }
       if (path === "/api/alerts" || path === "/api/alerts/test") {
         if (path === "/api/alerts" && request.method === "GET") return json(response, 200, service.view());

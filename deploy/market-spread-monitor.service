@@ -1,5 +1,5 @@
 [Unit]
-Description=Market Monitor dashboard and Feishu alert monitor
+Description=Market Monitor collection, database, dashboard and Feishu alerts
 Wants=network-online.target
 After=network-online.target
 

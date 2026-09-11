@@ -32,6 +32,7 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/market-spread-monitor/main/d
 | 当前版本 | `/opt/market-spread-monitor/current` |
 | 历史版本 | `/opt/market-spread-monitor/releases` |
 | 配置 | `/etc/market-spread-monitor.env`，权限 0600 |
+| 行情数据库 | `/var/lib/market-spread-monitor/market.sqlite`，含最新快照、采集状态和逐条行情/资金费记录 |
 | 海力士状态 | `/var/lib/market-spread-monitor/hynix/alerts.json` |
 | 原油状态 | `/var/lib/market-spread-monitor/oil/monitor.json` |
 | 单实例锁 | `/var/lib/market-spread-monitor/instance.lock` |
@@ -49,6 +50,10 @@ sudo systemctl restart market-spread-monitor
 旧海力士机器人和旧 `OIL_FEISHU_WEBHOOK_URL` / `OIL_FEISHU_WEBHOOK_SECRET` 只在全局文件首次创建时迁移。两处配置相同或只有一处时直接沿用；不同则在统一设置中选择共用哪一个，选择前暂停发送。之后全局文件优先，清除机器人后不会被旧环境变量重新启用。首次迁移保留旧模块文件用于启动失败回滚；首次主动保存海力士阈值后，模块文件切换为不存储机器人凭据的 v2 格式。开启机器人关键词校验时，请添加“告警”。
 
 `GET /healthz` 检查进程与存储健康；外部行情临时失败在各面板单独显示。业务页面统一登录，API 写操作要求同源和 JSON。内核 `flock` 拒绝同一数据目录的重复进程，异常退出自动释放。
+
+服务首次启动自动建库并导入已有价格及资金费历史，不覆盖已有数据库。采集器与页面请求独立：海力士报价每 10 秒、原油报价按 `OIL_POLL_INTERVAL_SECONDS`、海力士小时历史每 60 秒、原油日线及两个市场的资金费每 5 分钟更新。历史更新从数据库接续并回补缺口，报价按实际采集时间保存，历史按原始时段去重。页面接口只读库；断网或上游限流时立即返回已保存数据并标明过期，不等待外部接口。
+
+SQLite 使用 WAL 和事务，行情记录与最新快照同时提交，落盘失败不向告警提供新报价。正常关闭会等待在途采集完成后关闭数据库。备份时停止服务再复制整个数据目录，包含可能存在的 `market.sqlite-wal` 和 `market.sqlite-shm`；不要仅复制正在运行中的主数据库文件。数据目录与代码版本分离，重复部署、升级和回滚均会保留数据库。
 
 HTTPS 反向代理可将 `HOST=127.0.0.1`，参考 [nginx 配置](nginx.conf.example)。保留 Host 和 Authorization，让网页与 API 同源。
 

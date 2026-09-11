@@ -13,7 +13,7 @@ export type HynixFunding = {
   annualizedRate: number;
   fetchedAt: string;
 };
-export type LiveQuote = Omit<Point, "time"> & { fetchedAt: string; funding?: HynixFunding | null; fundingError?: string };
+export type LiveQuote = Omit<Point, "time"> & { fetchedAt: string; funding?: HynixFunding | null; fundingError?: string; status?: "live" | "snapshot" };
 export type MarketData = {
   points: Point[];
   fetchedAt: string;

@@ -20,7 +20,7 @@ interface DataAdapter {
 }
 ```
 
-`GET /api/monitors/{id}/{action}` 路由至适配器，capabilities 只声明已实现的能力。新增 quote/history/funding 以外的能力时，同步扩展接口允许列表；不能按用户输入动态加载文件。
+网页预览的 `GET /api/monitors/{id}/{action}` 路由至此适配器，capabilities 只声明已实现的能力。Linux 服务中的同名接口由常驻后台截获并只读 SQLite。新增 quote/history/funding 以外的能力时，同步扩展接口允许列表；不能按用户输入动态加载文件。
 
 缓存按 `id/action` 隔离并合并并发请求：实时报价 5 秒、历史 60 秒、资金费 5 分钟、快照回退 15 秒。失败在下次调用重试，不把旧报价重新标记为实时。
 
@@ -35,9 +35,11 @@ interface DataAdapter {
 | `oil/history` | `data, market, metadata, status` |
 | `oil/funding` | `data, metadata, status`，UTC 小时资金费 |
 
-实时失败必须抛错，由接口返回 503。历史才可回退到有来源与采集时间的快照，前端明确提示。不能补零、用今日价格生成旧历史，或将采集时间当作交易所未提供的行情时间。
+网页预览的实时失败抛错并返回 503。Linux 可返回已保存报价，必须附带 `status: "snapshot"` 和 `collection.stale: true`，没有记录才返回 503。采集时间永不因读取而更新，过期报价不能用于告警。历史回退保留原来源与采集时间，前端明确提示。不能补零、用今日价格生成旧历史，或将采集时间当作交易所未提供的行情时间。
 
-原油面板保留原始公共数据请求和增量资金费缓存；统一接口同时供后续集成使用。海力士面板通过统一接口取数。
+原油与海力士面板均通过统一接口取数，不在浏览器内直接调用交易所。Linux 后台的数据验证集中在 `lib/market-validation.ts`；在 `server/market-store.mjs` 注册数据集，在 `server/market-collector.mjs` 增加周期、采集函数与初始历史。采集函数接收数据库上次成功快照，需保留旧历史并合并补全记录；不得从页面 GET 触发采集或改写数据库。
+
+`market_datasets` 保存最新完整快照、源采集时间、最近尝试、成功和错误；`market_observations` 按数据集和原始时间保存逐条记录。两表同事务写入，重复导入不覆盖已保存数据。结构版本由 `PRAGMA user_version` 管理，后续变更应追加可兼容迁移，拒绝未知版本。数据库只位于 `ALERT_DATA_DIR/market.sqlite`，不写回源码。
 
 ## 统一告警编辑器
 
@@ -69,7 +71,7 @@ interface DataAdapter {
 
 公共 `server/http.mjs` 负责统一登录、同源保护、请求体大小、JSON 检查、方法校验和错误状态码。只分发显式声明的 action，未知 ID 不可访问；配置版本冲突使用 `error.status = 409`。
 
-每个模块使用 `ALERT_DATA_DIR/{id}`，维护独立数据版本、revision 和原子写入。持久化失败不得继续无限重发通知；不要读写其他模块状态。初始化失败释放已取得资源，关闭时先排空 HTTP，再停止后台。
+每个模块使用 `ALERT_DATA_DIR/{id}` 保存告警状态，维护独立数据版本、revision 和原子写入；行情由共享的 `services.market` 管理 SQLite 与独立采集调度。报价落盘后触发告警检查，告警也继续定时检查，均只使用库中未过期报价。持久化失败不得继续无限重发通知；不要读写其他模块状态。初始化失败释放已取得资源，关闭时先排空 HTTP，再停止告警、采集并关闭数据库和通知服务。
 
 | Linux 专用接口 | 方法 | 用途 |
 | --- | --- | --- |

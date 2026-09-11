@@ -48,6 +48,12 @@ async function sharedState() {
   const response = await fetch(`${base}/api/notifications/feishu`, { headers, signal: AbortSignal.timeout(3000) });
   assert.equal(response.status, 200); return response.json();
 }
+async function databaseMarker(write = false) {
+  const script = `import { DatabaseSync } from 'node:sqlite'; const db=new DatabaseSync('/var/lib/market-spread-monitor/market.sqlite');
+    if(process.argv[1]==='write') db.prepare('INSERT OR IGNORE INTO market_observations(dataset,time,payload,source_ms) VALUES (?,?,?,?)').run('install/retention',1,'persisted',1);
+    console.log(db.prepare('SELECT payload FROM market_observations WHERE dataset=? AND time=?').get('install/retention',1)?.payload); db.close();`;
+  return (await run('sudo', [process.execPath, '--input-type=module', '-e', script, write ? 'write' : 'read'])).stdout.trim();
+}
 async function ready() {
   for (let i = 0; i < 40; i++) {
     try { if ((await state()).available && (await fetch(`${base}/api/monitors/oil/status`, { headers })).ok) return; } catch { /* Wait for rollback restart. */ }
@@ -98,6 +104,10 @@ else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/n
   assert.equal((await fetch(base)).status, 401);
   assert.equal((await fetch(base, { headers })).status, 200);
   const initial = await state();
+  const persistedFunding = await fetch(`${base}/api/monitors/hynix/funding`, { headers }).then(response => response.json());
+  assert.equal(persistedFunding.collection.source, 'database');
+  assert.ok(persistedFunding.rows.length >= 1512);
+  assert.equal(await databaseMarker(true), 'persisted');
   const rules = [{ id: "install-test", name: "保存后升级", enabled: false, direction: "above", threshold: 40 }];
   const saved = await fetch(`${base}/api/alerts`, { method: "PUT", headers: { ...headers, "Content-Type": "application/json", Origin: base }, body: JSON.stringify({ enabled: false, cooldownSeconds: 60, hysteresis: 0.5, revision: initial.revision, rules }) });
   assert.equal(saved.status, 200);
@@ -181,6 +191,7 @@ else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/n
   assert.equal(await (await fetch(`${base}/install-version-marker.txt`, { headers })).text(), "upgraded-source");
   assert.equal(await config(), expectedConfig);
   const releaseSet = await releases();
+  assert.equal(await databaseMarker(), 'persisted', 'Source upgrade preserves the existing SQLite database');
 
   console.log("Installer: build failure keeps the old process running");
   await writeFile(join(baseline, "install-fixture-mode"), "fail-build");
@@ -207,6 +218,7 @@ else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/n
   assert.equal((await state()).revision, savedState.revision);
   assert.deepEqual((await oilState()).config, oilConfig); assert.equal((await oilState()).revision, oilInitial.revision+1);
   assert.deepEqual(await releases(), releaseSet, "Failed releases must be removed after recovery");
+  assert.equal(await databaseMarker(), 'persisted', 'Failed startup rollback preserves the existing SQLite database');
 
   console.log("Installer: changed npm configuration invalidates dependencies");
   await writeFile(join(baseline, "server/linux.mjs"), originalServer);
@@ -224,6 +236,7 @@ else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/n
   console.log("Installer timings:", JSON.stringify(timings));
   assert.deepEqual(await sharedState(), sharedConfig);
   console.log("Installer smoke passed: no-op, cache reuse, config-only restart, recovery, rollback and shared Feishu persistence; no Feishu messages sent.");
+  assert.equal(await databaseMarker(), 'persisted', 'Dependency rebuild preserves the existing SQLite database');
 } finally {
   await run("sudo", ["systemctl", "stop", "market-spread-monitor.service"]).catch(() => {});
   assert.ok(resolve(scratch).startsWith(resolve(tmpdir()) + "/market-spread-installer-test-"));

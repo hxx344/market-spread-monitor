@@ -1,6 +1,6 @@
 import { round, signed, validateRows, filterRows, summarize, monthlyAverages, chartDomain } from './data-utils.mjs';
-import { fetchSnapshot, fetchMarket, calculateShortSpreadFunding, DAY } from './hyperliquid.mjs';
-import { fetchFundingSnapshot, createFundingSnapshot, dailyFundingRates, analyzeFundingRange } from './funding-history.mjs';
+import { calculateShortSpreadFunding, DAY } from './hyperliquid.mjs';
+import { createFundingSnapshot, dailyFundingRates, analyzeFundingRange } from './funding-history.mjs';
 
 import { createLifecycle } from './lifecycle.mjs';
 /** @param {ShadowRoot} root @param {{ onSummary?: (summary: import('../../lib/monitor-summary').OilSummaryUpdate) => void }} options */
@@ -382,7 +382,7 @@ function render(full = true) {
 
 function applySnapshot(snapshot, mode) {
   if (life.signal.aborted) return;
-  if (mode === 'snapshot' && state.rows.length) return;
+  if (state.metadata && Date.parse(snapshot.metadata.fetchedAt) < Date.parse(state.metadata.fetchedAt)) return;
   const rows = validateRows(snapshot.data.filter(row => row.brent !== null && row.wti !== null));
   if (rows.at(-1).date !== snapshot.metadata.lastCommonObservation || rows[0].date !== snapshot.metadata.firstCommonObservation || rows.length !== snapshot.metadata.pairedObservationRows || !Number.isFinite(Date.parse(snapshot.metadata.fetchedAt)) || !Number.isFinite(Date.parse(snapshot.market.fetchedAt))) throw new Error('Observation metadata mismatch');
   calculateShortSpreadFunding(snapshot.market);
@@ -399,8 +399,17 @@ function applySnapshot(snapshot, mode) {
 
 function applyLiveMarket(market) {
   if (life.signal.aborted) return;
-  state.market = market; state.marketMode = 'live';
+  if (state.market && Date.parse(market.fetchedAt) < Date.parse(state.market.fetchedAt)) return;
+  calculateShortSpreadFunding(market);
+  if (!Number.isFinite(Date.parse(market.fetchedAt)) || ![market.brent.markPx, market.wti.markPx].every(value => Number.isFinite(value) && value > 0)) throw new Error('Invalid market quote');
+  state.market = market; state.marketMode = market.status === 'snapshot' ? 'stale' : 'live';
   fillMetrics(); renderFunding(); renderStatus();
+}
+
+async function readMarketData(action) {
+  const response = await life.fetch(`/api/monitors/oil/${action}`, { cache: 'no-store', signal: AbortSignal.timeout(15_000) });
+  if (!response.ok) throw new Error(`Market data HTTP ${response.status}`);
+  return response.json();
 }
 
 async function refreshData(full = true) {
@@ -411,14 +420,13 @@ async function refreshData(full = true) {
   $('connection-status').textContent = '正在更新';
   if (!state.rows.length) { $('loading').hidden = false; $('error').hidden = true; }
   try {
-    if (full || !state.rows.length) applySnapshot(await fetchSnapshot({ fetcher: life.fetch, onMarket: market => {
-      if (generation === refreshGeneration) { applyLiveMarket(market); receivedLiveMarket = true; }
-    } }), 'live');
-    else {
-      const market = await fetchMarket({ fetcher: life.fetch });
-      applyLiveMarket(market);
-      receivedLiveMarket = true;
-    }
+    const reads = [readMarketData('quote').then(market => {
+      if (generation === refreshGeneration) { applyLiveMarket(market); receivedLiveMarket = market.status !== 'snapshot'; }
+    })];
+    if (full || !state.rows.length) reads.push(readMarketData('history').then(snapshot => applySnapshot(snapshot, snapshot.status === 'snapshot' ? 'snapshot' : 'live')));
+    const results = await Promise.allSettled(reads);
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed) throw failed.reason;
   } catch (error) { if (life.signal.aborted) return;
     console.warn('Unable to refresh Hyperliquid observations:', error);
     if (full && state.rows.length) state.historyMode = 'stale';
@@ -434,19 +442,12 @@ async function refreshData(full = true) {
 }
 
 async function loadData() {
-  // Start live I/O immediately while the small local snapshot fills the history.
-  const live = refreshData(true);
-  try {
-    const response = await life.fetch('/oil/data/hyperliquid-2026.json');
-    if (!response.ok) throw new Error(`Snapshot HTTP ${response.status}`);
-    applySnapshot(await response.json(), 'snapshot');
-  } catch (error) { if (life.signal.aborted) return; console.warn('Local fallback snapshot unavailable:', error); }
-  await live;
+  await refreshData(true);
 }
 
 function applyFundingSnapshot(snapshot, mode) {
   if (life.signal.aborted) return;
-  if (mode === 'snapshot' && state.fundingSnapshot) return;
+  if (state.fundingSnapshot && Date.parse(snapshot.metadata.fetchedAt) < Date.parse(state.fundingSnapshot.metadata.fetchedAt)) return;
   const validated = createFundingSnapshot(snapshot.data, snapshot.metadata.fetchedAt);
   if (validated.metadata.pairedObservationRows !== snapshot.metadata.pairedObservationRows || validated.metadata.firstSettlementTime !== snapshot.metadata.firstSettlementTime || validated.metadata.lastSettlementTime !== snapshot.metadata.lastSettlementTime) throw new Error('Funding metadata mismatch');
   state.fundingSnapshot = validated; state.fundingHistoryMode = mode;
@@ -457,7 +458,7 @@ function applyFundingSnapshot(snapshot, mode) {
 async function refreshHistoricalFunding() {
   if (life.signal.aborted || state.fundingRefreshing) return;
   state.fundingRefreshing = true;
-  try { applyFundingSnapshot(await fetchFundingSnapshot(state.fundingSnapshot, { fetcher: life.fetch }), 'live'); }
+  try { const snapshot = await readMarketData('funding'); applyFundingSnapshot(snapshot, snapshot.status === 'snapshot' ? 'snapshot' : 'live'); }
   catch (error) { if (life.signal.aborted) return;
     console.warn('Unable to update settled funding history:', error);
     state.fundingHistoryMode = state.fundingSnapshot ? 'stale' : 'error';
@@ -466,11 +467,6 @@ async function refreshHistoricalFunding() {
 }
 
 async function loadHistoricalFunding() {
-  try {
-    const response = await life.fetch('/oil/data/hyperliquid-funding-2026.json');
-    if (!response.ok) throw new Error(`Funding snapshot HTTP ${response.status}`);
-    applyFundingSnapshot(await response.json(), 'snapshot');
-  } catch (error) { if (life.signal.aborted) return; console.warn('Local funding snapshot unavailable:', error); }
   await refreshHistoricalFunding();
 }
 
