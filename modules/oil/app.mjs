@@ -3,7 +3,8 @@ import { fetchSnapshot, fetchMarket, calculateShortSpreadFunding, DAY } from './
 import { fetchFundingSnapshot, createFundingSnapshot, dailyFundingRates } from './funding-history.mjs';
 
 import { createLifecycle } from './lifecycle.mjs';
-export function mount(root) {
+/** @param {ShadowRoot} root @param {{ onSummary?: (summary: import('../../lib/monitor-summary').OilSummaryUpdate) => void }} options */
+export function mount(root, { onSummary } = {}) {
 const life = createLifecycle();
 const $ = id => root.getElementById(id);
 const state = { rows: [], rawDates: [], range: 'ytd', view: 'spread', visible: [], chart: null, selectedDate: null, market: null, metadata: null, basis: 'quantity', marketMode: 'snapshot', historyMode: 'snapshot', refreshing: false, fundingSnapshot: null, fundingDaily: new Map(), fundingChart: null, fundingHistoryMode: 'loading', fundingRefreshing: false };
@@ -15,6 +16,17 @@ const priceClass = value => value < 0 ? 'negative' : value > 0 ? 'positive' : ''
 const ns = 'http://www.w3.org/2000/svg';
 const percent = (value, digits = 5) => `${value > 0 ? '+' : value < 0 ? '−' : ''}${Math.abs(value * 100).toFixed(digits)}%`;
 const beijingTime = iso => new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(iso));
+
+function publishSummary(status = state.marketMode) {
+  if (life.signal.aborted) return;
+  onSummary?.({
+    status,
+    spread: state.market ? state.market.brent.markPx - state.market.wti.markPx : null,
+    fundingHourlyRate: state.market ? calculateShortSpreadFunding(state.market, state.basis).hourlyRate : null,
+    fundingBasis: state.basis,
+    fetchedAt: state.market?.fetchedAt ?? null,
+  });
+}
 
 function showSignedValue(id, text, value) {
   const element = $(id);
@@ -40,6 +52,7 @@ function renderFunding() {
   $('funding-basis-note').textContent = state.basis === 'quantity' ? `空 1 桶布伦特、多 1 桶 WTI：预计每小时${result.hourlyCashflow < 0 ? '净付' : '净收'} $${Math.abs(result.hourlyCashflow).toFixed(6)}；总名义 $${result.grossNotional.toFixed(3)}。` : '两腿按预言机价格定义等美元名义，桶数不同；净率不以保证金或单腿名义为分母。';
   $('funding-timestamp').textContent = `${state.marketMode === 'live' ? '行情采集' : '保留数据'}：${beijingTime(state.market.fetchedAt)}（北京时间）`;
   root.querySelectorAll('[data-basis]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.basis === state.basis)));
+  publishSummary();
 }
 
 function renderStatus() {
@@ -351,7 +364,7 @@ async function refreshData(full = true) {
   } catch (error) { if (life.signal.aborted) return;
     console.warn('Unable to refresh Hyperliquid observations:', error);
     if (state.rows.length) { state.marketMode = 'stale'; renderFunding(); renderStatus(); }
-    else { $('loading').hidden = true; $('error').hidden = false; $('dashboard').hidden = true; $('data-through').textContent = '数据暂不可用'; $('connection-status').textContent = '连接失败'; }
+    else { $('loading').hidden = true; $('error').hidden = false; $('dashboard').hidden = true; $('data-through').textContent = '数据暂不可用'; $('connection-status').textContent = '连接失败'; publishSummary('error'); }
   } finally { if (life.signal.aborted) return; state.refreshing = false; $('refresh-data').disabled = false; }
 }
 
@@ -445,6 +458,7 @@ let resizeFrame;
 const resizeObserver = new ResizeObserver(() => { if (life.signal.aborted) return; cancelAnimationFrame(resizeFrame); resizeFrame = requestAnimationFrame(() => { if (!life.signal.aborted && state.visible.length) renderChart(); }); }); resizeObserver.observe($('chart-area'));
 
 
+publishSummary('loading');
 loadData();
 loadHistoricalFunding();
 return { setView(input) { if (!['1m','3m','ytd'].includes(input.range) || !['spread','prices'].includes(input.view)) throw new Error('Invalid chart view'); if (!state.rows.length) throw new Error('行情尚未加载'); state.range=input.range; state.view=input.view; render(); return summarize(state.visible); }, dispose() { life.dispose(); clearInterval(refreshTimer); resizeObserver.disconnect(); cancelAnimationFrame(resizeFrame); } };

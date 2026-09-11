@@ -3,9 +3,10 @@
 import { useEffect, useRef, useState } from "react";
 import { mount as mountChart } from "../modules/oil/app.mjs";
 import { mount as mountAlerts } from "../modules/oil/alerts.mjs";
+import { oilSummary, type SummaryProps } from "../lib/monitor-summary";
 type Mounted = { dispose: () => void };
 
-export default function OilPanel() {
+export default function OilPanel({ onSummary }: SummaryProps) {
   const host = useRef<HTMLDivElement>(null);
   const [error, setError] = useState("");
   useEffect(() => {
@@ -21,15 +22,18 @@ export default function OilPanel() {
         controller.signal.throwIfAborted();
         // This markup is a checked-in first-party asset, never user/API HTML.
         root.innerHTML = `<style>${css}</style>${html}`;
-        mounted.push(mountChart(root));
+        mounted.push(mountChart(root, { onSummary: update => onSummary?.(oilSummary(update)) }));
         mounted.push(mountAlerts(root));
         root.querySelectorAll<HTMLAnchorElement>("[data-local-anchor]").forEach(anchor => anchor.addEventListener("click", event => { event.preventDefault(); root.getElementById(anchor.hash.slice(1))?.scrollIntoView({ behavior: "smooth" }); }, { signal: controller.signal }));
       } catch (cause) {
-        if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "原油面板加载失败。");
+        if (!controller.signal.aborted) {
+          setError(cause instanceof Error ? cause.message : "原油面板加载失败。");
+          onSummary?.({ ...oilSummary(), status: "error" });
+        }
       }
     }
     void load();
     return () => { controller.abort(); mounted.forEach(panel => panel.dispose()); root.replaceChildren(); };
-  }, []);
+  }, [onSummary]);
   return <>{error && <p role="alert" className="notice error">{error}</p>}<div ref={host} data-monitor="oil" /></>;
 }

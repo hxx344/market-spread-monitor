@@ -1,12 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Activity, ArrowDownRight, ArrowUpRight, ChevronDown, Clock3, Info, RefreshCw, MoveRight, BarChart3 } from "lucide-react";
 import SpreadChart, { ranges } from "./spread-chart";
 import AlertSettings from "./alert-settings";
 import { dailyPoints, selectRange } from "../lib/market";
 import { useMarketFeed } from "../hooks/use-market-feed";
+import { hynixSummary, type SummaryProps } from "../lib/monitor-summary";
 
 const EMPTY_POINTS: never[] = [];
 const money = (v: number | undefined) => v === undefined ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v);
@@ -15,8 +16,9 @@ const signedMoney = (v: number | undefined) => v === undefined ? "—" : `${v > 
 const date = (t: number | string, full=false) => new Intl.DateTimeFormat("zh-CN", { timeZone:"UTC", month:"2-digit", day:"2-digit", ...(full ? {year:"numeric"} : {}) }).format(new Date(t));
 const stamp = (t: number | string) => `${date(t,true)} ${new Date(t).toISOString().slice(11,16)} UTC`;
 
-export default function Dashboard() {
+export default function Dashboard({ onSummary }: SummaryProps) {
   const { data, quote, loading, error, quoteError, refresh } = useMarketFeed();
+  useEffect(() => { onSummary?.(hynixSummary(quote, quoteError)); }, [onSummary, quote, quoteError]);
   const [range,setRange] = useState<number | null>(null);
   const [details,setDetails] = useState(false);
   const points = useMemo(() => selectRange(data?.points ?? [],range),[data,range]);
