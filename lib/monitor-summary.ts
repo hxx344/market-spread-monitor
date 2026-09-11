@@ -37,7 +37,7 @@ export function oilSummary(update?: OilSummaryUpdate): MonitorSummary {
     fetchedAt: update?.fetchedAt ?? null,
     metrics: [
       metric("价差 · 美元 / 桶", update?.spread, 3, ""),
-      metric("净资金费 / 小时", update?.fundingHourlyRate == null ? null : update.fundingHourlyRate * 100, 5, "%"),
+      metric("净资金费 / 年化", update?.fundingHourlyRate == null ? null : update.fundingHourlyRate * 24 * 365 * 100, 2, "%"),
     ],
     note: `空布伦特、多 WTI · ${update?.fundingBasis === "notional" ? "等名义" : "等桶数"}`,
     trend: createTrend(update?.history, { days: 30, intervalMs: 86_400_000, label: "30 日日线", shortLabel: "30日", unit: " 美元 / 桶" }, update?.status === "error"),

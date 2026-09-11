@@ -20,16 +20,17 @@ test("Hynix card retains last quote and its time when updates fail, then recover
   assert.equal(hynixSummary(quote).status, "live");
 });
 
-test("oil card converts decimal hourly funding to percent and labels the selected basis", () => {
+test("oil card shows simple annualized funding percent and labels the selected basis", () => {
   const update = { status: "snapshot", spread: 5.4321, fundingHourlyRate: -0.00003125, fundingBasis: "quantity", fetchedAt };
   const snapshot = oilSummary(update);
   assert.equal(snapshot.status, "snapshot");
   assert.equal(snapshot.metrics[0].value, "+5.432");
-  assert.equal(snapshot.metrics[1].value, "−0.00313%");
+  assert.equal(snapshot.metrics[1].label, "净资金费 / 年化");
+  assert.equal(snapshot.metrics[1].value, "−27.38%");
   assert.equal(snapshot.metrics[1].tone, "negative");
   assert.match(snapshot.note, /等桶数/);
   const switched = oilSummary({ ...update, fundingBasis: "notional", fundingHourlyRate: 0.00002 });
-  assert.equal(switched.metrics[1].value, "+0.00200%");
+  assert.equal(switched.metrics[1].value, "+17.52%");
   assert.match(switched.note, /等名义/);
   assert.equal(switched.fetchedAt, fetchedAt);
   assert.equal(oilSummary({ ...update, status: "stale" }).status, "stale");
