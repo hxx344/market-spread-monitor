@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { hynixSummary, oilSummary, summaryExpired, summaryTimestamp } from "../lib/monitor-summary.ts";
 
 const fetchedAt = "2026-09-11T07:00:00.000Z";
-const quote = { ordinary: 1500, adr: 180, equivalent: 150, spread: 30, premium: 20, fetchedAt };
+const quote = { ordinary: 1500, adr: 180, equivalent: 150, spread: 30, premium: 20, fetchedAt, funding: { annualizedRate: 0.1752, fetchedAt } };
 
 test("Hynix card retains last quote and its time when updates fail, then recovers", () => {
   const live = hynixSummary(quote);
@@ -36,10 +36,36 @@ test("oil card shows simple annualized funding percent and labels the selected b
   assert.equal(oilSummary({ ...update, status: "stale" }).status, "stale");
 });
 
+test("Hynix card shows net annual funding for short ADR and clears missing funding", () => {
+  const live = hynixSummary(quote);
+  assert.equal(live.metrics[1].label, "净资金费 / 年化");
+  assert.equal(live.metrics[1].value, "+17.52%");
+  assert.equal(live.metrics[1].tone, "positive");
+  assert.match(live.note, /空 10 份 ADR、多 1 股正股/);
+  const negative = hynixSummary({ ...quote, funding: { ...quote.funding, annualizedRate: -0.2 } });
+  assert.equal(negative.metrics[1].value, "−20.00%");
+  assert.equal(negative.metrics[1].tone, "negative");
+  for (const funding of [null, undefined]) {
+    const missing = hynixSummary({ ...quote, funding, fundingError: "offline" });
+    assert.equal(missing.status, "live");
+    assert.equal(missing.metrics[0].value, "+20.00%");
+    assert.equal(missing.metrics[1].value, "—");
+    assert.match(missing.note, /资金费暂不可用/);
+  }
+  assert.equal(hynixSummary(quote).metrics[1].value, "+17.52%");
+});
+
+test("newer mids cannot mark retained older funding as freshly updated", () => {
+  const oldTime = "2026-09-11T06:59:00.000Z";
+  const summary = hynixSummary({ ...quote, funding: { ...quote.funding, fetchedAt: oldTime } });
+  assert.equal(summary.fetchedAt, oldTime);
+  assert.equal(summaryExpired(summary, 10_000, Date.parse(fetchedAt)), true);
+});
+
 test("missing values stay empty and rounded zero never appears negative", () => {
   assert.ok(oilSummary().metrics.every(metric => metric.value === "—"));
-  const nearZero = hynixSummary({ ...quote, spread: -0.00001, premium: -0.00001 });
-  assert.deepEqual(nearZero.metrics.map(metric => metric.value), ["0.00%", "0.00"]);
+  const nearZero = hynixSummary({ ...quote, premium: -0.00001, funding: { ...quote.funding, annualizedRate: -0.0000001 } });
+  assert.deepEqual(nearZero.metrics.map(metric => metric.value), ["0.00%", "0.00%"]);
   assert.ok(nearZero.metrics.every(metric => !metric.tone));
 });
 

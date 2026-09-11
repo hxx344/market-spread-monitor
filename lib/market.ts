@@ -3,7 +3,17 @@ export const FIRST_FULL_HOUR = Date.parse("2026-07-10T14:00:00Z");
 export const ADR_PER_SHARE = 10;
 export type Candle = { t: number; T: number; c: string; o: string; h: string; l: string; v: string; s: string; i: string };
 export type Point = { time: number; adr: number; ordinary: number; equivalent: number; spread: number; premium: number };
-export type LiveQuote = Omit<Point, "time"> & { fetchedAt: string };
+export type FundingLeg = { coin: string; oraclePx: number; hourlyRate: number };
+export type HynixFunding = {
+  ordinary: FundingLeg;
+  adr: FundingLeg;
+  grossNotional: number;
+  hourlyCashflow: number;
+  hourlyRate: number;
+  annualizedRate: number;
+  fetchedAt: string;
+};
+export type LiveQuote = Omit<Point, "time"> & { fetchedAt: string; funding?: HynixFunding | null; fundingError?: string };
 export type MarketData = {
   points: Point[];
   fetchedAt: string;

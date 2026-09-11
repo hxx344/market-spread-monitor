@@ -7,6 +7,7 @@ import { DEFAULT_CONFIG, evaluateRules, freshRuleState, isFreshQuote, validateCo
 import { createAlertService } from "../server/alert-service.mjs";
 import { openStore, initialState } from "../server/alert-store.mjs";
 import { createFeishuPayload, sendFeishu } from "../server/feishu.mjs";
+import { loadQuote } from "../lib/quote-service.ts";
 
 const webhookUrl = "https://open.feishu.cn/open-apis/bot/v2/hook/test-webhook";
 const rule = (id, threshold, direction = "above") => ({ id, name: id, threshold, direction, enabled: true });
@@ -126,6 +127,25 @@ test("delivery failure does not disarm the rule and a withdrawn signal is not se
   now += 10000; await service.check(); assert.equal(attempts, 1);
   now += 20000; premium = 39.8; await service.check(); assert.equal(attempts, 1);
   now += 10000; premium = 41; await service.check(); assert.equal(attempts, 2);
+});
+
+test("a funding-only API outage leaves live premium alerts and cached quotes working", async () => {
+  const now = Date.parse("2026-09-11T09:00:00Z");
+  let sent = 0;
+  const service = createAlertService(memoryStore(), {
+    clock: () => now,
+    getQuote: () => loadQuote(async (_url, init) => JSON.parse(init.body).type === "allMids"
+      ? Response.json({ "xyz:SKHX": "1000", "xyz:SKHY": "150" })
+      : Response.json({ error: "funding unavailable" }, { status: 503 }), () => now),
+    deliver: async () => { sent++; },
+  });
+  await service.update({ ...config([rule("up", 40)]), revision: 0 });
+  await service.check();
+  assert.equal(sent, 1);
+  assert.equal(service.view().status.lastError, "");
+  const quote = await service.quote();
+  assert.equal(quote.premium, 50);
+  assert.equal(quote.funding, null);
 });
 
 test("network failure and a stale quote at send time cannot deliver a notification", async () => {

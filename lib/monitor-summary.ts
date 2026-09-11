@@ -22,11 +22,12 @@ function metric(label: string, value: number | null | undefined, digits: number,
 }
 
 export function hynixSummary(quote: LiveQuote | null, error = "", trend?: MonitorTrend): MonitorSummary {
+  const funding = quote?.funding;
   return {
     status: quote ? error ? "stale" : "live" : error ? "error" : "loading",
-    fetchedAt: quote?.fetchedAt ?? null,
-    metrics: [metric("ADR 溢价率", quote?.premium, 2, "%"), metric("每份价差 · 美元", quote?.spread, 2, "")],
-    note: "1 股正股 = 10 份 ADR",
+    fetchedAt: funding && quote && Date.parse(funding.fetchedAt) < Date.parse(quote.fetchedAt) ? funding.fetchedAt : quote?.fetchedAt ?? null,
+    metrics: [metric("ADR 溢价率", quote?.premium, 2, "%"), metric("净资金费 / 年化", funding?.annualizedRate == null ? null : funding.annualizedRate * 100, 2, "%")],
+    note: `空 10 份 ADR、多 1 股正股${quote && !funding ? " · 资金费暂不可用" : ""}`,
     trend: trend ?? createTrend(undefined, { days: 7, intervalMs: 3_600_000, label: "7 天小时线", shortLabel: "7天", unit: "%" }),
   };
 }
@@ -51,7 +52,7 @@ export function summaryTimestamp(fetchedAt: string | null) {
 }
 
 export const summaryStatusLabels: Record<SummaryStatus, string> = {
-  loading: "正在获取行情", live: "实时", snapshot: "备用快照", stale: "更新中断 · 保留报价", error: "行情暂不可用",
+  loading: "正在获取行情", live: "实时", snapshot: "备用快照", stale: "更新中断 · 保留数据", error: "行情暂不可用",
 };
 
 export function summaryExpired(summary: MonitorSummary, intervalMs: number, now: number) {

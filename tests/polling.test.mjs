@@ -39,16 +39,22 @@ test("recover next cycle after a request failure without replacing the last succ
   poll.stop();
 });
 
-test("read both current mids in one request and timestamp successful receipt",async()=>{
+test("read both current mids together and request funding alongside them",async()=>{
   const time=Date.parse("2026-09-11T07:00:00Z");
+  const requests=[];
   const quote=await loadQuote(async(url,init)=>{
     assert.equal(url,"https://api.hyperliquid.xyz/info");
-    assert.deepEqual(JSON.parse(init.body),{type:"allMids",dex:"xyz"});
+    const body=JSON.parse(init.body);
+    requests.push(body);
+    if(body.type==="metaAndAssetCtxs") return Response.json([{universe:[{name:"xyz:SKHX"},{name:"xyz:SKHY"}]},[{oraclePx:"1500",funding:"0"},{oraclePx:"180",funding:"0"}]]);
     return Response.json({"xyz:SKHX":"1500","xyz:SKHY":"180"});
   },()=>time);
+  assert.deepEqual(requests,[{type:"allMids",dex:"xyz"},{type:"metaAndAssetCtxs",dex:"xyz"}]);
   assert.equal(quote.equivalent,150);assert.equal(quote.spread,30);
   assert.ok(Math.abs(quote.premium-20)<1e-10);
   assert.equal(quote.fetchedAt,"2026-09-11T07:00:00.000Z");
+  assert.equal(quote.funding.annualizedRate,0);
+  assert.equal(quote.funding.fetchedAt,quote.fetchedAt);
 });
 
 test("partial, zero, invalid or failed live quotes never become a fresh pair",async()=>{

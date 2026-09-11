@@ -28,7 +28,7 @@ function CardSummary({ summary, intervalMs }: { summary: MonitorSummary; interva
   return <>
     <span className="hub-card-metrics">{summary.metrics.map((metric, index) => <span key={metric.label}><small>{metric.label}</small><span className="hub-metric-reading"><strong className={metric.tone}>{metric.value}</strong>{index === 0 && summary.trend && <MonitorSparkline trend={summary.trend} expired={trendExpired(summary.trend, now)}/>}</span></span>)}</span>
     {summary.note && <span className="hub-card-note">{summary.note}</span>}
-    <span className={`hub-card-status ${expired ? "stale" : summary.status}`}><span><i aria-hidden="true"/>{expired ? "报价待更新" : summaryStatusLabels[summary.status]}</span>{timestamp && <time dateTime={summary.fetchedAt!}>{timestamp} 北京时间</time>}</span>
+    <span className={`hub-card-status ${expired ? "stale" : summary.status}`}><span><i aria-hidden="true"/>{expired ? "行情待更新" : summaryStatusLabels[summary.status]}</span>{timestamp && <time dateTime={summary.fetchedAt!}>{timestamp} 北京时间</time>}</span>
   </>;
 }
 
