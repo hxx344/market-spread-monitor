@@ -26,7 +26,9 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/market-spread-monitor/main/d
 curl -fsSL https://raw.githubusercontent.com/hxx344/market-spread-monitor/main/deploy/install.sh | bash -s -- --port 3001
 ```
 
-海力士飞书机器人在面板配置。原油沿用服务器配置方式，在 `/etc/market-spread-monitor.env` 设置 `OIL_FEISHU_WEBHOOK_URL` 与可选 `OIL_FEISHU_WEBHOOK_SECRET`，再运行 `sudo systemctl restart market-spread-monitor`。两边阈值都在各自面板编辑，默认关闭消息发送。
+在面板顶部的“统一飞书告警”中保存一次 Webhook 和可选签名密钥，原油、海力士及后续模块共用，立即生效，无需重启。各模块的阈值、开关、冷却和发送记录仍独立，默认关闭消息发送。连接测试也集中在统一设置中。
+
+升级时自动迁移原海力士配置及 `OIL_FEISHU_WEBHOOK_URL` / `OIL_FEISHU_WEBHOOK_SECRET`。只有一个机器人或两处配置相同时直接沿用；不同则在统一设置中选择已有机器人或填写新机器人，保存前暂停发送。统一配置保存于数据目录的 `notifications.json`，不会向浏览器回传完整 Webhook 或密钥；清除后重启也不会重新导入旧配置。如机器人开启关键词校验，请添加“告警”，让两个模块的消息都能通过。
 
 后台独立于浏览器运行：海力士每 10 秒检查，原油默认每 30 秒检查。各模块独立保存规则、修订号、回差、冷却、触发状态和发送记录。运行、HTTPS 与已有配置迁移见 [部署说明](deploy/README.md)。
 

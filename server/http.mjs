@@ -25,13 +25,26 @@ export function createHandler({ service, services, username, password, nextHandl
     try {
       const path = new URL(request.url, "http://localhost").pathname;
       if (path === "/healthz" && request.method === "GET") {
-        const healthy = !services || [...services.values()].every(service => !service.healthy || service.healthy());
+        const healthy = !services || ([...services.values()].every(service => !service.healthy || service.healthy()) && (!services.notifications || services.notifications.healthy()));
         return json(response, healthy ? 200 : 503, { status: healthy ? "ok" : "degraded", service: "market-spread-monitor", monitors: services ? [...services.keys()] : ["hynix"] });
       }
       if (!equal(request.headers.authorization ?? "", `Basic ${credential}`)) {
         response.writeHead(401, { "WWW-Authenticate": 'Basic realm="Market Monitor", charset="UTF-8"', "Cache-Control": "no-store" });
         response.end("Authentication required");
         return;
+      }
+      if (services?.notifications && ["/api/notifications/feishu", "/api/notifications/feishu/test"].includes(path)) {
+        const testing = path.endsWith("/test"), writing = request.method !== "GET";
+        if (!(testing ? ["POST"] : ["GET", "PUT"]).includes(request.method)) return json(response, 405, { error: "不支持此请求方法" });
+        if (writing) {
+          const origin = request.headers.origin;
+          if (request.headers["sec-fetch-site"] === "cross-site" || (origin && new URL(origin).host !== request.headers.host)) return json(response, 403, { error: "不接受跨站配置请求" });
+          if (!/^application\/json(?:;|$)/i.test(request.headers["content-type"] || "")) return json(response, 415, { error: "请使用 JSON 请求" });
+        }
+        try {
+          const input = writing ? await body(request) : undefined;
+          return json(response, 200, testing ? await services.notifications.test() : writing ? await services.notifications.update(input) : services.notifications.view());
+        } catch (error) { return json(response, error.status || (testing ? 502 : 400), { error: error.message }); }
       }
       const route = /^\/api\/monitors\/([^/]+)\/(.+)$/.exec(path);
       if (route && services) {

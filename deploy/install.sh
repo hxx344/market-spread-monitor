@@ -186,7 +186,7 @@ main() {
     {
       printf 'NODE_ENV=production\nHOST=0.0.0.0\nPORT=%s\nAPP_USERNAME=admin\n' "${requested_port:-3000}"
       printf 'APP_PASSWORD=%s\n' "$("$runtime/bin/node" -e "console.log(require('node:crypto').randomBytes(18).toString('hex'))")"
-      printf 'ALERT_DATA_DIR=/var/lib/market-spread-monitor\nOIL_FEISHU_WEBHOOK_URL=\nOIL_FEISHU_WEBHOOK_SECRET=\nOIL_POLL_INTERVAL_SECONDS=30\n'
+      printf 'ALERT_DATA_DIR=/var/lib/market-spread-monitor\nOIL_POLL_INTERVAL_SECONDS=30\n'
     } > "$config"
     install -m 0600 /dev/null "$base/.credentials-unshown"
   elif [[ -n "$requested_port" ]]; then

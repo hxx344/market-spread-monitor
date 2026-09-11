@@ -2,6 +2,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { isAbsolute } from "node:path";
 import { execFileSync } from "node:child_process";
 import { validateWebhook } from "../server/oil/feishu.mjs";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 
 const host = process.env.HOST ?? "127.0.0.1";
 const port = process.env.PORT ?? "3000";
@@ -15,7 +17,7 @@ if (!Number.isInteger(numericPort) || numericPort < 1 || numericPort > 65535 || 
   console.error("配置无效：请检查 PORT、APP_PASSWORD（至少 12 字符）、APP_USERNAME 及 OIL_POLL_INTERVAL_SECONDS（10–3600）。原服务尚未切换。");
   process.exit(1);
 }
-try { validateWebhook(process.env.OIL_FEISHU_WEBHOOK_URL || ""); }
+try { if (!existsSync(join(process.env.ALERT_DATA_DIR, "notifications.json"))) validateWebhook(process.env.OIL_FEISHU_WEBHOOK_URL || ""); }
 catch { console.error("OIL_FEISHU_WEBHOOK_URL 配置无效。原服务尚未切换。"); process.exit(1); }
 if (process.argv.includes("--config-only")) process.exit(0);
 if (process.argv.includes("--describe")) {
@@ -37,9 +39,9 @@ const quiet = process.argv.includes("--quiet");
 const attempts = process.argv.includes("--once") ? 1 : 30;
 for (let attempt = 0; attempt < attempts; attempt++) {
   try {
-    const responses = await Promise.all(["/api/monitors/hynix/alerts", "/api/monitors/oil/status", "/healthz"].map(path => fetch(`${base}${path}`, { headers, signal: AbortSignal.timeout(1500) })));
-    const [hynix, oil, health] = await Promise.all(responses.map(response => response.json()));
-    if (responses.every(response => response.ok) && hynix.available === true && oil.available === true && health.service === "market-spread-monitor" && ["oil", "hynix"].every(id => health.monitors.includes(id))) {
+    const responses = await Promise.all(["/api/monitors/hynix/alerts", "/api/monitors/oil/status", "/healthz", "/api/notifications/feishu"].map(path => fetch(`${base}${path}`, { headers, signal: AbortSignal.timeout(1500) })));
+    const [hynix, oil, health, notifications] = await Promise.all(responses.map(response => response.json()));
+    if (responses.every(response => response.ok) && notifications.available === true && hynix.available === true && oil.available === true && health.service === "market-spread-monitor" && ["oil", "hynix"].every(id => health.monitors.includes(id))) {
       const pid = execFileSync("systemctl", ["show", "--property=MainPID", "--value", "market-spread-monitor.service"], { encoding: "utf8" }).trim();
       const listeners = execFileSync("ss", ["-H", "-ltnp", `sport = :${port}`], { encoding: "utf8" });
       if (/^[1-9]\d*$/.test(pid) && listeners.includes(`pid=${pid},`)) {

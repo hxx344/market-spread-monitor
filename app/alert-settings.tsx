@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Bell, ChevronDown, Plus, Save, Send, Trash2 } from "lucide-react";
+import { Bell, ChevronDown, Plus, Save, Trash2 } from "lucide-react";
 import type { AlertConfig, AlertRule, AlertView } from "../lib/alert-types";
 
 const initial: AlertConfig = { enabled: false, cooldownSeconds: 300, hysteresis: 0.5, rules: [] };
@@ -13,9 +13,6 @@ export default function AlertSettings() {
   const [draft, setDraft] = useState<AlertConfig>(initial);
   const [revision, setRevision] = useState(0);
   const latestRevision = useRef(0);
-  const [webhookUrl, setWebhook] = useState("");
-  const [signingSecret, setSecret] = useState("");
-  const [clearSigningSecret, setClearSecret] = useState(false);
   const [busy, setBusy] = useState(false);
   const [dirty, setDirty] = useState(false);
   const dirtyRef = useRef(false);
@@ -48,37 +45,26 @@ export default function AlertSettings() {
     };
     void load();
     const interval = setInterval(() => { void load(); }, 10_000);
-    return () => { controller.abort(); clearInterval(interval); };
+    window.addEventListener("feishu-settings-changed", load);
+    return () => { controller.abort(); clearInterval(interval); window.removeEventListener("feishu-settings-changed", load); };
   }, []);
 
   const apply = (next: AlertView) => {
     if (next.revision < latestRevision.current) return false;
     latestRevision.current = next.revision;
     setView(next); setDraft(next.config); setRevision(next.revision);
-    setWebhook(""); setSecret(""); setClearSecret(false);
     dirtyRef.current = false; setDirty(false);
     return true;
   };
   async function save(event: FormEvent) {
     event.preventDefault(); setBusy(true); setError(""); setMessage("");
     try {
-      const response = await fetch("/api/monitors/hynix/alerts", { method: "PUT", headers: { "Content-Type": "application/json" }, signal: AbortSignal.timeout(25_000), body: JSON.stringify({ ...draft, revision, webhookUrl, signingSecret, clearSigningSecret }) });
+      const response = await fetch("/api/monitors/hynix/alerts", { method: "PUT", headers: { "Content-Type": "application/json" }, signal: AbortSignal.timeout(25_000), body: JSON.stringify({ ...draft, revision }) });
       const result = await response.json() as AlertView & { error?: string };
       if (!response.ok) throw new Error(result.error ?? "保存失败。");
       if (apply(result)) setMessage("配置已保存；后台将在下一轮检查时使用新阈值。");
       else setError("另一页面已有更新配置，请放弃修改并重载后再编辑。");
     } catch (error) { setError(error instanceof Error ? error.message : "保存失败。"); }
-    finally { setBusy(false); }
-  }
-  async function testMessage() {
-    setBusy(true); setError(""); setMessage("");
-    try {
-      const response = await fetch("/api/monitors/hynix/alerts/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}", signal: AbortSignal.timeout(25_000) });
-      const result = await response.json() as AlertView & { error?: string };
-      if (!response.ok) throw new Error(result.error ?? "测试消息发送失败。");
-      if (result.revision >= latestRevision.current) { latestRevision.current = result.revision; setView(result); }
-      setMessage("测试消息已发送到飞书。");
-    } catch (error) { setError(error instanceof Error ? error.message : "发送失败。"); }
     finally { setBusy(false); }
   }
   const connected = view?.available === true;
@@ -89,15 +75,13 @@ export default function AlertSettings() {
     {open && <div id="alert-settings-body" className="alert-body">
       {!connected ? <p className="alert-help">{view?.reason || loadError || "正在连接告警后台…"}</p> : <>
         <p className="alert-help">后台每 10 秒检查溢价率，关闭网页后仍会运行。首次启用时若已达到阈值，会立即告警；持续满足条件时不会重复发送。</p>
+        <p className="alert-help">{view.config.webhookConfigured ? "使用整个面板的统一飞书机器人。" : "尚未配置共用机器人，可先保存阈值。"} <button className="shared-settings-link" type="button" onClick={() => window.dispatchEvent(new Event("open-feishu-settings"))}>打开统一设置</button></p>
         <form onSubmit={save}>
           <fieldset disabled={busy} className="alert-fields">
             <div className="alert-form-grid">
-              <label>飞书机器人 Webhook<input type="password" autoComplete="new-password" value={webhookUrl} onChange={event => { markDirty(); setWebhook(event.target.value); }} placeholder={view.config.webhookConfigured ? "已配置；留空保留" : "https://open.feishu.cn/open-apis/bot/v2/hook/…"}/></label>
-              <label>签名密钥（可选）<input type="password" autoComplete="new-password" value={signingSecret} onChange={event => { markDirty(); setSecret(event.target.value); setClearSecret(false); }} placeholder={view.config.signingSecretConfigured ? "已配置；留空保留" : "机器人启用签名校验时填写"}/></label>
               <label>再次告警冷却（秒）<input type="number" min="0" max="86400" step="1" required value={Number.isFinite(draft.cooldownSeconds) ? draft.cooldownSeconds : ""} onChange={event => edit({ ...draft, cooldownSeconds: event.target.valueAsNumber })}/></label>
               <label>重新布防回差（百分点）<input type="number" min="0" max="100" step="any" required value={Number.isFinite(draft.hysteresis) ? draft.hysteresis : ""} onChange={event => edit({ ...draft, hysteresis: event.target.valueAsNumber })}/></label>
             </div>
-            {view.config.signingSecretConfigured && <label className="alert-checkbox"><input type="checkbox" checked={clearSigningSecret} onChange={event => { markDirty(); setClearSecret(event.target.checked); if (event.target.checked) setSecret(""); }}/>清除已保存的签名密钥</label>}
             <div className="alert-rules-heading"><h3>梯度阈值</h3><button type="button" className="alert-button" disabled={draft.rules.length >= 20} onClick={() => edit({ ...draft, rules: [...draft.rules, { id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`, name: `档位 ${draft.rules.length + 1}`, direction: "above", threshold: Number.NaN, enabled: true }] })}><Plus size={15}/>添加阈值</button></div>
             <div className="alert-rules">{draft.rules.map(rule => <div className="alert-rule" key={rule.id}>
               <label className="alert-checkbox"><input type="checkbox" checked={rule.enabled} onChange={event => editRule(rule.id, { enabled: event.target.checked })}/><span>启用</span></label>
@@ -108,10 +92,10 @@ export default function AlertSettings() {
             </div>)}</div>
             {!draft.rules.length && <p className="alert-help">添加一档或多档阈值，分别选择向上或向下触发。</p>}
             <p className="alert-help">例如上方阈值为 40%、回差为 0.5 个百分点：触发后需回落到 39.5% 以下才重新布防，再次达到 40% 且冷却结束后才告警。一次跨越多档会合并成一条消息。</p>
-            <div className="alert-actions"><label className="alert-checkbox"><input type="checkbox" checked={draft.enabled} onChange={event => edit({ ...draft, enabled: event.target.checked })}/>启用飞书告警</label><div><button type="button" className="alert-button" disabled={dirty || !view.config.webhookConfigured} onClick={testMessage}><Send size={14}/>发送测试消息</button><button type="submit" className="alert-button primary"><Save size={14}/>{busy ? "处理中…" : "保存配置"}</button></div></div>
+            <div className="alert-actions"><label className="alert-checkbox"><input type="checkbox" checked={draft.enabled} onChange={event => edit({ ...draft, enabled: event.target.checked })}/>启用飞书告警</label><div><button type="submit" className="alert-button primary"><Save size={14}/>{busy ? "处理中…" : "保存配置"}</button></div></div>
           </fieldset>
         </form>
-        {dirty && <div className="alert-actions"><p className="alert-help">有尚未保存的修改；测试消息使用已保存的机器人配置。</p><button type="button" className="alert-button" disabled={busy} onClick={() => { apply(view); setError(""); }}>放弃修改并重载</button></div>}
+        {dirty && <div className="alert-actions"><p className="alert-help">有尚未保存的阈值修改。</p><button type="button" className="alert-button" disabled={busy} onClick={() => { apply(view); setError(""); }}>放弃修改并重载</button></div>}
         {message && <p className="alert-feedback" role="status">{message}</p>}
         {error && <p className="alert-feedback failure" role="alert">{error}</p>}
         {loadError && <p className="alert-feedback failure" role="alert">{loadError}</p>}

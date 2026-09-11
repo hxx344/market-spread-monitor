@@ -32,6 +32,7 @@ async function shutdown() {
   await closed;
   // Drain active configuration requests before stopping persistence or releasing locks.
   await Promise.all([...services.values()].map(service => service.stop()));
+  await services.notifications.stop();
   await app.close();
   clearTimeout(timeout);
   process.exit(0);

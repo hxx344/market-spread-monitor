@@ -58,7 +58,7 @@ async function updateStatus() {
     connected = true;
     $('alert-service-state').textContent = status.error ? '采集异常' : !status.webhookConfigured ? '等待配置飞书' : status.enabled ? '告警已启用' : '告警已暂停';
     $('alert-runtime').textContent = `服务器每 ${status.pollSeconds} 秒采集，关闭网页后继续运行。${status.enabledRules} 个梯度已启用。最近成功采集：${time(status.lastSuccessAt)}。`;
-    $('alert-service-error').textContent = [status.error, status.deliveryError, !status.webhookConfigured ? '服务器尚未设置 OIL_FEISHU_WEBHOOK_URL；可先保存梯度，配置机器人后生效。' : ''].filter(Boolean).join('；');
+    $('alert-service-error').textContent = [status.error, status.deliveryError, !status.webhookConfigured ? '尚未配置共用机器人；请打开顶部的统一飞书告警设置，可先保存梯度。' : ''].filter(Boolean).join('；');
     $('alert-service-error').hidden = !$('alert-service-error').textContent;
     if (status.market) {
       const brent = status.market.brent.markPx, wti = status.market.wti.markPx;
@@ -95,10 +95,7 @@ $('alert-add').addEventListener('click', () => {
   setDirty(true); $('alert-rules').lastElementChild.querySelector('input').focus();
 });
 $('alert-reload').addEventListener('click', () => { if (!dirty || window.confirm('重新载入将放弃尚未保存的修改。')) void action(loadConfig); });
-$('alert-test').addEventListener('click', () => void action(async () => {
-  try { await api('test-notification', { method: 'POST', body: {} }); if (!life.signal.aborted) feedback('飞书测试消息已发送。'); }
-  finally { if (life.signal.aborted) return; await loadEvents(); }
-}));
+$('alert-shared-settings').addEventListener('click', () => window.dispatchEvent(new Event('open-feishu-settings')));
 life.on(window, 'beforeunload', event => { if (dirty) { event.preventDefault(); event.returnValue = ''; } });
 let refreshing = false;
 async function refresh() {
@@ -108,6 +105,7 @@ async function refresh() {
   finally { if (life.signal.aborted) return; refreshing = false; }
 }
 void refresh(); const timer = setInterval(refresh, 15_000);
+life.on(window, 'feishu-settings-changed', () => void refresh());
 life.on(document, 'visibilitychange', () => { if (!document.hidden) void refresh(); });
 
 return { hasUnsavedChanges: () => dirty, dispose() { token=''; dirty=false; clearInterval(timer); life.dispose(); } };

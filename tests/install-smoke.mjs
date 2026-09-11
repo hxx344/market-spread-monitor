@@ -44,6 +44,10 @@ async function oilState() {
   assert.equal(response.status, 200);
   return response.json();
 }
+async function sharedState() {
+  const response = await fetch(`${base}/api/notifications/feishu`, { headers, signal: AbortSignal.timeout(3000) });
+  assert.equal(response.status, 200); return response.json();
+}
 async function ready() {
   for (let i = 0; i < 40; i++) {
     try { if ((await state()).available && (await fetch(`${base}/api/monitors/oil/status`, { headers })).ok) return; } catch { /* Wait for rollback restart. */ }
@@ -102,6 +106,11 @@ else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/n
   const oilConfig = { ...oilInitial.config, enabled: false, rules: [{ id: "install-oil", label: "油价保存后升级", metric: "spread", operator: "gte", threshold: 5, cooldownMinutes: 30, hysteresis: 0.1, enabled: false }] };
   const oilSaved = await fetch(`${base}/api/monitors/oil/config`, { method: "PUT", headers: { ...headers, "Content-Type": "application/json", Origin: base }, body: JSON.stringify({ revision: oilInitial.revision, config: oilConfig }) });
   assert.equal(oilSaved.status, 200);
+  const sharedInitial = await sharedState();
+  const sharedSaved = await fetch(`${base}/api/notifications/feishu`, { method: "PUT", headers: { ...headers, "Content-Type": "application/json", Origin: base }, body: JSON.stringify({ revision: sharedInitial.revision, webhookUrl: "https://open.feishu.cn/open-apis/bot/v2/hook/install-storage-only", signingSecret: "install-storage-only-secret" }) });
+  assert.equal(sharedSaved.status, 200);
+  const sharedConfig = await sharedState();
+  assert.equal(sharedConfig.webhookConfigured, true); assert.equal(sharedConfig.signingSecretConfigured, true);
   const firstRelease = await current();
   const firstPid = await pid();
   assert.equal(await buildCount(), 1);
@@ -120,6 +129,7 @@ else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/n
   assert.deepEqual((await state()).config.rules, rules);
   assert.equal((await state()).revision, savedState.revision);
   assert.deepEqual((await oilState()).config, oilConfig); assert.equal((await oilState()).revision, oilInitial.revision+1);
+  assert.deepEqual(await sharedState(), sharedConfig);
 
   console.log("Installer: configuration changes only restart, and invalid configuration leaves the old process running");
   const expectedConfig = originalConfig.replace("OIL_POLL_INTERVAL_SECONDS=30", "OIL_POLL_INTERVAL_SECONDS=45");
@@ -130,6 +140,7 @@ else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/n
   assert.equal(await buildCount(), 1);
   assert.match(configured, /仅应用配置或恢复服务/);
   assert.equal((await (await fetch(`${base}/api/monitors/oil/status`, { headers })).json()).pollSeconds, 45);
+  assert.deepEqual(await sharedState(), sharedConfig);
   const configuredPid = await pid();
   await replaceConfig(expectedConfig.replace(/APP_PASSWORD=.*/, "APP_PASSWORD=short"));
   await install(baseline, false);
@@ -211,7 +222,8 @@ else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/n
   assert.deepEqual((await state()).config.rules, rules);
   assert.deepEqual((await oilState()).config, oilConfig);
   console.log("Installer timings:", JSON.stringify(timings));
-  console.log("Installer smoke passed: no-op, cache reuse, config-only restart, recovery and rollback; no Feishu messages sent.");
+  assert.deepEqual(await sharedState(), sharedConfig);
+  console.log("Installer smoke passed: no-op, cache reuse, config-only restart, recovery, rollback and shared Feishu persistence; no Feishu messages sent.");
 } finally {
   await run("sudo", ["systemctl", "stop", "market-spread-monitor.service"]).catch(() => {});
   assert.ok(resolve(scratch).startsWith(resolve(tmpdir()) + "/market-spread-installer-test-"));

@@ -27,10 +27,11 @@ export class Monitor {
     });
   }
   configuration() { return { revision: this.data.revision, config: structuredClone(this.data.config) }; }
+  notificationConfigured() { return typeof this.webhookConfigured === 'function' ? this.webhookConfigured() : this.webhookConfigured; }
   status() {
     const now = this.clock();
     return { service: 'oil-spread-monitor', enabled: this.data.config.enabled, pollSeconds: this.pollSeconds,
-      webhookConfigured: this.webhookConfigured, lastAttemptAt: this.lastAttemptAt,
+      webhookConfigured: this.notificationConfigured(), lastAttemptAt: this.lastAttemptAt,
       lastSuccessAt: this.market?.fetchedAt ?? null, stale: !this.market || now - Date.parse(this.market.fetchedAt) > Math.max(90_000, this.pollSeconds * 2000),
       market: this.market, error: this.storageError || this.error, deliveryError: this.deliveryError,
       enabledRules: this.data.config.rules.filter(rule => rule.enabled).length };
@@ -48,7 +49,7 @@ export class Monitor {
         if (!rule.enabled) continue;
         const { state, shouldSend } = evaluateRule(rule, next.states[rule.id], values[rule.metric], now);
         next.states[rule.id] = state;
-        if (shouldSend && next.config.enabled && this.webhookConfigured) {
+        if (shouldSend && next.config.enabled && this.notificationConfigured()) {
           state.eventId ||= randomUUID(); state.nextAttemptAt = now + 60_000;
           due.push({ rule, value: values[rule.metric], id: state.eventId });
         }
@@ -67,7 +68,7 @@ export class Monitor {
         `布伦特 ${values.brent.toFixed(4)} · WTI ${values.wti.toFixed(4)} · 价差 ${values.spread.toFixed(4)}`].join('\n');
       const delivered = structuredClone(this.data), event = delivered.events.find(item => item.id === batchId);
       try {
-        await this.notify(message);
+        await this.notify(message, () => { marketValues(market, this.clock()); });
         this.deliveryError = null; event.status = 'sent';
         for (const item of due) { delivered.states[item.rule.id].alerted = true; delivered.states[item.rule.id].lastSentAt = this.clock(); }
       } catch (error) { event.status = 'failed'; event.error = error.message; this.deliveryError = error.message; }

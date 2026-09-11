@@ -10,13 +10,13 @@ export const DEFAULT_CONFIG = {
 export function validateWebhook(value) {
   let url;
   try { url = new URL(value); } catch { throw new Error("请输入有效的飞书机器人 Webhook 地址。"); }
-  if (url.protocol !== "https:" || url.hostname !== "open.feishu.cn" || (url.port && url.port !== "443") || url.username || url.password || url.search || url.hash || !/^\/open-apis\/bot\/v2\/hook\/[a-zA-Z0-9-]+$/.test(url.pathname)) {
-    throw new Error("Webhook 必须是 open.feishu.cn 的自定义机器人 HTTPS 地址。");
+  if (url.protocol !== "https:" || !["open.feishu.cn", "open.larksuite.com"].includes(url.hostname) || (url.port && url.port !== "443") || url.username || url.password || url.search || url.hash || !/^\/open-apis\/bot\/v2\/hook\/[a-zA-Z0-9-]+$/.test(url.pathname)) {
+    throw new Error("Webhook 必须是飞书或 Lark 自定义机器人 HTTPS 地址。");
   }
   return url.href;
 }
 
-export function validateConfig(input, previous = DEFAULT_CONFIG) {
+export function validateConfig(input, previous = DEFAULT_CONFIG, { requireWebhook = true } = {}) {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("告警配置格式不正确。");
   const { enabled, cooldownSeconds, hysteresis, rules } = input;
   if (typeof enabled !== "boolean" || !Number.isInteger(cooldownSeconds) || cooldownSeconds < 0 || cooldownSeconds > 86400 || typeof hysteresis !== "number" || !Number.isFinite(hysteresis) || hysteresis < 0 || hysteresis > 100) {
@@ -38,7 +38,7 @@ export function validateConfig(input, previous = DEFAULT_CONFIG) {
   const signingSecret = input.clearSigningSecret ? "" : (input.signingSecret?.trim() || previous.signingSecret);
   if (webhookUrl) validateWebhook(webhookUrl);
   if (signingSecret.length > 512) throw new Error("签名密钥过长。");
-  if (enabled && (!webhookUrl || !cleanRules.some(rule => rule.enabled))) throw new Error("启用告警前，请配置 Webhook 并启用至少一档阈值。");
+  if (enabled && ((requireWebhook && !webhookUrl) || !cleanRules.some(rule => rule.enabled))) throw new Error(requireWebhook ? "启用告警前，请配置 Webhook 并启用至少一档阈值。" : "启用告警前，请启用至少一档阈值。");
   return { enabled, webhookUrl, signingSecret, cooldownSeconds, hysteresis, rules: cleanRules };
 }
 

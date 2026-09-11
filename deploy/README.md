@@ -44,7 +44,9 @@ sudo journalctl -u market-spread-monitor -n 50
 sudo systemctl restart market-spread-monitor
 ```
 
-海力士 Webhook 与签名密钥在面板保存，读取 API 不返回密钥。原油在环境配置文件填写 `OIL_FEISHU_WEBHOOK_URL`、可选 `OIL_FEISHU_WEBHOOK_SECRET`；`OIL_POLL_INTERVAL_SECONDS` 默认 30，范围 10–3600。重启后在面板启用所需阈值和总开关。网页关闭后后台继续工作。
+在面板顶部“统一飞书告警”保存 Webhook 和可选签名密钥，所有模块立即共用，无需修改环境文件或重启。读取 API 不返回完整 Webhook 或密钥。统一配置保存在 `ALERT_DATA_DIR/notifications.json`（0600），备份数据目录时一并保留。阈值与开关在各模块分别设置；`OIL_POLL_INTERVAL_SECONDS` 默认 30，范围 10–3600。网页关闭后后台继续工作。
+
+旧海力士机器人和旧 `OIL_FEISHU_WEBHOOK_URL` / `OIL_FEISHU_WEBHOOK_SECRET` 只在全局文件首次创建时迁移。两处配置相同或只有一处时直接沿用；不同则在统一设置中选择共用哪一个，选择前暂停发送。之后全局文件优先，清除机器人后不会被旧环境变量重新启用。首次迁移保留旧模块文件用于启动失败回滚；首次主动保存海力士阈值后，模块文件切换为不存储机器人凭据的 v2 格式。开启机器人关键词校验时，请添加“告警”。
 
 `GET /healthz` 检查进程与存储健康；外部行情临时失败在各面板单独显示。业务页面统一登录，API 写操作要求同源和 JSON。内核 `flock` 拒绝同一数据目录的重复进程，异常退出自动释放。
 

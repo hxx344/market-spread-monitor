@@ -3,7 +3,7 @@ import { loadQuote } from "../lib/quote-service.ts";
 import { evaluateRules, isFreshQuote, publicState, reconcileRuleStates, validateConfig } from "./alert-engine.mjs";
 import { formatAlert, sendFeishu } from "./feishu.mjs";
 
-export function createAlertService(store, { getQuote = loadQuote, deliver = sendFeishu, clock = Date.now } = {}) {
+export function createAlertService(store, { getQuote = loadQuote, deliver = sendFeishu, clock = Date.now, notifications } = {}) {
   let queue = Promise.resolve();
   let polling;
   let pendingPoll;
@@ -28,6 +28,15 @@ export function createAlertService(store, { getQuote = loadQuote, deliver = send
     return operation;
   };
   const record = (state, item) => { state.history = [{ id: randomUUID(), ...item }, ...state.history].slice(0, 100); };
+  const publicView = state => {
+    const result = publicState(state);
+    if (notifications) {
+      const shared = notifications.view();
+      result.config.webhookConfigured = notifications.configured();
+      result.config.signingSecretConfigured = shared.signingSecretConfigured;
+    }
+    return result;
+  };
   const check = () => {
     if (stopped) return Promise.resolve();
     if (pendingPoll) return pendingPoll;
@@ -51,7 +60,7 @@ export function createAlertService(store, { getQuote = loadQuote, deliver = send
       const evaluated = evaluateRules(state.config, state.ruleStates, quote.premium, now);
       state.ruleStates = evaluated.states;
       const rules = evaluated.triggered;
-      if (!rules.length) { await persist(state); return; }
+      if (!rules.length || (notifications && !notifications.configured())) { await persist(state); return; }
       for (const rule of rules) state.ruleStates[rule.id].lastAttemptAt = now;
       // Persist the attempt before external delivery; restart cannot cause immediate retries.
       await persist(state);
@@ -62,7 +71,10 @@ export function createAlertService(store, { getQuote = loadQuote, deliver = send
       }
       const text = formatAlert(quote, rules);
       try {
-        await deliver(state.config, text, { now });
+        if (notifications) await notifications.send(text, () => {
+          if (!isFreshQuote(quote, clock())) throw new Error("报价在发送前已过期，等待下一轮实时报价。");
+        });
+        else await deliver(state.config, text, { now });
         for (const rule of rules) {
           state.ruleStates[rule.id].armed = false;
           state.ruleStates[rule.id].lastSentAt = clock();
@@ -79,7 +91,7 @@ export function createAlertService(store, { getQuote = loadQuote, deliver = send
   return {
     healthy: () => !storageFailed,
     view: () => {
-      const state = publicState(store.get());
+      const state = publicView(store.get());
       if (pendingWrite) state.status.lastError = "磁盘保存失败，暂停新告警；请检查数据目录权限和剩余空间。";
       return state;
     },
@@ -92,15 +104,20 @@ export function createAlertService(store, { getQuote = loadQuote, deliver = send
       return serial(async () => {
         const state = store.get();
         if (input.revision !== state.revision) throw new Error("配置已被另一页面修改，请刷新配置后重试。");
-        const config = validateConfig(input, state.config);
+        if (notifications && (input.webhookUrl || input.signingSecret || input.clearWebhook || input.clearSigningSecret)) throw new Error("机器人已由整个面板共用，请在顶部的统一飞书告警设置中修改。");
+        const config = validateConfig(input, notifications ? { ...state.config, webhookUrl: "", signingSecret: "" } : state.config, { requireWebhook: !notifications });
         state.ruleStates = reconcileRuleStates(state.config, config, state.ruleStates);
         state.config = config;
+        // Keep the old on-disk state compatible until an explicit rule edit, so a failed
+        // first upgrade can still roll back to the previous server without data changes.
+        if (notifications) state.version = 2;
         state.revision++;
         await persist(state);
-        return publicState(state);
+        return publicView(state);
       });
     },
     test() {
+      if (notifications) return notifications.test().then(() => publicView(store.get()));
       return serial(async () => {
         const state = store.get();
         const now = clock();

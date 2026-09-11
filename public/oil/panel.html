@@ -65,7 +65,7 @@
             <p class="alert-note">同一梯度持续满足条件只告警一次。价格回到阈值另一侧并超出回差后才重新待命；再次触发仍需满足冷却时间。</p>
             <div class="alert-actions alert-save-actions"><button type="submit" class="alert-primary">保存设置</button><button id="alert-reload" type="button" class="alert-secondary">重新载入</button><span id="alert-dirty" class="alert-note"></span></div>
           </form>
-          <div class="alert-test-row"><p class="alert-note">测试将向服务器配置的飞书群发送一条连接消息。</p><button id="alert-test" type="button" class="alert-secondary">发送飞书测试消息</button></div>
+          <div class="alert-test-row"><p class="alert-note">飞书机器人由整个面板统一配置，原油规则独立生效。</p><button id="alert-shared-settings" type="button" class="alert-secondary">打开统一飞书设置</button></div>
           <details class="alert-events"><summary>最近发送记录（最多 100 条）</summary><div id="alert-events-list"></div></details>
         </div>
         <p id="alert-feedback" class="alert-message" role="status" hidden></p>
