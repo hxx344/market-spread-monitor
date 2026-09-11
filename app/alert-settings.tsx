@@ -1,108 +1,126 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { memo, useEffect, useRef, useState, type FormEvent } from "react";
 import { Bell, ChevronDown, Plus, Save, Trash2 } from "lucide-react";
-import type { AlertConfig, AlertRule, AlertView } from "../lib/alert-types";
+import type { MonitorAlertAdapter, MonitorAlertDraft, MonitorAlertRule, MonitorAlertView } from "../lib/monitor-alerts";
 
-const initial: AlertConfig = { enabled: false, cooldownSeconds: 300, hysteresis: 0.5, rules: [] };
-const time = (value: string | number | null | undefined) => value == null ? "尚无记录" : `${new Date(value).toISOString().replace("T", " ").slice(0, 19)} UTC`;
+const time = (value: string | null) => value == null ? "尚无记录" : `${new Date(value).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })} 北京时间`;
+const numberValue = (value: number) => Number.isFinite(value) ? value : "";
 
-export default function AlertSettings() {
+function AlertSettings({ monitorId, title, adapter }: { monitorId: string; title: string; adapter: MonitorAlertAdapter }) {
   const [open, setOpen] = useState(false);
-  const [view, setView] = useState<AlertView | null>(null);
-  const [draft, setDraft] = useState<AlertConfig>(initial);
+  const [view, setView] = useState<MonitorAlertView | null>(null);
+  const [draft, setDraft] = useState<MonitorAlertDraft>({ enabled: false, rules: [] });
   const [revision, setRevision] = useState(0);
-  const latestRevision = useRef(0);
   const [busy, setBusy] = useState(false);
   const [dirty, setDirty] = useState(false);
-  const dirtyRef = useRef(false);
   const [error, setError] = useState("");
   const [loadError, setLoadError] = useState("");
   const [message, setMessage] = useState("");
-  const markDirty = () => { dirtyRef.current = true; setDirty(true); setMessage(""); };
-  const edit = (next: AlertConfig) => { markDirty(); setDraft(next); };
-  const editRule = (id: string, values: Partial<AlertRule>) => edit({ ...draft, rules: draft.rules.map(rule => rule.id === id ? { ...rule, ...values } : rule) });
-
+  const dirtyRef = useRef(false), busyRef = useRef(false), latestRevision = useRef(0), generation = useRef(0);
+  const refresh = useRef<() => Promise<void>>(async () => {});
+  const mutation = useRef<AbortController | null>(null);
+  const edit = (next: MonitorAlertDraft) => { dirtyRef.current = true; setDirty(true); setMessage(""); setError(""); setDraft(next); };
+  const editRule = (id: string, values: Partial<MonitorAlertRule>) => edit({ ...draft, rules: draft.rules.map(rule => rule.id === id ? { ...rule, ...values } : rule) });
+  const apply = (next: { draft: MonitorAlertDraft; revision: number }) => {
+    latestRevision.current = next.revision; setDraft(next.draft); setRevision(next.revision);
+    dirtyRef.current = false; setDirty(false);
+  };
   useEffect(() => {
-    const controller = new AbortController();
-    let pending = false;
+    const controller = new AbortController(); let pending = false;
     const load = async () => {
-      if (pending) return;
-      pending = true;
+      if (pending || busyRef.current || document.hidden) return;
+      pending = true; const requestGeneration = generation.current;
       try {
-        const response = await fetch("/api/monitors/hynix/alerts", { cache: "no-store", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]) });
-        if (!response.ok) throw new Error("无法读取告警后台状态。");
-        const next: AlertView = await response.json();
-        if (controller.signal.aborted) return;
-        setLoadError("");
-        if (next.available && next.revision < latestRevision.current) return;
-        latestRevision.current = next.revision ?? 0;
-        setView(next);
-        if (next.available && !dirtyRef.current) { setDraft(next.config); setRevision(next.revision); }
+        const next = await adapter.load(AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]));
+        if (controller.signal.aborted || generation.current !== requestGeneration || (next.available && next.revision < latestRevision.current)) return;
+        setLoadError(""); setView(next);
+        if (next.available) {
+          latestRevision.current = next.revision;
+          if (!dirtyRef.current) { setDraft(next.draft); setRevision(next.revision); }
+        }
       } catch {
-        if (!controller.signal.aborted) setLoadError("无法连接告警后台，请检查 Linux 服务是否正在运行。");
+        if (!controller.signal.aborted && generation.current === requestGeneration) setLoadError("无法刷新告警后台状态，现有配置与草稿已保留。请检查后台服务。");
       } finally { pending = false; }
     };
-    void load();
-    const interval = setInterval(() => { void load(); }, 10_000);
+    refresh.current = load;
+    const unload = (event: BeforeUnloadEvent) => { if (dirtyRef.current) { event.preventDefault(); event.returnValue = ""; } };
+    void load(); const interval = setInterval(() => { void load(); }, 10_000);
     window.addEventListener("feishu-settings-changed", load);
-    return () => { controller.abort(); clearInterval(interval); window.removeEventListener("feishu-settings-changed", load); };
-  }, []);
+    window.addEventListener("beforeunload", unload);
+    document.addEventListener("visibilitychange", load);
+    return () => { controller.abort(); mutation.current?.abort(); clearInterval(interval); window.removeEventListener("feishu-settings-changed", load); window.removeEventListener("beforeunload", unload); document.removeEventListener("visibilitychange", load); };
+  }, [adapter]);
 
-  const apply = (next: AlertView) => {
-    if (next.revision < latestRevision.current) return false;
-    latestRevision.current = next.revision;
-    setView(next); setDraft(next.config); setRevision(next.revision);
-    dirtyRef.current = false; setDirty(false);
-    return true;
-  };
-  async function save(event: FormEvent) {
-    event.preventDefault(); setBusy(true); setError(""); setMessage("");
+  async function mutate(discard: boolean) {
+    if (busyRef.current) return;
+    busyRef.current = true; generation.current++; setBusy(true); setError(""); setMessage("");
+    const controller = new AbortController(); mutation.current = controller;
     try {
-      const response = await fetch("/api/monitors/hynix/alerts", { method: "PUT", headers: { "Content-Type": "application/json" }, signal: AbortSignal.timeout(25_000), body: JSON.stringify({ ...draft, revision }) });
-      const result = await response.json() as AlertView & { error?: string };
-      if (!response.ok) throw new Error(result.error ?? "保存失败。");
-      if (apply(result)) setMessage("配置已保存；后台将在下一轮检查时使用新阈值。");
-      else setError("另一页面已有更新配置，请放弃修改并重载后再编辑。");
-    } catch (error) { setError(error instanceof Error ? error.message : "保存失败。"); }
-    finally { setBusy(false); }
+      const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(25_000)]);
+      if (discard) {
+        const next = await adapter.load(signal);
+        if (!next.available) throw new Error(next.reason || "告警后台未连接，草稿已保留。");
+        if (next.revision < latestRevision.current) throw new Error("后台返回旧配置，草稿已保留，请稍后重试。");
+        if (controller.signal.aborted) return;
+        setView(next); apply(next); setLoadError("");
+      } else {
+        const next = await adapter.save(draft, revision, signal);
+        if (controller.signal.aborted) return;
+        apply(next); setView(current => current ? { ...current, ...next } : current); setLoadError("");
+        setMessage("配置已保存，下一轮后台检查时生效。");
+      }
+    } catch (cause) {
+      if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "操作失败，草稿已保留。");
+    } finally {
+      generation.current++; busyRef.current = false;
+      if (!controller.signal.aborted) { setBusy(false); void refresh.current(); }
+    }
   }
   const connected = view?.available === true;
-  return <section className="alert-panel" aria-label="飞书阈值告警">
-    <button className="alert-heading" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls="alert-settings-body">
-      <span><Bell size={18}/><strong>飞书阈值告警</strong><span className="alert-summary">{!view ? "连接后台中…" : !connected ? "Linux 后台未连接" : view.config.enabled ? `已启用 · ${view.config.rules.filter(rule => rule.enabled).length} 档阈值` : "未启用"}</span></span><span>设置 <ChevronDown size={16} className={open ? "rotated" : ""}/></span>
+  const summary = loadError ? "连接异常" : !view ? "连接后台中…" : !connected ? "Linux 后台未连接" : view.draft.enabled ? `已启用 · ${view.draft.rules.filter(rule => rule.enabled).length} 档` : "未启用";
+  const bodyId = `monitor-alerts-${monitorId}-body`;
+  return <section className="alert-panel monitor-alerts" aria-label={`${title}飞书告警梯度`} data-alert-monitor={monitorId}>
+    <button type="button" className="alert-heading" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls={bodyId}>
+      <span><Bell size={18}/><strong>飞书告警梯度</strong><span className="alert-summary">{title} · {summary}{dirty ? " · 未保存" : ""}</span></span><span>设置<ChevronDown size={16} className={open ? "rotated" : ""}/></span>
     </button>
-    {open && <div id="alert-settings-body" className="alert-body">
-      {!connected ? <p className="alert-help">{view?.reason || loadError || "正在连接告警后台…"}</p> : <>
-        <p className="alert-help">后台每 10 秒检查溢价率，关闭网页后仍会运行。首次启用时若已达到阈值，会立即告警；持续满足条件时不会重复发送。</p>
-        <p className="alert-help">{view.config.webhookConfigured ? "使用整个面板的统一飞书机器人。" : "尚未配置共用机器人，可先保存阈值。"} <button className="shared-settings-link" type="button" onClick={() => window.dispatchEvent(new Event("open-feishu-settings"))}>打开统一设置</button></p>
-        <form onSubmit={save}>
+    {open && <div id={bodyId} className="alert-body">
+      <div className="alert-definitions"><p><strong>冷却</strong>两次成功提醒之间的最短间隔。</p><p><strong>回差</strong>再次允许提醒前，需要离开阈值的幅度。</p></div>
+      <p className="alert-help">持续满足阈值只提醒一次；再次提醒须同时满足重新越过阈值和冷却结束。{adapter.example}</p>
+      {!connected ? <p className="alert-help" role="status">{loadError || view?.reason || "正在连接告警后台…"}</p> : <>
+        <p className="alert-help">{view.webhookConfigured ? "使用整个面板的统一飞书机器人。" : "尚未配置共用机器人，可先保存梯度。"}关闭网页后，后台仍会检查并发送告警。 <button className="shared-settings-link" type="button" onClick={() => window.dispatchEvent(new Event("open-feishu-settings"))}>打开统一设置</button></p>
+        <form onSubmit={(event: FormEvent) => { event.preventDefault(); void mutate(false); }}>
           <fieldset disabled={busy} className="alert-fields">
-            <div className="alert-form-grid">
-              <label>再次告警冷却（秒）<input type="number" min="0" max="86400" step="1" required value={Number.isFinite(draft.cooldownSeconds) ? draft.cooldownSeconds : ""} onChange={event => edit({ ...draft, cooldownSeconds: event.target.valueAsNumber })}/></label>
-              <label>重新布防回差（百分点）<input type="number" min="0" max="100" step="any" required value={Number.isFinite(draft.hysteresis) ? draft.hysteresis : ""} onChange={event => edit({ ...draft, hysteresis: event.target.valueAsNumber })}/></label>
-            </div>
-            <div className="alert-rules-heading"><h3>梯度阈值</h3><button type="button" className="alert-button" disabled={draft.rules.length >= 20} onClick={() => edit({ ...draft, rules: [...draft.rules, { id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`, name: `档位 ${draft.rules.length + 1}`, direction: "above", threshold: Number.NaN, enabled: true }] })}><Plus size={15}/>添加阈值</button></div>
-            <div className="alert-rules">{draft.rules.map(rule => <div className="alert-rule" key={rule.id}>
-              <label className="alert-checkbox"><input type="checkbox" checked={rule.enabled} onChange={event => editRule(rule.id, { enabled: event.target.checked })}/><span>启用</span></label>
-              <label><span className="sr-only">档位名称</span><input aria-label="档位名称" value={rule.name} required maxLength={40} onChange={event => editRule(rule.id, { name: event.target.value })}/></label>
-              <label><span className="sr-only">触发方向</span><select aria-label={`${rule.name}触发方向`} value={rule.direction} onChange={event => editRule(rule.id, { direction: event.target.value as AlertRule["direction"] })}><option value="above">高于或等于 ≥</option><option value="below">低于或等于 ≤</option></select></label>
-              <label className="alert-threshold"><span className="sr-only">溢价率阈值</span><input aria-label={`${rule.name}溢价率阈值`} type="number" step="any" min="-100" max="10000" required placeholder="输入阈值" value={Number.isFinite(rule.threshold) ? rule.threshold : ""} onChange={event => editRule(rule.id, { threshold: event.target.valueAsNumber })}/><span>%</span></label>
-              <button type="button" className="alert-delete" aria-label={`删除${rule.name}`} onClick={() => edit({ ...draft, rules: draft.rules.filter(item => item.id !== rule.id) })}><Trash2 size={16}/></button>
-            </div>)}</div>
-            {!draft.rules.length && <p className="alert-help">添加一档或多档阈值，分别选择向上或向下触发。</p>}
-            <p className="alert-help">例如上方阈值为 40%、回差为 0.5 个百分点：触发后需回落到 39.5% 以下才重新布防，再次达到 40% 且冷却结束后才告警。一次跨越多档会合并成一条消息。</p>
-            <div className="alert-actions"><label className="alert-checkbox"><input type="checkbox" checked={draft.enabled} onChange={event => edit({ ...draft, enabled: event.target.checked })}/>启用飞书告警</label><div><button type="submit" className="alert-button primary"><Save size={14}/>{busy ? "处理中…" : "保存配置"}</button></div></div>
+            <div className="alert-rules-heading"><h3>梯度设置 <span className="alert-summary">{draft.rules.length} / {adapter.maxRules} 档</span></h3><button type="button" className="alert-button" disabled={draft.rules.length >= adapter.maxRules} onClick={() => edit({ ...draft, rules: [...draft.rules, adapter.newRule(draft)] })}><Plus size={15}/>添加梯度</button></div>
+            <div className="monitor-alert-rules">{draft.rules.map((rule, index) => {
+              const metric = adapter.metrics.find(metric => metric.id === rule.metric) ?? adapter.metrics[0];
+              return <div className="monitor-alert-rule" key={rule.id} role="group" aria-label={`第 ${index + 1} 档`}>
+                <div className="monitor-alert-rule-top"><span>第 {index + 1} 档</span><div><label className="alert-checkbox"><input type="checkbox" checked={rule.enabled} onChange={event => editRule(rule.id, { enabled: event.target.checked })}/>启用</label><button type="button" className="alert-delete" aria-label={`删除第 ${index + 1} 档`} onClick={() => edit({ ...draft, rules: draft.rules.filter(item => item.id !== rule.id) })}><Trash2 size={16}/></button></div></div>
+                <div className="monitor-alert-rule-fields">
+                  <label>档位名称<input value={rule.name} required maxLength={adapter.nameMaxLength} onChange={event => editRule(rule.id, { name: event.target.value })}/></label>
+                  <label>监控指标<select aria-label="监控指标" value={rule.metric} onChange={event => editRule(rule.id, { metric: event.target.value })}>{adapter.metrics.map(metric => <option value={metric.id} key={metric.id}>{metric.label}</option>)}</select></label>
+                  <label>触发方向<select aria-label="触发方向" value={rule.direction} onChange={event => editRule(rule.id, { direction: event.target.value as MonitorAlertRule["direction"] })}><option value="above">向上 ≥</option><option value="below">向下 ≤</option></select></label>
+                  <label>阈值（{metric.unit}）<input type="number" step="any" min={metric.min} max={metric.max} required placeholder="输入阈值" value={numberValue(rule.threshold)} onChange={event => editRule(rule.id, { threshold: event.target.valueAsNumber })}/></label>
+                  <label>冷却（分钟）<input type="number" step="any" min="0" max={adapter.cooldownMax} required value={numberValue(rule.cooldownMinutes)} onChange={event => editRule(rule.id, { cooldownMinutes: event.target.valueAsNumber })}/></label>
+                  <label>回差（{metric.hysteresisUnit}）<input type="number" step="any" min="0" max={adapter.hysteresisMax} required value={numberValue(rule.hysteresis)} onChange={event => editRule(rule.id, { hysteresis: event.target.valueAsNumber })}/></label>
+                </div>
+              </div>;
+            })}</div>
+            {!draft.rules.length && <p className="alert-help">添加一档或多档阈值，每档可独立设置冷却、回差和开关。</p>}
+            <div className="alert-actions"><label className="alert-checkbox"><input type="checkbox" checked={draft.enabled} onChange={event => edit({ ...draft, enabled: event.target.checked })}/>启用飞书告警</label><div>{dirty && <button type="button" className="alert-button" onClick={() => void mutate(true)}>放弃修改并重载</button>}<button type="submit" className="alert-button primary"><Save size={14}/>{busy ? "处理中…" : "保存配置"}</button></div></div>
           </fieldset>
         </form>
-        {dirty && <div className="alert-actions"><p className="alert-help">有尚未保存的阈值修改。</p><button type="button" className="alert-button" disabled={busy} onClick={() => { apply(view); setError(""); }}>放弃修改并重载</button></div>}
+        {dirty && <p className="alert-help">有未保存的修改，切换监控会保留草稿。</p>}
         {message && <p className="alert-feedback" role="status">{message}</p>}
         {error && <p className="alert-feedback failure" role="alert">{error}</p>}
         {loadError && <p className="alert-feedback failure" role="alert">{loadError}</p>}
-        <div className="alert-monitor"><span>最近后台检查：{time(view.status.checkedAt)}</span><span>最近成功取价：{time(view.status.lastSuccessAt)}</span></div>
-        {view.status.lastError && <p className="alert-feedback failure">{view.status.lastError}</p>}
-        {view.history.length > 0 && <div className="alert-history"><h3>最近发送记录</h3>{view.history.slice(0, 8).map(item => <div key={item.id}><span>{time(item.time)}</span><strong className={item.status === "sent" ? "positive" : "negative"}>{item.status === "sent" ? "已发送" : "发送失败"}</strong><span>{item.kind === "test" ? "测试消息" : `${item.rules.join("、")} · ${item.premium?.toFixed(2)}%`}{item.error && ` · ${item.error}`}</span></div>)}</div>}
+        <div className="alert-monitor"><span>最近后台检查：{time(view.checkedAt)}</span><span>最近成功取价：{time(view.lastSuccessAt)}</span></div>
+        <p className="alert-help alert-server-market">{view.market}</p>
+        {view.error && <p className="alert-feedback failure" role="alert">{view.error}</p>}
+        <details className="monitor-alert-history"><summary>最近发送记录（{view.history.length} 条）</summary>{view.history.length ? view.history.map(item => <div key={item.id}><div><time>{time(item.time)}</time><strong className={item.status === "sent" ? "positive" : item.status === "failed" ? "negative" : ""}>{{ sent: "已发送", failed: "发送失败", sending: "发送中或结果待确认" }[item.status]}</strong></div><p>{item.description}{item.error && ` · ${item.error}`}</p></div>) : <p className="alert-help">尚无发送记录。</p>}</details>
       </>}
     </div>}
   </section>;
 }
+
+export default memo(AlertSettings);

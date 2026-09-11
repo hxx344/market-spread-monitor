@@ -12,6 +12,8 @@ import OilPanel from "./oil-panel";
 import MonitorSparkline from "./monitor-sparkline";
 import { trendExpired } from "../lib/monitor-trend";
 import NotificationSettings from "./notification-settings";
+import AlertSettings from "./alert-settings";
+import { monitorAlertAdapters } from "../lib/monitor-alerts";
 
 const panels = { oil: memo(OilPanel), hynix: memo(Dashboard) };
 
@@ -65,6 +67,7 @@ export default function MonitorHub() {
     <NotificationSettings/>
     <Tabs value={active} onValueChange={value => setActive(String(value))} className="hub-tabs">
       <TabsList className="hub-tab-list" aria-label="选择监控市场">{monitors.map(monitor => <TabsTrigger key={monitor.id} value={monitor.id} className="hub-tab" aria-label={monitor.title}><span className="hub-card-heading"><i style={{background:monitor.accent}}/><span>{monitor.title}<small>{monitor.subtitle}</small></span><em>{monitor.category}</em></span>{summaries[monitor.id] && <CardSummary summary={summaries[monitor.id]} intervalMs={monitor.quoteIntervalMs} />}</TabsTrigger>)}</TabsList>
+      <div className="hub-alert-settings">{monitors.filter(monitor => monitor.capabilities.includes("alerts")).map(monitor => <div key={monitor.id} hidden={active !== monitor.id}>{monitorAlertAdapters[monitor.id] ? <AlertSettings monitorId={monitor.id} title={monitor.title} adapter={monitorAlertAdapters[monitor.id]}/> : <p role="alert">该监控模块尚未接入统一告警设置。</p>}</div>)}</div>
       {monitors.map(monitor => { const id = monitor.id as keyof typeof panels; const Panel = panels[id]; return <TabsContent key={monitor.id} value={monitor.id} forceMount className="hub-content">{Panel ? <Panel onSummary={summaryHandlers[id]} active={active === id} /> : <p role="alert">该监控模块尚未提供面板。</p>}</TabsContent>; })}
     </Tabs>
   </div>;

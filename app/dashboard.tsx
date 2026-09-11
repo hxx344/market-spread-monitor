@@ -5,7 +5,6 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { Activity, ArrowDownRight, ArrowUpRight, ChevronDown, Clock3, Info, RefreshCw, MoveRight, BarChart3 } from "lucide-react";
 import { ranges } from "../lib/chart-ranges";
-import AlertSettings from "./alert-settings";
 import { dailyPoints, selectRange } from "../lib/market";
 import { useMarketFeed } from "../hooks/use-market-feed";
 import { hynixSummary, type SummaryProps } from "../lib/monitor-summary";
@@ -56,7 +55,6 @@ export default function Dashboard({ onSummary, active = true }: SummaryProps & {
         <article className="metric"><div className="metric-label"><span className="legend-dot ordinary"/>正股折算价格<span className="ticker">SKHX</span></div><div className="metric-value">{money(current?.equivalent)}</div><div className="metric-foot">正股 {money(current?.ordinary)} <span>÷ 10</span></div></article>
         <article className="metric"><div className="metric-label">区间平均溢价<span className="ticker">{ranges.find(r=>r.days===range)?.label}</span></div><div className="metric-value">{percent(stats?.mean)}</div><div className="metric-foot">{stats ? `${percent(stats.min)} 至 ${percent(stats.max)}` : "等待行情数据"}</div></article>
       </section>
-      <AlertSettings />
       {hasOpened && <ChartActivity mode={active ? "visible" : "hidden"}><SpreadChart data={data?.points ?? EMPTY_POINTS} loading={loading} range={range} onRangeChange={setRange} /></ChartActivity>}
       <div className="bottom-grid"><section className="table-panel"><div className="section-heading"><h2>近期观察</h2><span>每日最后共同小时 · 起点 UTC</span></div><div className="table-scroll"><table><thead><tr><th>日期</th><th>ADR</th><th>正股 ÷ 10</th><th>每份价差</th><th>溢价率</th></tr></thead><tbody>{recent.map(p=><tr key={p.time}><td>{date(p.time,true)}<small>{new Date(p.time).toISOString().slice(11,16)}</small></td><td>{money(p.adr)}</td><td>{money(p.equivalent)}</td><td>{signedMoney(p.spread)}</td><td><span className={`premium-pill ${p.premium>=0 ? "positive" : "negative"}`}>{p.premium>=0 ? <ArrowUpRight size={13}/> : <ArrowDownRight size={13}/>}{percent(p.premium)}</span></td></tr>)}{!recent.length && <tr><td colSpan={5} className="empty-table">{loading ? "正在加载记录…" : "暂无记录"}</td></tr>}</tbody></table></div></section>
       <aside className="method-panel"><div className="section-heading"><h2>如何比较</h2><span className="info-icon"><Info size={17}/></span></div><div className="conversion"><div><span className="instrument-label">韩国正股</span><strong>1 <small>股</small></strong><span>000660 · KRX</span></div><MoveRight size={22}/><div><span className="instrument-label">美国 ADR</span><strong>10 <small>份</small></strong><span>SKHY · NASDAQ</span></div></div><div className="formula"><span>ADR 溢价率</span><code>(ADR ÷ (正股美元价 ÷ 10) − 1) × 100%</code></div><p className="method-note">正数表示 ADR 溢价，负数表示折价。两条行情均来自 Hyperliquid 永续合约；价差包含合约基差，并非交易所现货价差。</p><div className="listing-note"><span>ADR 首次交易</span><b>2026.07.10</b></div></aside></div>

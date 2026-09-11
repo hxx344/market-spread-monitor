@@ -29,7 +29,16 @@ export function validateConfig(input, previous = DEFAULT_CONFIG, { requireWebhoo
       throw new Error("每档需有唯一编号、名称、方向和有效阈值（-100% 至 10000%）。");
     }
     ids.add(rule.id);
-    return { id: rule.id, name: rule.name.trim(), enabled: rule.enabled, direction: rule.direction, threshold: rule.threshold };
+    const overrides = {};
+    if (rule.cooldownSeconds !== undefined) {
+      if (!Number.isInteger(rule.cooldownSeconds) || rule.cooldownSeconds < 0 || rule.cooldownSeconds > 86400) throw new Error("每档冷却时间须为 0–86400 秒的整数。");
+      overrides.cooldownSeconds = rule.cooldownSeconds;
+    }
+    if (rule.hysteresis !== undefined) {
+      if (typeof rule.hysteresis !== "number" || !Number.isFinite(rule.hysteresis) || rule.hysteresis < 0 || rule.hysteresis > 100) throw new Error("每档回差须为 0–100 个百分点。");
+      overrides.hysteresis = rule.hysteresis;
+    }
+    return { id: rule.id, name: rule.name.trim(), enabled: rule.enabled, direction: rule.direction, threshold: rule.threshold, ...overrides };
   });
   for (const field of ["webhookUrl", "signingSecret"]) {
     if (input[field] !== undefined && typeof input[field] !== "string") throw new Error("机器人配置格式不正确。");
@@ -63,13 +72,16 @@ export function evaluateRules(config, states, premium, now) {
   const next = structuredClone(states);
   const triggered = [];
   if (!config.enabled || !Number.isFinite(premium)) return { states: next, triggered };
+  const compare = (left, right) => Math.abs(left - right) <= Number.EPSILON * 8 * Math.max(1, Math.abs(left), Math.abs(right)) ? 0 : Math.sign(left - right);
   for (const rule of config.rules) {
     if (!rule.enabled) continue;
     const state = next[rule.id] ??= freshRuleState();
-    const reset = rule.direction === "above" ? premium < rule.threshold - config.hysteresis : premium > rule.threshold + config.hysteresis;
+    const hysteresis = rule.hysteresis ?? config.hysteresis;
+    const cooldownSeconds = rule.cooldownSeconds ?? config.cooldownSeconds;
+    const reset = rule.direction === "above" ? compare(premium, rule.threshold - hysteresis) < 0 : compare(premium, rule.threshold + hysteresis) > 0;
     if (!state.armed && reset) state.armed = true;
     const reached = rule.direction === "above" ? premium >= rule.threshold : premium <= rule.threshold;
-    const cooled = state.lastSentAt === null || now - state.lastSentAt >= config.cooldownSeconds * 1000;
+    const cooled = state.lastSentAt === null || now - state.lastSentAt >= cooldownSeconds * 1000;
     const retryReady = state.lastAttemptAt === null || (state.lastSentAt !== null && state.lastSentAt >= state.lastAttemptAt) || now - state.lastAttemptAt >= 30_000;
     if (state.armed && reached && cooled && retryReady) triggered.push(rule);
   }

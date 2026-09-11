@@ -51,25 +51,6 @@
 
         <details class="data-details panel"><summary><span>日度价格与资金费明细 <span id="table-count" class="table-count"></span></span><span class="details-arrow" aria-hidden="true">＋</span></summary><div class="table-scroll"><table><caption>按 UTC 日期倒序。价格：美元/桶；资金费：等名义、按总敞口的日均小时费率，正值收款。</caption><thead><tr><th scope="col">日期</th><th scope="col">布伦特</th><th scope="col">WTI</th><th scope="col">价差</th><th scope="col">较上个有效日</th><th scope="col">做多资金费 / h</th><th scope="col">做空资金费 / h</th><th scope="col">结算样本</th></tr></thead><tbody id="data-table"></tbody></table></div></details>
       </div>
-      <section class="panel alert-panel" id="alerts" aria-labelledby="alert-title">
-        <div class="alert-heading"><div><p class="eyebrow">FEISHU ALERTS</p><h2 id="alert-title">价格与价差告警</h2></div><span id="alert-service-state" class="alert-state">正在连接监控服务</span></div>
-        <p id="alert-runtime" class="alert-note">正在读取服务器状态…</p>
-        <p id="alert-market" class="alert-market"></p>
-        <p id="alert-service-error" class="alert-message" role="status" hidden></p>
-
-        <div id="alert-editor" hidden>
-          <form id="alert-form">
-            <div class="alert-actions"><label class="alert-toggle"><input type="checkbox" id="alert-enabled" />启用飞书告警</label><button id="alert-add" type="button" class="alert-secondary">＋ 添加梯度</button></div>
-            <p class="alert-note">每个梯度独立触发，单位为美元/桶。保存后，已达到阈值的梯度会在下一次采集时告警。</p>
-            <div id="alert-rules" class="alert-rules"></div>
-            <p class="alert-note">同一梯度持续满足条件只告警一次。价格回到阈值另一侧并超出回差后才重新待命；再次触发仍需满足冷却时间。</p>
-            <div class="alert-actions alert-save-actions"><button type="submit" class="alert-primary">保存设置</button><button id="alert-reload" type="button" class="alert-secondary">重新载入</button><span id="alert-dirty" class="alert-note"></span></div>
-          </form>
-          <div class="alert-test-row"><p class="alert-note">飞书机器人由整个面板统一配置，原油规则独立生效。</p><button id="alert-shared-settings" type="button" class="alert-secondary">打开统一飞书设置</button></div>
-          <details class="alert-events"><summary>最近发送记录（最多 100 条）</summary><div id="alert-events-list"></div></details>
-        </div>
-        <p id="alert-feedback" class="alert-message" role="status" hidden></p>
-      </section>
       <footer><div class="footer-brand">OIL SPREAD<span>2026</span></div><p>来源：<a href="https://app.hyperliquid.xyz/trade/xyz:BRENTOIL" target="_blank" rel="noreferrer">Hyperliquid BRENTOIL ↗</a><span class="footer-divider">/</span><a href="https://app.hyperliquid.xyz/trade/xyz:WTIOIL" target="_blank" rel="noreferrer">WTIOIL ↗</a><span class="footer-divider">/</span><a href="https://hyperliquid.gitbook.io/hyperliquid-docs/trading/funding" target="_blank" rel="noreferrer">资金费规则 ↗</a><span class="footer-divider">/</span><a href="https://docs.trade.xyz/asset-directory/commodities" target="_blank" rel="noreferrer">合约规格 ↗</a></p><p class="footer-note" id="source-note">仅使用两合约同日已收盘的日 K。尚未上市或缺失日期不补值。</p></footer>
     </main>
 

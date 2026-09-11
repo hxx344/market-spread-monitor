@@ -209,3 +209,88 @@ test("resident scheduler polls every 10 seconds and stops without depending on p
   await service.stop(); t.mock.timers.tick(30000); await new Promise(resolve => setImmediate(resolve));
   assert.equal(calls, 2);
 });
+
+test("optional per-rule controls preserve inheritance and validate explicit zero", () => {
+  const inherited = validateConfig(config([rule("up", 40)])).rules[0];
+  assert.equal(Object.hasOwn(inherited, "cooldownSeconds"), false);
+  assert.equal(Object.hasOwn(inherited, "hysteresis"), false);
+  const explicit = validateConfig(config([{ ...rule("up", 40), cooldownSeconds: 0, hysteresis: 0 }])).rules[0];
+  assert.equal(explicit.cooldownSeconds, 0); assert.equal(explicit.hysteresis, 0);
+  for (const value of [null, "", "90", false, NaN, Infinity, -1, 0.5, 86401]) assert.throws(() => validateConfig(config([{ ...rule("up", 40), cooldownSeconds: value }])));
+  for (const value of [null, "", "0.5", false, NaN, Infinity, -0.1, 100.01]) assert.throws(() => validateConfig(config([{ ...rule("up", 40), hysteresis: value }])));
+});
+
+test("each tier independently applies cooldown and hysteresis with global fallback", () => {
+  const cfg = { ...config([rule("inherited", 40), { ...rule("zero", 40), cooldownSeconds: 0, hysteresis: 0 }, { ...rule("slow", 40), cooldownSeconds: 120, hysteresis: 2 }]), cooldownSeconds: 60, hysteresis: 1 };
+  const states = armed => Object.fromEntries(cfg.rules.map(item => [item.id, { armed, lastSentAt: 1000, lastAttemptAt: 1000 }]));
+  const triggered = now => evaluateRules(cfg, states(true), 45, now).triggered.map(item => item.id);
+  assert.deepEqual(triggered(1001), ["zero"]);
+  assert.deepEqual(triggered(61000), ["inherited", "zero"]);
+  assert.deepEqual(triggered(121000), ["inherited", "zero", "slow"]);
+  const reset = evaluateRules(cfg, states(false), 39.5, 2000).states;
+  assert.equal(reset.inherited.armed, false); assert.equal(reset.zero.armed, true); assert.equal(reset.slow.armed, false);
+  assert.equal(evaluateRules(cfg, states(false), 39, 2000).states.inherited.armed, false);
+  assert.equal(evaluateRules(cfg, states(false), 38, 2000).states.slow.armed, false);
+  assert.equal(evaluateRules(cfg, states(false), 37.99, 2000).states.slow.armed, true);
+});
+
+test("decimal reset equality remains strict and zero cooldown retains failed-send retry", () => {
+  const lower = config([{ ...rule("down", 0.3, "below"), hysteresis: 0.6 }]);
+  const delivered = { down: { armed: false, lastSentAt: 1000, lastAttemptAt: 1000 } };
+  assert.equal(evaluateRules(lower, delivered, 0.9, 2000).states.down.armed, false);
+  assert.equal(evaluateRules(lower, delivered, 0.9001, 2000).states.down.armed, true);
+  const upper = config([{ ...rule("up", 40), cooldownSeconds: 0, hysteresis: 0 }]);
+  const failed = { up: { ...freshRuleState(), lastAttemptAt: 1000 } };
+  assert.equal(evaluateRules(upper, failed, 42, 30999).triggered.length, 0);
+  assert.equal(evaluateRules(upper, failed, 42, 31000).triggered.length, 1);
+  assert.equal(evaluateRules(upper, failed, 39, 31000).triggered.length, 0);
+});
+
+test("saving optional controls or names preserves successful delivery state and history", async () => {
+  let now = 100000, sent = 0;
+  const baseRule = rule("up", 40), cfg = config([baseRule]);
+  const service = createAlertService(memoryStore(), { clock: () => now, getQuote: async () => point(45, now), deliver: async () => { sent++; } });
+  await service.update({ ...cfg, revision: 0 }); await service.check();
+  const before = service.view();
+  const edits = [{ ...baseRule, cooldownSeconds: cfg.cooldownSeconds, hysteresis: cfg.hysteresis }, { ...baseRule, name: "renamed", cooldownSeconds: 0, hysteresis: 0 }, baseRule];
+  for (let index = 0; index < edits.length; index++) {
+    await service.update({ ...cfg, rules: [edits[index]], revision: index + 1 });
+    assert.deepEqual(service.view().ruleStates, before.ruleStates);
+    now += 10000; await service.check();
+    assert.equal(sent, 1); assert.deepEqual(service.view().history, before.history);
+  }
+  await service.stop();
+});
+
+test("legacy v1/v2 inherited rules load without rewriting existing files", async t => {
+  for (const version of [1, 2]) {
+    const directory = await temporary(t), store = await openStore(directory), state = initialState();
+    state.version = version; state.revision = 7;
+    state.config = { ...config([rule("inherited", 40)]), webhookUrl: version === 1 ? webhookUrl : "", cooldownSeconds: 90, hysteresis: 0.25 };
+    state.ruleStates = { inherited: { armed: false, lastSentAt: 100000, lastAttemptAt: 100000 } };
+    await store.save(state);
+    const file = join(directory, "alerts.json"), original = await readFile(file, "utf8");
+    const reopened = await openStore(directory);
+    assert.deepEqual(reopened.get(), state); assert.equal(await readFile(file, "utf8"), original);
+    assert.equal(Object.hasOwn(reopened.get().config.rules[0], "cooldownSeconds"), false);
+  }
+});
+
+test("saved per-rule seconds and hysteresis survive restart with sent state intact", async t => {
+  const directory = await temporary(t), store = await openStore(directory);
+  let now = 100000, premium = 45, sent = 0;
+  const notifications = { configured: () => true, view: () => ({ signingSecretConfigured: false }), send: async () => { sent++; } };
+  const options = { notifications, clock: () => now, getQuote: async () => point(premium, now) };
+  const service = createAlertService(store, options);
+  await service.update({ revision: 0, enabled: true, cooldownSeconds: 600, hysteresis: 3, rules: [{ ...rule("up", 40), cooldownSeconds: 90, hysteresis: 0.25 }] });
+  await service.check(); assert.equal(sent, 1);
+  const saved = store.get(); assert.equal(saved.version, 2); assert.equal(saved.config.rules[0].cooldownSeconds, 90);
+  await service.stop();
+  const reopened = await openStore(directory); assert.deepEqual(reopened.get(), saved);
+  const restarted = createAlertService(reopened, options);
+  now = 100001; premium = 39.75; await restarted.check(); assert.equal(restarted.view().ruleStates.up.armed, false);
+  now = 100002; premium = 39.74; await restarted.check(); assert.equal(restarted.view().ruleStates.up.armed, true);
+  now = 189999; premium = 40; await restarted.check(); assert.equal(sent, 1);
+  now = 190000; await restarted.check(); assert.equal(sent, 2);
+  await restarted.stop();
+});

@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import { mount as mountChart } from "../modules/oil/app.mjs";
-import { mount as mountAlerts } from "../modules/oil/alerts.mjs";
 import { oilSummary, type SummaryProps } from "../lib/monitor-summary";
 type Mounted = { dispose: () => void };
 
@@ -23,7 +22,6 @@ export default function OilPanel({ onSummary }: SummaryProps) {
         // This markup is a checked-in first-party asset, never user/API HTML.
         root.innerHTML = `<style>${css}</style>${html}`;
         mounted.push(mountChart(root, { onSummary: update => onSummary?.(oilSummary(update)) }));
-        mounted.push(mountAlerts(root));
         root.querySelectorAll<HTMLAnchorElement>("[data-local-anchor]").forEach(anchor => anchor.addEventListener("click", event => { event.preventDefault(); root.getElementById(anchor.hash.slice(1))?.scrollIntoView({ behavior: "smooth" }); }, { signal: controller.signal }));
       } catch (cause) {
         if (!controller.signal.aborted) {

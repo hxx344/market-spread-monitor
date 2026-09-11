@@ -1,6 +1,6 @@
 import type { LiveQuote } from "./market";
 
-export type AlertRule = { id: string; name: string; direction: "above" | "below"; threshold: number; enabled: boolean };
+export type AlertRule = { id: string; name: string; direction: "above" | "below"; threshold: number; enabled: boolean; cooldownSeconds?: number; hysteresis?: number };
 export type AlertConfig = { enabled: boolean; cooldownSeconds: number; hysteresis: number; rules: AlertRule[] };
 export type AlertView = {
   available: boolean;
