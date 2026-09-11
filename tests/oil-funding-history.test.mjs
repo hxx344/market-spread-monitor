@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { ASSETS, DAY } from '../modules/oil/hyperliquid.mjs';
-import { HOUR, pairFundingHistory, validateFundingRows, dailyFundingRates, createFundingSnapshot, fetchFundingHistory, fetchFundingSnapshot } from '../modules/oil/funding-history.mjs';
+import { HOUR, pairFundingHistory, validateFundingRows, dailyFundingRates, analyzeFundingRange, createFundingSnapshot, fetchFundingHistory, fetchFundingSnapshot } from '../modules/oil/funding-history.mjs';
 
 const start = Date.UTC(2026, 2, 4);
 const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-12, `${actual} != ${expected}`);
@@ -117,4 +117,57 @@ test('a failed history leg rejects refresh without mutating the retained snapsho
     return request.coin===ASSETS.brent.coin?{ok:true,json:async()=>[]}:{ok:false,status:500};
   }}),/HTTP 500/);
   assert.equal(JSON.stringify(existing),before);
+});
+
+test('cumulative annualization weights actual hours, resets at range start and mirrors long/short', () => {
+  const rows = [{time:start-HOUR,brent:.5,wti:0},{time:start+23*HOUR,brent:.003,wti:.001},{time:start+DAY,brent:.001,wti:.005},{time:start+DAY+HOUR,brent:.002,wti:.002},{time:start+2*DAY,brent:.5,wti:0}];
+  const result = analyzeFundingRange(rows, '2026-03-04', '2026-03-05');
+  assert.equal(result.count, 3);
+  assert.equal(result.expectedHours, 48);
+  near(result.shortCumulative, -.001);
+  near(result.shortAnnualized, -.001 / 3 * 8760);
+  near(result.longAnnualized, -result.shortAnnualized);
+  near(result.longCumulative, -result.shortCumulative);
+  near(result.points[0].shortAnnualized, .001 * 8760);
+  assert.deepEqual(result.points.map(row => row.cumulativeCount), [1,3]);
+  const second = analyzeFundingRange(rows, '2026-03-05', '2026-03-05');
+  near(second.shortCumulative, -.002);
+  near(second.shortAnnualized, -.002 / 2 * 8760);
+  assert.equal(second.expectedHours, 24);
+});
+
+test('date-interval accumulation includes all funding dates and discloses one-leg and whole-hour gaps', () => {
+  const rows = [{time:start,brent:.001,wti:0},{time:start+HOUR,brent:.9,wti:null},{time:start+2*DAY,brent:0,wti:.001}];
+  const result = analyzeFundingRange(rows,'2026-03-04','2026-03-06');
+  assert.deepEqual(result.points.map(row => row.date), ['2026-03-04','2026-03-06']);
+  assert.equal(result.count, 2);
+  assert.equal(result.missingHours, 70);
+  near(result.shortCumulative, 0);
+  near(result.shortAnnualized, 0);
+});
+
+test('empty, zero and single-hour intervals stay distinct and invalid calculations fail', () => {
+  const empty = analyzeFundingRange([], '2026-03-04','2026-03-04');
+  assert.equal(empty.shortAnnualized, null);
+  assert.equal(empty.shortCumulative, null);
+  assert.equal(empty.count, 0);
+  assert.equal(empty.missingHours, 24);
+  const single = analyzeFundingRange([{time:start,brent:0,wti:0}], '2026-03-04','2026-03-04');
+  assert.equal(single.shortAnnualized, 0);
+  assert.equal(single.count, 1);
+  assert.throws(() => analyzeFundingRange([], '2026-02-30','2026-03-04'), /Invalid funding date range/);
+  assert.throws(() => analyzeFundingRange([], '2026-03-05','2026-03-04'), /Invalid funding date range/);
+  assert.throws(() => analyzeFundingRange([{time:start,brent:Number.MAX_VALUE,wti:-Number.MAX_VALUE}], '2026-03-04','2026-03-04'), /overflow/);
+});
+
+test('archived interval cumulative returns equal an independent sum of actual hourly settlements', () => {
+  const from='2026-08-10',through='2026-09-09';
+  const paired=saved.data.filter(row => row.time>=Date.parse(from) && row.time<Date.parse(through)+DAY && row.brent!==null && row.wti!==null);
+  const sum=paired.reduce((value,row)=>value+(row.brent-row.wti)/2,0);
+  const result=analyzeFundingRange(saved.data,from,through);
+  assert.equal(result.count,31*24);
+  assert.equal(result.missingHours,0);
+  near(result.shortCumulative,sum);
+  near(result.shortAnnualized,sum/paired.length*8760);
+  near(result.points.at(-1).shortAnnualized,result.shortAnnualized);
 });

@@ -1,6 +1,6 @@
 import { round, signed, validateRows, filterRows, summarize, monthlyAverages, chartDomain } from './data-utils.mjs';
 import { fetchSnapshot, fetchMarket, calculateShortSpreadFunding, DAY } from './hyperliquid.mjs';
-import { fetchFundingSnapshot, createFundingSnapshot, dailyFundingRates } from './funding-history.mjs';
+import { fetchFundingSnapshot, createFundingSnapshot, dailyFundingRates, analyzeFundingRange } from './funding-history.mjs';
 
 import { createLifecycle } from './lifecycle.mjs';
 /** @param {ShadowRoot} root @param {{ onSummary?: (summary: import('../../lib/monitor-summary').OilSummaryUpdate) => void }} options */
@@ -9,6 +9,8 @@ const life = createLifecycle();
 const $ = id => root.getElementById(id);
 const state = { rows: [], rawDates: [], range: 'ytd', view: 'spread', visible: [], chart: null, selectedDate: null, market: null, metadata: null, basis: 'quantity', marketMode: 'snapshot', historyMode: 'snapshot', refreshing: false, fundingSnapshot: null, fundingDaily: new Map(), fundingChart: null, fundingHistoryMode: 'loading', fundingRefreshing: false };
 const labels = { ytd: '今年以来', '1m': '近 1 月', '3m': '近 3 月' };
+let fundingHistoryView = 'annualized', fundingAnalysis = null, fundingAnalysisSource = null, fundingAnalysisRange = '';
+let fundingRangeDaily = new Map();
 const money = value => `${value.toFixed(3)}<small>美元 / 桶</small>`;
 const shortDate = date => `${Number(date.slice(5, 7))} 月 ${Number(date.slice(8))} 日`;
 const displayDate = date => date.replaceAll('-', '.');
@@ -220,19 +222,40 @@ function renderChart() {
   $('chart-cursor').setAttribute('aria-valuetext', cursorDescription(selected));
   renderFundingHistoryChart();
   hideTooltip();
-  if ([$('chart-cursor'), $('funding-history-cursor')].includes(root.activeElement)) showTooltip(cursorIndex);
+  if (root.activeElement === $('chart-cursor')) showTooltip(cursorIndex);
+  else if (root.activeElement === $('funding-history-cursor')) showFundingObservation(Number($('funding-history-cursor').value));
 }
 
 function renderFundingHistoryChart() {
   if (!state.chart || !state.visible.length) return;
   const svg = $('funding-history-chart');
-  const records = state.visible.map(row => state.fundingDaily.get(row.date)).filter(Boolean);
+  const firstDate = state.visible[0].date, lastDate = state.visible.at(-1).date;
+  const rangeKey = `${firstDate}/${lastDate}`;
+  const source = state.fundingSnapshot?.data;
+  if (!fundingAnalysis || fundingAnalysisSource !== source || fundingAnalysisRange !== rangeKey) {
+    fundingAnalysis = analyzeFundingRange(source ?? [], firstDate, lastDate);
+    fundingAnalysisSource = source; fundingAnalysisRange = rangeKey;
+    fundingRangeDaily = new Map(fundingAnalysis.points.map(row => [row.date, row]));
+  }
+  const records = fundingAnalysis.points;
+  const annualized = fundingHistoryView === 'annualized';
+  const metricLabel = annualized ? '累计年化资金费率' : '日均小时资金费率';
+  const fields = annualized ? ['longAnnualized', 'shortAnnualized'] : ['longRate', 'shortRate'];
+  root.querySelectorAll('[data-funding-view]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.fundingView === fundingHistoryView)));
+  $('funding-history-unit').textContent = annualized ? '% / 年 · 简单年化' : '% / 小时 · 日均值';
+  $('funding-history-range').textContent = `${labels[state.range]} · ${displayDate(firstDate)} — ${displayDate(lastDate)} · UTC 结算日`;
+  for (const direction of ['long', 'short']) {
+    const value = fundingAnalysis[`${direction}Annualized`];
+    showSignedValue(`funding-history-${direction}-annual`, value === null ? '—' : percent(value, 2), value ?? 0);
+    const cumulative = fundingAnalysis[`${direction}Cumulative`];
+    $(`funding-history-${direction}-cumulative`).textContent = cumulative === null ? '—' : percent(cumulative, 4);
+  }
   const empty = $('funding-history-empty');
   svg.replaceChildren(); state.fundingChart = null;
   $('funding-history-tooltip').hidden = true;
   const mode = state.fundingHistoryMode;
   $('funding-history-status').textContent = state.fundingSnapshot ? `${mode === 'live' ? '历史费率已同步' : mode === 'stale' ? '历史费率更新失败，保留数据' : '历史费率备用快照'} · ${beijingTime(state.fundingSnapshot.metadata.fetchedAt)} 北京时间。不足 24 个样本的日期按已有共同结算小时求均值，不补零。` : mode === 'error' ? '历史资金费率暂不可用；价格图表与当前预估仍可使用。可点击顶部刷新数据重试。' : '正在载入已结算资金费率。';
-  $('funding-history-count').textContent = records.length ? `${records.length} 天 · ${records.reduce((sum, row) => sum + row.count, 0).toLocaleString('zh-CN')} 个共同小时` : '';
+  $('funding-history-count').textContent = state.fundingSnapshot ? `${fundingAnalysis.count.toLocaleString('zh-CN')} / ${fundingAnalysis.expectedHours.toLocaleString('zh-CN')} 个共同小时 · ${fundingAnalysis.missingHours ? `缺少 ${fundingAnalysis.missingHours.toLocaleString('zh-CN')} 小时，累计仅含已覆盖数据` : '覆盖完整'}` : '';
   if (records.length) svg.removeAttribute('hidden'); else svg.setAttribute('hidden', '');
   empty.hidden = Boolean(records.length);
   $('funding-history-cursor').disabled = !records.length;
@@ -241,11 +264,12 @@ function renderFundingHistoryChart() {
   const height = Math.max(svg.clientHeight, 185);
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
   const top = 15, bottom = 29;
-  const maxAbs = Math.max(...records.map(row => Math.abs(row.shortRate)), 0.000001) * 1.18;
-  const axisDigits = Math.min(6, Math.max(3, 1 - Math.floor(Math.log10(maxAbs * 100))));
+  const maxAbs = Math.max(...records.map(row => Math.abs(row[fields[1]])), annualized ? 0.0001 : 0.000001) * 1.18;
+  const axisDigits = Math.min(6, Math.max(annualized ? 1 : 3, 1 - Math.floor(Math.log10(maxAbs * 100))));
   const y = rate => top + (maxAbs - rate) / (2 * maxAbs) * (height - top - bottom);
-  svg.append(svgElement('title', {}, `历史日均小时资金费率，${state.visible[0].date}至${state.visible.at(-1).date}`));
-  svg.append(svgElement('desc', {}, '两腿等预言机美元名义，按两腿总敞口计算。做多为多布伦特空WTI，做空相反。正值收款，负值付款。每日数值及样本数见下方明细表。'));
+  svg.setAttribute('aria-label', `历史做多与做空价差的${metricLabel}`);
+  svg.append(svgElement('title', {}, `${metricLabel}，${firstDate}至${lastDate}`));
+  svg.append(svgElement('desc', {}, `两腿等预言机美元名义，按两腿总敞口计算。做多为多布伦特空WTI，做空相反。正值收款，负值付款。累计年化为所选区间净小时率之和除以有效小时数乘8760，不复利。当前覆盖${fundingAnalysis.count}个小时，缺少${fundingAnalysis.missingHours}个小时。`));
   for (let i = -2; i <= 2; i++) {
     const value = maxAbs * i / 2;
     svg.append(svgElement('line', { x1: padding.left, x2: width - padding.right, y1: y(value), y2: y(value), stroke: i === 0 ? '#66725e' : '#2b352c', 'stroke-dasharray': i === 0 ? 'none' : '3 5' }));
@@ -254,12 +278,10 @@ function renderFundingHistoryChart() {
   const tickCount = width < 500 ? 4 : 7;
   const indices = [...new Set(Array.from({ length: Math.min(tickCount, state.visible.length) }, (_, i) => Math.round(i * (state.visible.length - 1) / (Math.min(tickCount, state.visible.length) - 1 || 1))))];
   indices.forEach((index, i) => { const date = state.visible[index].date; svg.append(svgElement('text', { x: x(date), y: height - 6, 'text-anchor': i === 0 ? 'start' : i === indices.length - 1 ? 'end' : 'middle' }, `${Number(date.slice(5, 7))}/${Number(date.slice(8))}`)); });
-  const series = [{ field: 'longRate', color: '#99bdf2', dash: 'none' }, { field: 'shortRate', color: '#e9b288', dash: '5 3' }];
+  const series = [{ field: fields[0], color: '#99bdf2', dash: 'none' }, { field: fields[1], color: '#e9b288', dash: '5 3' }];
   for (const item of series) {
     let path = '', previous = null;
-    for (const row of state.visible) {
-      const point = state.fundingDaily.get(row.date);
-      if (!point) { previous = null; continue; }
+    for (const point of records) {
       const connected = previous && Date.parse(point.date) - Date.parse(previous.date) === DAY;
       path += `${connected ? 'L' : 'M'}${x(point.date).toFixed(3)},${y(point[item.field]).toFixed(3)} `;
       if (!connected || point.count < 24) svg.append(svgElement('circle', { cx: x(point.date), cy: y(point[item.field]), r: 2.5, fill: '#181e1b', stroke: item.color, 'stroke-width': 1.5 }));
@@ -273,31 +295,33 @@ function renderFundingHistoryChart() {
   const dots = series.map(item => { const dot = svgElement('circle', { r: 4, fill: item.color, stroke: '#181e1b', 'stroke-width': 2 }); crosshair.append(dot); return { field: item.field, node: dot }; });
   svg.append(crosshair);
   state.fundingChart = { width, x, y, crosshair, guide, dots };
-  $('funding-history-cursor').max = state.visible.length - 1;
-  const index = Math.max(0, state.visible.findIndex(row => row.date === state.selectedDate));
+  $('funding-history-cursor').max = records.length - 1;
+  const index = Math.max(0, records.findIndex(row => row.date === state.selectedDate));
   $('funding-history-cursor').value = index;
-  $('funding-history-cursor').setAttribute('aria-valuetext', historicalFundingDescription(state.visible[index].date));
-  if ([$('chart-cursor'), $('funding-history-cursor')].includes(root.activeElement)) showTooltip(index);
+  $('funding-history-cursor').setAttribute('aria-valuetext', historicalFundingDescription(records[index].date));
+  if (root.activeElement === $('funding-history-cursor')) showFundingObservation(index);
+  else if (root.activeElement === $('chart-cursor')) showTooltip(Number($('chart-cursor').value));
 }
 
 function historicalFundingDescription(date) {
-  const row = state.fundingDaily.get(date);
-  return row ? `${date}，做多价差 ${percent(row.longRate)}，做空价差 ${percent(row.shortRate)}，日均小时费率，等名义总敞口，${row.count}个结算小时样本` : `${date}，没有共同历史资金费率样本`;
+  const row = fundingRangeDaily.get(date), annualized = fundingHistoryView === 'annualized';
+  return row ? `${date}，做多价差 ${percent(annualized ? row.longAnnualized : row.longRate, annualized ? 2 : 5)}，做空价差 ${percent(annualized ? row.shortAnnualized : row.shortRate, annualized ? 2 : 5)}，${annualized ? '区间累计年化' : '日均小时费率'}，等名义总敞口，当日${row.count}个结算小时，区间累计${row.cumulativeCount}个有效小时` : `${date}，没有共同历史资金费率样本`;
 }
 
 function showHistoricalFundingTooltip(date) {
   const chart = state.fundingChart;
   if (!chart) return;
-  const row = state.fundingDaily.get(date), px = chart.x(date);
+  const row = fundingRangeDaily.get(date), px = chart.x(date), annualized = fundingHistoryView === 'annualized';
   const tooltip = $('funding-history-tooltip');
   chart.crosshair.setAttribute('visibility', row ? 'visible' : 'hidden');
   if (row) {
     chart.guide.setAttribute('x1', px); chart.guide.setAttribute('x2', px);
     for (const dot of chart.dots) { dot.node.setAttribute('cx', px); dot.node.setAttribute('cy', chart.y(row[dot.field])); }
   }
-  tooltip.innerHTML = `<div class="tooltip-date">${displayDate(date)} · UTC 结算日</div>${row ? `<div class="tooltip-row funding-history-tooltip-long"><span>做多价差</span><strong>${percent(row.longRate)}</strong></div><div class="tooltip-row funding-history-tooltip-short"><span>做空价差</span><strong>${percent(row.shortRate)}</strong></div><div class="tooltip-date">日均小时率 · ${row.count} / 24 小时样本</div>` : '<div>当日无共同结算样本</div>'}`;
+  tooltip.innerHTML = `<div class="tooltip-date">${displayDate(date)} · UTC 结算日</div>${row ? `<div class="tooltip-row funding-history-tooltip-long"><span>做多${annualized ? '年化' : '小时率'}</span><strong>${percent(annualized ? row.longAnnualized : row.longRate, annualized ? 2 : 5)}</strong></div><div class="tooltip-row funding-history-tooltip-short"><span>做空${annualized ? '年化' : '小时率'}</span><strong>${percent(annualized ? row.shortAnnualized : row.shortRate, annualized ? 2 : 5)}</strong></div><div class="tooltip-row"><span>做多累计</span><strong>${percent(row.longCumulative, 4)}</strong></div><div class="tooltip-row"><span>做空累计</span><strong>${percent(row.shortCumulative, 4)}</strong></div><div class="tooltip-date">当日 ${row.count} / 24 小时<br>从区间起点累计 ${row.cumulativeCount} 个有效小时</div>` : '<div>当日无共同结算样本</div>'}`;
   tooltip.hidden = false;
-  tooltip.style.left = `${Math.max(0, Math.min(px + 14, chart.width - tooltip.offsetWidth))}px`;
+  const displayWidth = $('funding-history-chart').clientWidth;
+  tooltip.style.left = `${Math.max(0, Math.min(px * displayWidth / chart.width + 14, displayWidth - tooltip.offsetWidth))}px`;
   tooltip.style.top = '29px';
   $('funding-history-cursor').setAttribute('aria-valuetext', historicalFundingDescription(date));
 }
@@ -321,8 +345,18 @@ function showTooltip(index) {
   tooltip.style.top = '38px';
   $('chart-cursor').setAttribute('aria-valuetext', cursorDescription(row));
   $('chart-cursor').value = index;
-  $('funding-history-cursor').value = index;
+  const fundingIndex = fundingAnalysis?.points.findIndex(point => point.date === row.date) ?? -1;
+  if (fundingIndex >= 0) $('funding-history-cursor').value = fundingIndex;
   showHistoricalFundingTooltip(row.date);
+}
+
+function showFundingObservation(index) {
+  const point = fundingAnalysis?.points[index];
+  if (!point) return;
+  const priceIndex = state.visible.findIndex(row => row.date === point.date);
+  if (priceIndex >= 0) showTooltip(priceIndex);
+  else { hideTooltip(); state.selectedDate = point.date; showHistoricalFundingTooltip(point.date); }
+  $('funding-history-cursor').value = index;
 }
 
 function hideTooltip() {
@@ -441,6 +475,7 @@ async function loadHistoricalFunding() {
 }
 
 root.querySelectorAll('[data-range]').forEach(button => button.addEventListener('click', () => { state.range = button.dataset.range; render(); }));
+root.querySelectorAll('[data-funding-view]').forEach(button => life.on(button, 'click', () => { fundingHistoryView = button.dataset.fundingView; renderFundingHistoryChart(); }));
 const tabs = [...root.querySelectorAll('[data-view]')];
 for (const button of tabs) {
   button.addEventListener('click', () => { state.view = button.dataset.view; render(false); });
@@ -457,16 +492,20 @@ function handleChartPointer(event) {
   const rect = event.currentTarget.getBoundingClientRect();
   const px = (event.clientX - rect.left) * state.chart.width / rect.width;
   const target = state.chart.start + (px - state.chart.padding.left) / state.chart.plotWidth * (state.chart.end - state.chart.start);
+  const funding = event.currentTarget.id === 'funding-history-chart';
+  const rows = funding ? fundingAnalysis?.points ?? [] : state.visible;
+  if (!rows.length) return;
   let index = 0;
-  state.visible.forEach((row, i) => { if (Math.abs(Date.parse(row.date) - target) < Math.abs(Date.parse(state.visible[index].date) - target)) index = i; });
-  $('chart-cursor').value = index; showTooltip(index);
+  rows.forEach((row, i) => { if (Math.abs(Date.parse(row.date) - target) < Math.abs(Date.parse(rows[index].date) - target)) index = i; });
+  if (funding) showFundingObservation(index);
+  else { $('chart-cursor').value = index; showTooltip(index); }
 }
 $('main-chart').addEventListener('pointermove', handleChartPointer);
 $('funding-history-chart').addEventListener('pointermove', handleChartPointer);
 $('funding-history-chart').addEventListener('pointerleave', hideTooltip);
 $('funding-history-chart').addEventListener('pointerdown', event => { if (event.pointerType === 'touch') $('funding-history-chart').dispatchEvent(new PointerEvent('pointermove', { clientX: event.clientX, clientY: event.clientY })); });
-$('funding-history-cursor').addEventListener('input', event => showTooltip(Number(event.target.value)));
-$('funding-history-cursor').addEventListener('focus', event => showTooltip(Number(event.target.value)));
+$('funding-history-cursor').addEventListener('input', event => showFundingObservation(Number(event.target.value)));
+$('funding-history-cursor').addEventListener('focus', event => showFundingObservation(Number(event.target.value)));
 $('funding-history-cursor').addEventListener('blur', hideTooltip);
 $('funding-history-cursor').addEventListener('keydown', event => { if (event.key === 'Escape') hideTooltip(); });
 $('main-chart').addEventListener('pointerleave', hideTooltip);

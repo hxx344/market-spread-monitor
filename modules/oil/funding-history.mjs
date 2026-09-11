@@ -56,6 +56,29 @@ export function dailyFundingRates(rows) {
   return [...groups.values()].map(group => ({ ...group, brentRate: group.brentRate / group.count, wtiRate: group.wtiRate / group.count, shortRate: group.shortRate / group.count, longRate: -group.shortRate / group.count })).sort((a, b) => a.date.localeCompare(b.date));
 }
 
+/** Sum actual paired settlements across the entire selected UTC date interval. */
+export function analyzeFundingRange(rows, firstDate, lastDate) {
+  const start = Date.parse(`${firstDate}T00:00:00Z`), end = Date.parse(`${lastDate}T00:00:00Z`) + DAY;
+  if (![firstDate, lastDate].every(date => /^2026-\d{2}-\d{2}$/.test(date)) || !Number.isFinite(start) || !Number.isFinite(end) || end <= start || new Date(start).toISOString().slice(0, 10) !== firstDate || new Date(end - DAY).toISOString().slice(0, 10) !== lastDate) throw new Error('Invalid funding date range');
+  const days = new Map();
+  for (const row of validateFundingRows(rows)) {
+    if (row.time < start || row.time >= end || row.brent === null || row.wti === null) continue;
+    const date = new Date(row.time).toISOString().slice(0, 10);
+    const day = days.get(date) ?? { date, count: 0, sum: 0 };
+    day.sum += (row.brent - row.wti) / 2; day.count++;
+    days.set(date, day);
+  }
+  let count = 0, cumulative = 0;
+  const points = [...days.values()].map(day => {
+    count += day.count; cumulative += day.sum;
+    const annualized = cumulative / count * 8760;
+    if (!Number.isFinite(day.sum) || !Number.isFinite(cumulative) || !Number.isFinite(annualized)) throw new Error('Historical funding calculation overflow');
+    return { date: day.date, count: day.count, cumulativeCount: count, shortRate: day.sum / day.count, longRate: -day.sum / day.count, shortCumulative: cumulative, longCumulative: -cumulative, shortAnnualized: annualized, longAnnualized: -annualized };
+  });
+  const expectedHours = (end - start) / HOUR;
+  return { points, count, expectedHours, missingHours: expectedHours - count, shortCumulative: count ? cumulative : null, longCumulative: count ? -cumulative : null, shortAnnualized: count ? cumulative / count * 8760 : null, longAnnualized: count ? -cumulative / count * 8760 : null };
+}
+
 export function createFundingSnapshot(data, fetchedAt = new Date().toISOString()) {
   const validated = validateFundingRows(data);
   const paired = validated.filter(row => row.brent !== null && row.wti !== null);
