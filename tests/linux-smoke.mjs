@@ -38,10 +38,11 @@ try {
   assert.equal((await fetch(base)).status, 401);
   const page = await fetch(base, { headers });
   assert.equal(page.status, 200);
-  assert.match(await page.text(), /飞书阈值告警/);
+  const markup = await page.text();
+  for (const id of ["oil", "hynix"]) assert.ok(markup.includes(`data-alert-monitor="${id}"`), `${id} must render the shared alert editor`);
   const initial = await state();
   assert.equal(initial.available, true); assert.equal(initial.config.enabled, false);
-  const updated = await fetch(`${base}/api/alerts`, { method: "PUT", headers: { ...headers, "Content-Type": "application/json", Origin: base }, body: JSON.stringify({ enabled: false, cooldownSeconds: 60, hysteresis: 0.5, revision: initial.revision, rules: [{ id: "smoke-above", name: "smoke-above", enabled: true, direction: "above", threshold: 40 }, { id: "smoke-below", name: "smoke-below", enabled: true, direction: "below", threshold: 20 }] }) });
+  const updated = await fetch(`${base}/api/alerts`, { method: "PUT", headers: { ...headers, "Content-Type": "application/json", Origin: base }, body: JSON.stringify({ enabled: false, cooldownSeconds: 60, hysteresis: 0.5, revision: initial.revision, rules: [{ id: "smoke-above", name: "smoke-above", enabled: true, direction: "above", threshold: 40, cooldownSeconds: 90, hysteresis: 0.25 }, { id: "smoke-below", name: "smoke-below", enabled: true, direction: "below", threshold: 20 }] }) });
   assert.equal(updated.status, 200);
   const oilInitial = await oilState();
   const oilConfig = { enabled: false, rules: [{ id: "smoke-oil", label: "原油测试", enabled: true, metric: "spread", operator: "gte", threshold: 5, cooldownMinutes: 1, hysteresis: 0.1 }] };
@@ -72,6 +73,8 @@ try {
   await stop(); start(); await ready();
   const restarted = await state();
   assert.equal(restarted.config.rules.length, 2); assert.equal(restarted.revision, 1);
+  assert.equal(restarted.config.rules[0].cooldownSeconds, 90); assert.equal(restarted.config.rules[0].hysteresis, 0.25);
+  assert.equal(Object.hasOwn(restarted.config.rules[1], "cooldownSeconds"), false);
   assert.deepEqual((await oilState()).config, oilConfig); assert.equal((await oilState()).revision, 1);
   const sharedRestarted = await fetch(sharedEndpoint, { headers }).then(response => response.json());
   assert.equal(sharedRestarted.revision, 1); assert.equal(sharedRestarted.webhookConfigured, true); assert.equal(sharedRestarted.signingSecretConfigured, true);
