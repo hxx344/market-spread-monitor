@@ -1,0 +1,36 @@
+name: Unified monitors and Linux deployment
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run build:linux
+      - run: node tests/linux-smoke.mjs
+      - run: systemd-analyze verify deploy/market-spread-monitor.service
+  one-click-install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: bash -n deploy/install.sh
+      - run: shellcheck deploy/install.sh server/entrypoint.sh
+      - run: node tests/install-smoke.mjs

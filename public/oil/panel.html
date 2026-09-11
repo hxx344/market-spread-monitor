@@ -1,0 +1,76 @@
+<div class="oil-panel">
+    <a class="skip-link" href="#chart-panel" data-local-anchor>跳至走势图</a>
+
+    <main>
+      <section class="page-heading">
+        <div><p class="eyebrow">HYPERLIQUID / XYZ PERPETUALS</p><h1>布伦特 / WTI 价差</h1><p class="heading-description">BRENTOIL 与 WTIOIL 永续合约 · 2026 年以来</p></div>
+        <div class="data-stamp"><span class="stamp-label" id="connection-status">正在连接</span><span id="data-through">正在读取行情</span><span class="stamp-source">Hyperliquid / XYZ · 每 60 秒更新行情</span><button id="refresh-data" class="refresh-data">刷新数据 <span aria-hidden="true">↻</span></button></div>
+      </section>
+
+      <div id="data-notice" class="data-notice" hidden></div>
+      <div id="loading" class="loading" role="status">正在载入原油历史数据…</div>
+      <div id="error" class="error" role="alert" hidden><strong>暂时无法加载数据</strong><p>请检查网络后重试。</p><button id="retry" class="retry">重新加载</button></div>
+
+      <div id="dashboard" hidden>
+        <section class="metrics" aria-label="最新价格概览">
+          <article class="metric featured"><div class="metric-label"><span>当前标记价差</span><span class="metric-tag">BRENT − WTI</span></div><div class="metric-number" id="latest-spread"></div><div class="metric-foot" id="spread-change"></div></article>
+          <article class="metric"><div class="metric-label"><span><i class="legend-dot brent"></i>布伦特原油</span><span class="ticker">BRENTOIL</span></div><div class="metric-number" id="latest-brent"></div><div class="metric-foot"><a href="https://app.hyperliquid.xyz/trade/xyz:BRENTOIL" target="_blank" rel="noreferrer">XYZ 永续 · 标记价格 ↗</a></div></article>
+          <article class="metric"><div class="metric-label"><span><i class="legend-dot wti"></i>WTI 原油</span><span class="ticker">WTIOIL</span></div><div class="metric-number" id="latest-wti"></div><div class="metric-foot"><a href="https://app.hyperliquid.xyz/trade/xyz:WTIOIL" target="_blank" rel="noreferrer">XYZ 永续 · 标记价格 ↗</a></div></article>
+          <article class="metric"><div class="metric-label"><span>共同区间变化</span><span class="ticker">2026</span></div><div class="metric-number" id="ytd-change"></div><div class="metric-foot" id="ytd-reference"></div></article>
+        </section>
+
+        <section class="funding-panel panel" aria-labelledby="funding-title">
+          <div class="funding-header"><div><p class="eyebrow">SHORT BRENT / LONG WTI</p><h2 id="funding-title">做空价差 · 资金费率</h2><p class="funding-subtitle">空布伦特、多 WTI。正值收款，负值付款。</p></div><div class="funding-basis" role="group" aria-label="资金费配仓口径"><button data-basis="quantity" aria-pressed="true">等桶数 1:1</button><button data-basis="notional" aria-pressed="false">等美元名义</button></div></div>
+          <div class="funding-metrics" aria-live="polite"><article><p>预计净小时费率 <span class="funding-badge" id="funding-direction"></span></p><strong class="funding-value" id="funding-net"></strong><span>以两腿总名义金额为分母</span></article><article><p>每 10,000 美元总名义 / 小时</p><strong class="funding-value" id="funding-cash"></strong><span id="funding-cash-caption"></span></article><article><p>按当前费率简单年化</p><strong class="funding-value" id="funding-annual"></strong><span>净小时费率 × 24 × 365</span></article></div>
+          <div class="funding-legs"><div><span><i class="legend-dot brent"></i> 空 BRENTOIL</span><strong id="brent-funding"></strong><span id="brent-payment"></span></div><div><span><i class="legend-dot wti"></i> 多 WTIOIL</span><strong id="wti-funding"></strong><span id="wti-payment"></span></div></div>
+          <div class="funding-explanation"><p id="funding-formula"></p><p id="funding-basis-note"></p><p>采用当前预估小时费率，结算金额由整点实际费率与预言机价格确定。年化为线性换算，不代表已实现收益。</p><p id="funding-timestamp"></p></div>
+        </section>
+
+        <section class="chart-panel panel" id="chart-panel" aria-label="原油价格与价差走势">
+          <div class="chart-toolbar"><div class="view-tabs" role="tablist" aria-label="图表内容"><button role="tab" aria-selected="true" aria-controls="chart-content" id="spread-tab" data-view="spread" tabindex="0">价差走势</button><button role="tab" aria-selected="false" aria-controls="chart-content" id="prices-tab" data-view="prices" tabindex="-1">原油价格</button></div><div class="range-buttons" role="group" aria-label="时间范围"><button data-range="1m" aria-pressed="false">近 1 月</button><button data-range="3m" aria-pressed="false">近 3 月</button><button data-range="ytd" aria-pressed="true">今年以来</button></div></div>
+          <div class="chart-layout" id="chart-content" role="tabpanel" aria-labelledby="spread-tab">
+            <div class="plot-section"><div class="plot-heading"><div><h2 id="chart-title">布伦特 − WTI</h2><p id="range-caption"></p></div><div id="chart-legend" class="chart-legend"><span><i class="legend-line brent"></i>日度价差</span><span><i class="legend-line average"></i>区间均值</span></div></div>
+              <div class="chart-area" id="chart-area"><span class="axis-unit">美元 / 桶</span><svg id="main-chart" viewBox="0 0 1000 340" role="img" aria-label="2026年以来布伦特与WTI原油日度价差折线图"></svg><div class="chart-tooltip" id="chart-tooltip" hidden></div><input id="chart-cursor" class="chart-cursor" type="range" min="0" max="1" value="1" aria-label="按日期查看图表数值" /></div>
+              <div class="chart-footer"><span id="chart-hint">在图表上移动查看每日价格；键盘 Tab 后可用方向键查看。</span><span id="observation-count"></span></div>
+              <section class="funding-history-section" aria-labelledby="funding-history-title">
+                <div class="plot-heading"><div><h2 id="funding-history-title">历史多空资金费率</h2><p>已结算小时费率的日均值 · 两腿等名义</p></div><div class="chart-legend history-legend"><span><i class="legend-line funding-long"></i>做多价差</span><span><i class="legend-line funding-short"></i>做空价差</span></div></div>
+                <div class="funding-history-area" id="funding-history-area"><span class="axis-unit">% / 小时</span><svg id="funding-history-chart" viewBox="0 0 1000 210" role="img" aria-label="历史做多与做空价差的日均小时资金费率"></svg><div class="chart-tooltip" id="funding-history-tooltip" hidden></div><input id="funding-history-cursor" class="chart-cursor" type="range" min="0" max="1" value="1" aria-label="按日期查看历史做多做空资金费率" /><p id="funding-history-empty" class="funding-history-empty" role="status">正在读取历史结算费率…</p></div>
+                <div class="chart-footer history-footer"><span>正值收款 · 负值付款</span><span id="funding-history-count"></span></div>
+                <p class="funding-history-method">做多＝多布伦特、空 WTI；做空反之。每小时做空净率＝(布伦特费率 − WTI 费率) ÷ 2，以两腿总名义为分母，再按 UTC 结算日求均值。历史图口径独立于上方当前预估的配仓选项。</p>
+                <p id="funding-history-status" class="funding-history-status"></p>
+              </section>
+            </div>
+            <aside class="range-summary"><div class="summary-heading"><h3>区间速览</h3><span id="summary-range">今年以来</span></div><div class="summary-average"><p>平均价差</p><div id="average-spread"></div><span>美元 / 桶</span></div><div class="summary-extremes"><div><span>最高价差</span><strong id="max-spread"></strong><small id="max-date"></small></div><div><span>最低价差</span><strong id="min-spread"></strong><small id="min-date"></small></div></div><div class="range-track" aria-hidden="true"><span id="range-marker"></span></div><p class="range-description" id="range-description"></p><div class="summary-note"><span class="note-symbol" aria-hidden="true">↗</span><p>价差为正，表示布伦特较 WTI 溢价；价差上升，表示两者价差扩大。</p></div></aside>
+          </div>
+        </section>
+
+        <section class="bottom-grid">
+          <article class="panel monthly-panel"><div class="section-heading"><div><h2>月度价差</h2><p>各月日度价差的平均值</p></div><span class="unit-label">美元 / 桶</span></div><div id="monthly-chart" class="monthly-chart" role="list" aria-label="月度平均价差"></div><p class="monthly-note" id="monthly-note"></p></article>
+          <article class="panel methodology"><p class="eyebrow">READING THE SPREAD</p><h2>如何读这条价差？</h2><p>价差采用两种 XYZ 原油永续合约同一 UTC 日的已收盘日 K 价格相减；顶部行情采用当前标记价格。</p><div class="formula"><span>BRENTOIL</span><b>−</b><span>WTIOIL</span><b>=</b><span class="accent-text">价差</span></div><p class="methodology-fine">做空价差对应空布伦特、多 WTI。等桶数配仓下，价差收窄带来正向价格损益，资金费另行计算。WTIOIL 的官方 API 名称为 xyz:CL，每个合约单位对应 1 桶。</p></article>
+        </section>
+
+        <details class="data-details panel"><summary><span>日度价格与资金费明细 <span id="table-count" class="table-count"></span></span><span class="details-arrow" aria-hidden="true">＋</span></summary><div class="table-scroll"><table><caption>按 UTC 日期倒序。价格：美元/桶；资金费：等名义、按总敞口的日均小时费率，正值收款。</caption><thead><tr><th scope="col">日期</th><th scope="col">布伦特</th><th scope="col">WTI</th><th scope="col">价差</th><th scope="col">较上个有效日</th><th scope="col">做多资金费 / h</th><th scope="col">做空资金费 / h</th><th scope="col">结算样本</th></tr></thead><tbody id="data-table"></tbody></table></div></details>
+      </div>
+      <section class="panel alert-panel" id="alerts" aria-labelledby="alert-title">
+        <div class="alert-heading"><div><p class="eyebrow">FEISHU ALERTS</p><h2 id="alert-title">价格与价差告警</h2></div><span id="alert-service-state" class="alert-state">正在连接监控服务</span></div>
+        <p id="alert-runtime" class="alert-note">正在读取服务器状态…</p>
+        <p id="alert-market" class="alert-market"></p>
+        <p id="alert-service-error" class="alert-message" role="status" hidden></p>
+
+        <div id="alert-editor" hidden>
+          <form id="alert-form">
+            <div class="alert-actions"><label class="alert-toggle"><input type="checkbox" id="alert-enabled" />启用飞书告警</label><button id="alert-add" type="button" class="alert-secondary">＋ 添加梯度</button></div>
+            <p class="alert-note">每个梯度独立触发，单位为美元/桶。保存后，已达到阈值的梯度会在下一次采集时告警。</p>
+            <div id="alert-rules" class="alert-rules"></div>
+            <p class="alert-note">同一梯度持续满足条件只告警一次。价格回到阈值另一侧并超出回差后才重新待命；再次触发仍需满足冷却时间。</p>
+            <div class="alert-actions alert-save-actions"><button type="submit" class="alert-primary">保存设置</button><button id="alert-reload" type="button" class="alert-secondary">重新载入</button><span id="alert-dirty" class="alert-note"></span></div>
+          </form>
+          <div class="alert-test-row"><p class="alert-note">测试将向服务器配置的飞书群发送一条连接消息。</p><button id="alert-test" type="button" class="alert-secondary">发送飞书测试消息</button></div>
+          <details class="alert-events"><summary>最近发送记录（最多 100 条）</summary><div id="alert-events-list"></div></details>
+        </div>
+        <p id="alert-feedback" class="alert-message" role="status" hidden></p>
+      </section>
+      <footer><div class="footer-brand">OIL SPREAD<span>2026</span></div><p>来源：<a href="https://app.hyperliquid.xyz/trade/xyz:BRENTOIL" target="_blank" rel="noreferrer">Hyperliquid BRENTOIL ↗</a><span class="footer-divider">/</span><a href="https://app.hyperliquid.xyz/trade/xyz:WTIOIL" target="_blank" rel="noreferrer">WTIOIL ↗</a><span class="footer-divider">/</span><a href="https://hyperliquid.gitbook.io/hyperliquid-docs/trading/funding" target="_blank" rel="noreferrer">资金费规则 ↗</a><span class="footer-divider">/</span><a href="https://docs.trade.xyz/asset-directory/commodities" target="_blank" rel="noreferrer">合约规格 ↗</a></p><p class="footer-note" id="source-note">仅使用两合约同日已收盘的日 K。尚未上市或缺失日期不补值。</p></footer>
+    </main>
+
+  </div>

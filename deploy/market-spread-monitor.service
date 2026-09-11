@@ -1,0 +1,24 @@
+[Unit]
+Description=Market Monitor dashboard and Feishu alert monitor
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=spread-monitor
+Group=spread-monitor
+WorkingDirectory=/opt/market-spread-monitor
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/market-spread-monitor.env
+ExecStart=/bin/bash /opt/market-spread-monitor/server/entrypoint.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StateDirectory=market-spread-monitor
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
