@@ -47,8 +47,8 @@ test('a missing dataset cannot block other first-render data; the server provide
     assert.equal(first.oil.quote.revision, 0);
     revision++;
     assert.equal((await readServerInitialMarket()).oil.quote.revision, 1);
-    assert.equal(calls.length, 8);
-    assert.ok(calls.every(([, action, method]) => ['quote', 'history'].includes(action) && method === 'GET'));
+    assert.equal(calls.length, 16);
+    assert.ok(calls.every(([, action, method]) => ['quote', 'history', 'exchanges/bybit/quote', 'exchanges/binance/quote'].includes(action) && method === 'GET'));
   } finally { release(); }
   assert.equal(await readServerInitialMarket(), null, 'A stopped runtime cannot leak its provider into another instance');
 });

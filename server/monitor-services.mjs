@@ -7,6 +7,9 @@ import { openNotificationStore } from "./notification-store.mjs";
 import { createNotificationService } from "./notification-service.mjs";
 import { openMarketStore } from "./market-store.mjs";
 import { createMarketCollector, marketJobs, seedMarketDatabase } from "./market-collector.mjs";
+import { externalExchanges, exchangeAction, exchangeFromAction, EXCHANGE_REFRESH_MS } from "../lib/exchange-quotes.ts";
+
+const exchangeActions = Object.fromEntries(externalExchanges.map(exchange => [exchangeAction(exchange), ["GET"]]));
 
 /** Runtime adapters own their schedule, storage and API. They share one HTTP server. */
 export async function createMonitorServices(directory, { externallyLocked = false, env = process.env, notificationOptions, hynixOptions, oilOptions, marketOptions } = {}) {
@@ -24,7 +27,7 @@ export async function createMonitorServices(directory, { externallyLocked = fals
     });
     const read = (id, action, fresh = false) => {
       if (fresh && !collector.healthy()) throw new Error("行情数据库写入失败，暂停告警。");
-      const interval = action === "quote" ? id === "oil" ? pollSeconds * 1000 : 10_000 : action === "history" && id === "hynix" ? 60_000 : 300_000;
+      const interval = exchangeFromAction(action) ? EXCHANGE_REFRESH_MS : action === "quote" ? id === "oil" ? pollSeconds * 1000 : 10_000 : action === "history" && id === "hynix" ? 60_000 : 300_000;
       const value = marketStore.read(id, action, { fresh, maxAgeMs: interval * 2 + 15_000 });
       return collector.healthy() ? value : { ...value, status: "snapshot", collection: { ...value.collection, stale: true, error: "行情数据库写入失败，保留已保存数据。" } };
     };
@@ -40,18 +43,18 @@ export async function createMonitorServices(directory, { externallyLocked = fals
       ["hynix", {
         start() { hynixRunning = true; hynix.start(); }, stop() { hynixRunning = false; return hynix.stop(); }, healthy: () => hynix.healthy(),
         async handle(action, method, input) {
-          if (["quote", "history", "funding"].includes(action) && method === "GET") return read("hynix", action);
+          if ((["quote", "history", "funding"].includes(action) || exchangeFromAction(action)) && method === "GET") return read("hynix", action);
           if (action === "alerts" && method === "GET") return hynix.view();
           if (action === "alerts" && method === "PUT") return hynix.update(input);
           if (action === "alerts/test" && method === "POST") return hynix.test();
         },
-        actions: { quote: ["GET"], history: ["GET"], funding: ["GET"], alerts: ["GET", "PUT"], "alerts/test": ["POST"] },
+        actions: { quote: ["GET"], history: ["GET"], funding: ["GET"], ...exchangeActions, alerts: ["GET", "PUT"], "alerts/test": ["POST"] },
       }],
       ["oil", {
         start() { oilRunning = true; oil.start(); }, healthy: () => !oil.storageError, async stop() { oilRunning = false; await oil.stop(); },
         async handle(action, method, input) {
           if (action === "status" && method === "GET") return { ...oil.status(), available: true, monitorId: "oil" };
-          if (["quote", "history", "funding"].includes(action) && method === "GET") return read("oil", action);
+          if ((["quote", "history", "funding"].includes(action) || exchangeFromAction(action)) && method === "GET") return read("oil", action);
           if (action === "config" && method === "GET") return oil.configuration();
           if (action === "events" && method === "GET") return { events: oil.data.events };
           if (action === "config" && method === "PUT") {
@@ -60,7 +63,7 @@ export async function createMonitorServices(directory, { externallyLocked = fals
           }
           if (action === "test-notification" && method === "POST") { await notifications.test(); return { ok: true }; }
         },
-        actions: { quote: ["GET"], history: ["GET"], funding: ["GET"], status: ["GET"], config: ["GET", "PUT"], events: ["GET"], "test-notification": ["POST"] },
+        actions: { quote: ["GET"], history: ["GET"], funding: ["GET"], ...exchangeActions, status: ["GET"], config: ["GET", "PUT"], events: ["GET"], "test-notification": ["POST"] },
       }],
     ]);
     services.notifications = notifications;

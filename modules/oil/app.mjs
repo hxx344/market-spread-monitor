@@ -3,6 +3,7 @@ import { calculateShortSpreadFunding, DAY } from './hyperliquid.mjs';
 import { createFundingSnapshot, dailyFundingRates, analyzeFundingRange } from './funding-history.mjs';
 
 import { createLifecycle } from './lifecycle.mjs';
+import { oilExchangeQuote } from '../../lib/exchange-quotes.ts';
 /** @param {ShadowRoot} root @param {{ initial?: import('../../lib/initial-market').InitialMarketData['oil'], onSummary?: (summary: import('../../lib/monitor-summary').OilSummaryUpdate) => void }} options */
 export function mount(root, { onSummary, initial } = {}) {
 const life = createLifecycle();
@@ -30,6 +31,7 @@ function publishSummary(status = state.marketMode) {
     fundingHourlyRate: state.market ? calculateShortSpreadFunding(state.market, state.basis).hourlyRate : null,
     fundingBasis: state.basis,
     fetchedAt: state.market?.fetchedAt ?? null,
+    comparison: state.market ? oilExchangeQuote(state.market, status !== 'live') : undefined,
     history: state.metadata ? { points: state.rows.map(row => ({ time: Date.parse(`${row.date}T00:00:00Z`), value: row.spread })), status: state.historyMode, fetchedAt: state.metadata.fetchedAt } : undefined,
   });
 }

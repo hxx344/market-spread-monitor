@@ -63,6 +63,7 @@ npm run start:windows
 - `GET /api/monitors`：`schemaVersion: 1` 和模块清单。
 - `GET /api/monitors/{id}/quote`：Linux 返回数据库最新报价及 `collection` 采集状态，过期数据标记 `status: "snapshot"`，从未收到数据时返回 503；网页预览的实时获取失败仍返回 503。
 - `GET /api/monitors/{id}/history`：历史与采集时间，失败保留真实快照并标明状态。
+- `GET /api/monitors/{id}/exchanges/{exchange}/quote`：Bybit / Binance 实时报价及每腿资金费率、结算周期和下次结算时间；`exchange` 为 `bybit` 或 `binance`。Linux 只读数据库，首次无数据返回 503，更新失败保留上次报价并标明过期。
 - `GET /api/monitors/oil/funding`：原油已结算资金费历史。
 - Linux 专用告警接口按模块 ID 隔离。
 
@@ -70,7 +71,11 @@ npm run start:windows
 
 ## 数据与历史更新
 
-只使用 Hyperliquid / XYZ 公共行情，不需要钱包或交易 API 密钥。
+使用 Hyperliquid / XYZ、Bybit、Binance 公共行情，不需要钱包或交易 API 密钥。
+
+- 交易所实时对比区并列显示价差、溢价率、做空及做多价差的当前预估年化资金费。Bybit / Binance 每 15 秒更新；原油两腿为 `BZUSDT / CLUSDT`，海力士为 `SKHYUSDT / SKHYNIXUSDT`。后两家的合约报价均为 USDT 标记价，正股接口已完成换汇；Hyperliquid 单独标注 USD，海力士沿用中间价。只比较各交易所内部两腿，不把 USD 和 USDT 假定为严格等值。
+- 对比区原油使用等桶数，海力士使用 10 份 ADR 对 1 股正股。做空价差年化为 `(空腿数量 × 计费价格 × 周期费率 / 周期小时 − 多腿数量 × 计费价格 × 周期费率 / 周期小时) / 两腿总名义 × 8760`；做多为相反数。Bybit / Binance 的计费价格为标记价，Hyperliquid 为预言机价。每条腿分别读取当前结算周期，不固定为 8 小时；费率、周期或结算时间缺失时保留价格、年化显示 `—`，真实零费率显示零。当前费率可能在结算前变化。
+- 本次新增实时并列对比；已有历史图表及告警仍对应 Hyperliquid。Linux 常驻采集会保存四组新报价，并将已有报价直接带入首屏；某一家暂不可用不影响其他交易所。
 
 - 原油为 `xyz:BRENTOIL − xyz:CL`。WTI 界面名为 WTIOIL。当前价差用 `markPx`，资金费现金流用 `oraclePx`，费率是每小时小数率。价格历史为共同 UTC 已收盘日 K。历史净资金费采用等预言机美元名义、两腿总敞口作分母；日度值为实际共同小时的平均，不补零。
 - 原油历史面板同时显示做多、做空价差的区间累计资金费及累计年化，并可切换累计年化曲线和日均小时费率。按上方所选日期区间纳入全部共同结算小时（即使某日缺少价格 K 线），年化为净小时费率之和除以有效小时数再乘 `8760`，不复利；切换近 1 月、近 3 月、今年以来会从新区间起点重新累计。缺口不补零，并显示已覆盖及缺失小时数。

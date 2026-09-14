@@ -1,0 +1,44 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { externalExchanges, exchangeAction, validateExchangeQuote, EXCHANGE_REFRESH_MS, type ExternalExchange, type ExternalQuoteSet, type SpreadMarket } from "../lib/exchange-quotes";
+import { startPolling } from "../lib/polling";
+
+export function useExchangeQuotes(monitorId: SpreadMarket, initial?: ExternalQuoteSet) {
+  const [quotes, setQuotes] = useState<ExternalQuoteSet>(initial ?? {});
+  const [errors, setErrors] = useState<Partial<Record<ExternalExchange, string>>>({});
+  const [loading, setLoading] = useState(false);
+  const polls = useRef<ReturnType<typeof startPolling>[]>([]);
+  const latest = useRef<ExternalQuoteSet>(initial ?? {});
+  useEffect(() => {
+    const controls = externalExchanges.map(exchange => startPolling({
+      intervalMs: EXCHANGE_REFRESH_MS,
+      async load(signal) {
+        if (document.hidden) return null;
+        const response = await fetch(`/api/monitors/${monitorId}/${exchangeAction(exchange)}`, { cache: "no-store", signal: AbortSignal.any([signal, AbortSignal.timeout(12_000)]) });
+        if (!response.ok) throw new Error("本轮更新失败，保留上次数据");
+        return validateExchangeQuote(await response.json(), exchange, monitorId);
+      },
+      onData(value) {
+        if (!value) return;
+        if (latest.current[exchange] && Date.parse(latest.current[exchange]!.fetchedAt) > Date.parse(value.fetchedAt)) {
+          setErrors(previous => ({ ...previous, [exchange]: "收到较旧报价，保留已有数据" })); return;
+        }
+        latest.current[exchange] = value;
+        setQuotes(previous => ({ ...previous, [exchange]: value }));
+        setErrors(previous => ({ ...previous, [exchange]: "" }));
+      },
+      onError(error) { setErrors(previous => ({ ...previous, [exchange]: error instanceof Error ? error.message : "行情暂不可用" })); },
+    }));
+    polls.current = controls;
+    const visible = () => { if (!document.hidden) controls.forEach(control => { void control.refresh(); }); };
+    document.addEventListener("visibilitychange", visible);
+    return () => { controls.forEach(control => control.stop()); polls.current = []; document.removeEventListener("visibilitychange", visible); };
+  }, [monitorId]);
+  async function refresh() {
+    setLoading(true);
+    try { await Promise.all(polls.current.map(poll => poll.refresh())); }
+    finally { setLoading(false); }
+  }
+  return { quotes, errors, refresh, loading };
+}

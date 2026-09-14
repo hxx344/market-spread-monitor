@@ -1,9 +1,10 @@
 import type { LiveQuote } from "./market";
 import { createTrend, type MonitorTrend, type TrendHistory } from "./monitor-trend.ts";
+import { hynixExchangeQuote, type ExchangeQuote } from "./exchange-quotes.ts";
 
 export type SummaryStatus = "loading" | "live" | "snapshot" | "stale" | "error";
 export type SummaryMetric = { label: string; value: string; tone?: "positive" | "negative" };
-export type MonitorSummary = { status: SummaryStatus; fetchedAt: string | null; metrics: SummaryMetric[]; note?: string; trend?: MonitorTrend };
+export type MonitorSummary = { status: SummaryStatus; fetchedAt: string | null; metrics: SummaryMetric[]; note?: string; trend?: MonitorTrend; comparison?: ExchangeQuote };
 export type SummaryProps = { onSummary?: (summary: MonitorSummary) => void };
 export type OilSummaryUpdate = {
   status: SummaryStatus;
@@ -12,6 +13,7 @@ export type OilSummaryUpdate = {
   fundingBasis: "quantity" | "notional";
   fetchedAt: string | null;
   history?: TrendHistory;
+  comparison?: ExchangeQuote;
 };
 
 function metric(label: string, value: number | null | undefined, digits: number, unit: string): SummaryMetric {
@@ -29,6 +31,7 @@ export function hynixSummary(quote: LiveQuote | null, error = "", trend?: Monito
     metrics: [metric("ADR 溢价率", quote?.premium, 2, "%"), metric("净资金费 / 年化", funding?.annualizedRate == null ? null : funding.annualizedRate * 100, 2, "%")],
     note: `空 10 份 ADR、多 1 股正股${quote && !funding ? " · 资金费暂不可用" : ""}`,
     trend: trend ?? createTrend(undefined, { days: 7, intervalMs: 3_600_000, label: "7 天小时线", shortLabel: "7天", unit: "%" }),
+    comparison: quote ? hynixExchangeQuote(quote, Boolean(error)) : undefined,
   };
 }
 
@@ -42,6 +45,7 @@ export function oilSummary(update?: OilSummaryUpdate): MonitorSummary {
     ],
     note: `空布伦特、多 WTI · ${update?.fundingBasis === "notional" ? "等名义" : "等桶数"}`,
     trend: createTrend(update?.history, { days: 30, intervalMs: 86_400_000, label: "30 日日线", shortLabel: "30日", unit: " 美元 / 桶" }, update?.status === "error"),
+    comparison: update?.comparison,
   };
 }
 

@@ -4,10 +4,11 @@ export async function readInitialMarket(services) {
     try { return await services.get(id).handle(action, "GET"); }
     catch { return null; }
   };
-  const [hynixQuote, hynixHistory, oilQuote, oilHistory] = await Promise.all([
+  const [hynixQuote, hynixHistory, oilQuote, oilHistory, hynixBybit, hynixBinance, oilBybit, oilBinance] = await Promise.all([
     read("hynix", "quote"), read("hynix", "history"), read("oil", "quote"), read("oil", "history"),
+    read("hynix", "exchanges/bybit/quote"), read("hynix", "exchanges/binance/quote"), read("oil", "exchanges/bybit/quote"), read("oil", "exchanges/binance/quote"),
   ]);
-  return { renderedAt: Date.now(), hynix: { quote: hynixQuote, history: hynixHistory }, oil: { quote: oilQuote, history: oilHistory } };
+  return { renderedAt: Date.now(), hynix: { quote: hynixQuote, history: hynixHistory, exchanges: { bybit: hynixBybit, binance: hynixBinance } }, oil: { quote: oilQuote, history: oilHistory, exchanges: { bybit: oilBybit, binance: oilBinance } } };
 }
 
 export function registerInitialMarket(services) {
