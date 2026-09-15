@@ -42,7 +42,7 @@ export class Monitor {
       this.lastAttemptAt = new Date(this.clock()).toISOString();
       let values, market;
       try { market = await this.fetchMarket(); values = marketValues(market, this.clock()); }
-      catch (error) { this.error = error.message.startsWith('Hyperliquid') ? error.message : '行情获取失败或已过期，暂停阈值判断'; return; }
+      catch (error) { this.error = error.message.startsWith('Binance') ? error.message : '行情获取失败或已过期，暂停阈值判断'; return; }
       this.market = market; this.error = null;
       const now = this.clock(), next = structuredClone(this.data), due = [];
       for (const rule of next.config.rules) {
@@ -60,10 +60,10 @@ export class Monitor {
       }
       // Persist attempt IDs before external I/O; an uncertain retry retains its ID.
       const batchId = randomUUID();
-      next.events.unshift({ id: batchId, time: new Date(now).toISOString(), status: 'sending', rules: due.map(item => ({ id: item.id, label: item.rule.label, metric: item.rule.metric, operator: item.rule.operator, threshold: item.rule.threshold, value: item.value })) });
+      next.events.unshift({ id: batchId, source: 'binance', time: new Date(now).toISOString(), status: 'sending', rules: due.map(item => ({ id: item.id, label: item.rule.label, metric: item.rule.metric, operator: item.rule.operator, threshold: item.rule.threshold, value: item.value })) });
       next.events = next.events.slice(0, 100);
       await this.persist(next);
-      const message = ['原油阈值告警', `采集时间：${market.fetchedAt}（UTC）`, '价格口径：Hyperliquid / XYZ 标记价，美元/桶',
+      const message = ['原油阈值告警', `采集时间：${market.fetchedAt}（UTC）`, '价格口径：Binance BZUSDT / CLUSDT 标记价，USDT/桶',
         ...due.map(({ rule, value, id }) => `【${rule.label}】${METRICS[rule.metric]} ${value.toFixed(4)} ${rule.operator === 'gte' ? '≥' : '≤'} ${rule.threshold}\n事件 ${id}`),
         `布伦特 ${values.brent.toFixed(4)} · WTI ${values.wti.toFixed(4)} · 价差 ${values.spread.toFixed(4)}`].join('\n');
       const delivered = structuredClone(this.data), event = delivered.events.find(item => item.id === batchId);

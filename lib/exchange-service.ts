@@ -1,4 +1,5 @@
-import { exchangeContracts, validateExchangeQuote, type ExchangeLeg, type ExchangeQuote, type ExternalExchange, type SpreadMarket } from "./exchange-quotes.ts";
+import { exchangeContracts, validateExchangeQuote, oilExchangeQuote, validateComparisonQuote, type Exchange, type ExchangeLeg, type ExchangeQuote, type ExternalExchange, type SpreadMarket } from "./exchange-quotes.ts";
+import { fetchMarket as fetchHyperliquidOil } from '../modules/oil/hyperliquid.mjs';
 
 type JsonObject = Record<string, unknown>;
 const obj = (value: unknown): JsonObject => { if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid exchange response"); return value as JsonObject; };
@@ -78,8 +79,12 @@ export function createExchangeReader({ fetcher = fetch, clock = Date.now } = {})
     } while (cursor);
     return items;
   }
-  return async (exchange: ExternalExchange, monitorId: SpreadMarket): Promise<ExchangeQuote> => {
+  return async (exchange: Exchange, monitorId: SpreadMarket): Promise<ExchangeQuote> => {
     if (!Object.hasOwn(exchangeContracts, monitorId)) throw new Error("Unknown spread market");
+    if (exchange === 'hyperliquid') {
+      if (monitorId !== 'oil') throw new Error('Unsupported Hyperliquid comparison market');
+      return validateComparisonQuote(await shared('hyperliquid/oil', 1000, async () => oilExchangeQuote(await fetchHyperliquidOil({ fetcher }))), exchange, monitorId);
+    }
     if (exchange === "bybit") {
       const [metadata, tickers] = await Promise.all([shared("bybit/instruments", 60_000, bybitInstruments), shared("bybit/tickers", 1000, () => request("https://api.bybit.com/v5/market/tickers?category=linear"))]);
       return parseBybitQuote(monitorId, metadata as JsonObject[], tickers, clock());

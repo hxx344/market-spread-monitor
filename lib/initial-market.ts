@@ -1,9 +1,9 @@
 import type { LiveQuote, MarketData } from "./market";
 import type { validateOilHistory, validateOilQuote } from "./market-validation";
-import { calculateShortSpreadFunding } from "../modules/oil/hyperliquid.mjs";
+import { calculateShortSpreadFunding } from "../modules/oil/binance.mjs";
 import { hynixSummary, oilSummary } from "./monitor-summary.ts";
 import { createTrend } from "./monitor-trend.ts";
-import { oilExchangeQuote, type ExternalQuoteSet } from "./exchange-quotes.ts";
+import { binanceOilExchangeQuote, type ExternalQuoteSet } from "./exchange-quotes.ts";
 import type { createIntradaySnapshot } from "../modules/oil/intraday.mjs";
 
 export type InitialMarketData = {
@@ -23,7 +23,7 @@ export function initialSummaries(initial: InitialMarketData | null) {
       spread: oil.quote ? oil.quote.brent.markPx - oil.quote.wti.markPx : null,
       fundingHourlyRate: oil.quote ? calculateShortSpreadFunding(oil.quote).hourlyRate : null,
       fundingBasis: "quantity", fetchedAt: oil.quote?.fetchedAt ?? null,
-      comparison: oil.quote ? oilExchangeQuote(oil.quote, oil.quote.status === "snapshot") : undefined,
+      comparison: oil.quote ? binanceOilExchangeQuote(oil.quote, oil.quote.status === "snapshot") : undefined,
       history: oil.candles ? { points: oil.candles.data.filter(row => row.brent !== null && row.wti !== null).map(row => ({ time: row.time, value: row.brent! - row.wti! })), status: oil.candles.status, fetchedAt: oil.candles.metadata.fetchedAt } : undefined,
     } : undefined),
   };

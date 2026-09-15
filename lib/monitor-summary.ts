@@ -35,14 +35,14 @@ export function hynixSummary(quote: LiveQuote | null, error = "", trend?: Monito
   };
 }
 
-const oilTrendOptions = { days: 7, intervalMs: 900_000, label: "7 天 · 15 分钟线", shortLabel: "7天", unit: " 美元 / 桶" };
+const oilTrendOptions = { days: 7, intervalMs: 900_000, label: "7 天 · 15 分钟线", shortLabel: "7天", unit: " USDT / 桶" };
 
 export function oilSummary(update?: OilSummaryUpdate, trend?: MonitorTrend): MonitorSummary {
   return {
     status: update?.status ?? "loading",
     fetchedAt: update?.fetchedAt ?? null,
     metrics: [
-      metric("价差 · 美元 / 桶", update?.spread, 3, ""),
+      metric("价差 · USDT / 桶", update?.spread, 3, ""),
       metric("净资金费 / 年化", update?.fundingHourlyRate == null ? null : update.fundingHourlyRate * 24 * 365 * 100, 2, "%"),
     ],
     note: `空布伦特、多 WTI · ${update?.fundingBasis === "notional" ? "等名义" : "等桶数"}`,

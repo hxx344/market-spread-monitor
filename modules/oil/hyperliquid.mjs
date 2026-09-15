@@ -21,6 +21,7 @@ export async function requestInfo(payload, { fetcher = fetch, timeout = 15_000 }
   } finally { clearTimeout(timer); }
 }
 
+/** @returns {{fetchedAt: string, brent: {coin: string, markPx: number, oraclePx: number, funding: number}, wti: {coin: string, markPx: number, oraclePx: number, funding: number}}} */
 export function parseMarketResponse(response, fetchedAt = new Date().toISOString()) {
   if (!Array.isArray(response) || !Array.isArray(response[0]?.universe) || !Array.isArray(response[1])) throw new Error('Invalid market response');
   const market = { fetchedAt };

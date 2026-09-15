@@ -2,7 +2,12 @@ import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { defaultConfig, validateConfig } from './config.mjs';
 
-export function emptyStore() { return { schemaVersion: 1, revision: 0, config: defaultConfig(), states: {}, events: [] }; }
+export function emptyStore() { return { schemaVersion: 1, marketSource: 'binance', revision: 0, config: defaultConfig(), states: {}, events: [] }; }
+
+export function activateBinanceSource(data) {
+  if (data.marketSource === 'binance') return data;
+  return { ...data, marketSource: 'binance', revision: data.revision + 1, states: {}, events: data.events.map(event => ({ ...event, source: event.source ?? 'hyperliquid' })) };
+}
 
 export class FileStore {
   constructor(directory, externallyLocked = false) { this.externallyLocked = externallyLocked; this.directory = path.resolve(directory); this.file = path.join(this.directory, 'monitor.json'); this.lock = path.join(this.directory, 'monitor.lock'); }

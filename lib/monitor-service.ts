@@ -2,10 +2,7 @@ import { getMonitor } from "./monitors.ts";
 import { loadQuote } from "./quote-service.ts";
 import { loadMarket } from "./market-service.ts";
 import { loadHynixFunding } from "./hynix-funding-service.ts";
-import { fetchMarket, fetchSnapshot } from "../modules/oil/hyperliquid.mjs";
-import { fetchFundingSnapshot } from "../modules/oil/funding-history.mjs";
-import oilArchive from "../public/oil/data/hyperliquid-2026.json" with { type: "json" };
-import fundingArchive from "../public/oil/data/hyperliquid-funding-2026.json" with { type: "json" };
+import { loadOilMarket, loadOilDaily, loadOilFunding } from './oil-market-service.ts';
 import { exchangeFromAction, type SpreadMarket } from "./exchange-quotes.ts";
 import { readExchangeQuote } from "./exchange-service.ts";
 import { loadOilIntraday } from "./oil-intraday-service.ts";
@@ -22,15 +19,9 @@ export const dataAdapters: Record<string, DataAdapter> = {
   hynix: { quote: loadQuote, history: loadMarket, funding: loadHynixFunding },
   oil: {
     [OIL_CANDLE_ACTION]: loadOilIntraday,
-    quote: fetchMarket,
-    async history() {
-      try { return { ...await fetchSnapshot(), status: "live" }; }
-      catch { return { ...oilArchive, status: "snapshot" }; }
-    },
-    async funding() {
-      try { return { ...await fetchFundingSnapshot(fundingArchive), status: "live" }; }
-      catch { return { ...fundingArchive, status: "snapshot" }; }
-    },
+    quote: loadOilMarket,
+    history: loadOilDaily,
+    funding: loadOilFunding,
   },
 };
 

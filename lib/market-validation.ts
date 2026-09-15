@@ -1,8 +1,8 @@
 import { ADR_PER_SHARE, FIRST_FULL_HOUR, type LiveQuote, type MarketData } from "./market.ts";
 import { parseHynixFunding } from "./hynix-funding.ts";
 import { createHynixFundingSnapshot, type FundingHistoryData } from "./hynix-funding-history.ts";
-import { createFundingSnapshot } from "../modules/oil/funding-history.mjs";
-import { ASSETS, calculateShortSpreadFunding } from "../modules/oil/hyperliquid.mjs";
+import { validateFundingSnapshot } from "../modules/oil/binance-funding-history.mjs";
+import { SOURCE, validateMarket } from "../modules/oil/binance.mjs";
 import { validateRows } from "../modules/oil/data-utils.mjs";
 
 function object(value: unknown): Record<string, unknown> {
@@ -62,18 +62,11 @@ export function validateHynixFunding(input: unknown): FundingHistoryData {
   return { ...snapshot, status: status(history.status), ...(typeof history.error === "string" ? { error: history.error } : {}) };
 }
 export function validateOilQuote(input: unknown) {
-  const quote = object(input);
-  const leg = (key: "brent" | "wti") => {
-    const item = object(quote[key]);
-    if (item.coin !== ASSETS[key].coin) throw new Error("Invalid oil contract");
-    return { coin: ASSETS[key].coin, markPx: finite(item.markPx, true), oraclePx: finite(item.oraclePx, true), funding: finite(item.funding) };
-  };
-  const result = { fetchedAt: stamp(quote.fetchedAt), brent: leg("brent"), wti: leg("wti") };
-  if (!Number.isFinite(calculateShortSpreadFunding(result).annualizedRate)) throw new Error("Invalid oil funding calculation");
-  return result;
+  return validateMarket(input);
 }
 export function validateOilHistory(input: unknown) {
   const history = object(input), metadata = object(history.metadata), fetchedAt = stamp(metadata.fetchedAt);
+  if (metadata.source !== SOURCE || metadata.currency !== 'USDT' || metadata.interval !== '1d' || metadata.timezone !== 'UTC') throw new Error('Expected Binance daily history');
   let previous = "";
   const data = list(history.data).map(item => {
     const row = object(item);
@@ -83,9 +76,9 @@ export function validateOilHistory(input: unknown) {
   });
   const paired = validateRows(data.filter(row => row.brent !== null && row.wti !== null));
   if (paired.length !== metadata.pairedObservationRows || paired[0].date !== metadata.firstCommonObservation || paired.at(-1)!.date !== metadata.lastCommonObservation) throw new Error("Oil history metadata mismatch");
-  return { data, market: validateOilQuote(history.market), status: status(history.status), metadata: { fetchedAt, firstCommonObservation: paired[0].date, lastCommonObservation: paired.at(-1)!.date, pairedObservationRows: paired.length, source: "Hyperliquid / XYZ", interval: "1d", timezone: "UTC" } };
+  return { data, market: validateOilQuote(history.market), status: status(history.status), metadata: { fetchedAt, firstCommonObservation: paired[0].date, lastCommonObservation: paired.at(-1)!.date, pairedObservationRows: paired.length, source: SOURCE, currency: 'USDT', interval: "1d", timezone: "UTC" } };
 }
 export function validateOilFunding(input: unknown) {
-  const history = object(input), metadata = object(history.metadata);
-  return { ...createFundingSnapshot(list(history.data), stamp(metadata.fetchedAt)), status: status(history.status) };
+  const history = object(input);
+  return { ...validateFundingSnapshot(history), status: status(history.status) };
 }

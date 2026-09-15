@@ -1,9 +1,11 @@
 import type { LiveQuote } from "./market";
+import { validateMarket } from '../modules/oil/binance.mjs';
 
 export const externalExchanges = ["bybit", "binance"] as const;
 export type ExternalExchange = typeof externalExchanges[number];
 export type Exchange = "hyperliquid" | ExternalExchange;
 export type SpreadMarket = "oil" | "hynix";
+export const comparisonExchanges = (market: SpreadMarket): readonly Exchange[] => market === 'oil' ? ['hyperliquid', ...externalExchanges] : externalExchanges;
 export const EXCHANGE_REFRESH_MS = 15_000;
 export const EXCHANGE_STALE_MS = 45_000;
 export const exchangeNames: Record<Exchange, string> = { hyperliquid: "Hyperliquid", bybit: "Bybit", binance: "Binance" };
@@ -11,9 +13,9 @@ export const exchangeContracts = {
   oil: { left: "BZUSDT", right: "CLUSDT", leftBase: "BZ", rightBase: "CL", leftLabel: "布伦特", rightLabel: "WTI", leftUnits: 1 },
   hynix: { left: "SKHYUSDT", right: "SKHYNIXUSDT", leftBase: "SKHY", rightBase: "SKHYNIX", leftLabel: "ADR", rightLabel: "正股", leftUnits: 10 },
 } as const;
-export const exchangeAction = (exchange: ExternalExchange) => `exchanges/${exchange}/quote`;
-export function exchangeFromAction(action: string): ExternalExchange | null {
-  return externalExchanges.find(exchange => action === exchangeAction(exchange)) ?? null;
+export const exchangeAction = (exchange: Exchange) => `exchanges/${exchange}/quote`;
+export function exchangeFromAction(action: string): Exchange | null {
+  return (['hyperliquid', ...externalExchanges] as const).find(exchange => action === exchangeAction(exchange)) ?? null;
 }
 
 export type ExchangeLeg = {
@@ -37,7 +39,7 @@ export type ExchangeQuote = {
   right: ExchangeLeg;
   fundingError: string;
 };
-export type ExternalQuoteSet = Partial<Record<ExternalExchange, ExchangeQuote | null>>;
+export type ExternalQuoteSet = Partial<Record<Exchange, ExchangeQuote | null>>;
 
 export function calculateExchangeSpread(quote: ExchangeQuote) {
   const units = exchangeContracts[quote.monitorId].leftUnits;
@@ -86,4 +88,22 @@ export function hynixExchangeQuote(quote: LiveQuote, stale = false): ExchangeQuo
 export function oilExchangeQuote(market: { fetchedAt: string; brent: { markPx: number; oraclePx: number; funding: number }; wti: { markPx: number; oraclePx: number; funding: number } }, stale = false): ExchangeQuote {
   const leg = (symbol: string, value: typeof market.brent): ExchangeLeg => ({ symbol, price: value.markPx, fundingPrice: value.oraclePx, fundingRate: value.funding, fundingIntervalHours: 1, nextFundingAt: null });
   return { exchange: "hyperliquid", monitorId: "oil", currency: "USD", priceBasis: "mark", fundingPriceBasis: "oracle", fetchedAt: market.fetchedAt, fundingFetchedAt: market.fetchedAt, status: stale ? "snapshot" : "live", left: leg("xyz:BRENTOIL", market.brent), right: leg("xyz:CL", market.wti), fundingError: "" };
+}
+
+export function binanceOilExchangeQuote(input: ReturnType<typeof validateMarket>, stale = false): ExchangeQuote {
+  const market = validateMarket(input);
+  const leg = (item: typeof market.brent): ExchangeLeg => ({ symbol: item.coin, price: item.markPx, fundingPrice: item.markPx, fundingRate: item.fundingRate, fundingIntervalHours: item.fundingIntervalHours, nextFundingAt: item.nextFundingAt });
+  const complete = market.brent.fundingRate !== null && market.wti.fundingRate !== null;
+  const hasFunding = market.brent.fundingRate !== null || market.wti.fundingRate !== null;
+  return { exchange: 'binance', monitorId: 'oil', currency: 'USDT', priceBasis: 'mark', fundingPriceBasis: 'mark', fetchedAt: market.fetchedAt, fundingFetchedAt: hasFunding ? market.fetchedAt : null, status: stale ? 'snapshot' : 'live', left: leg(market.brent), right: leg(market.wti), fundingError: complete ? '' : '资金费或结算周期暂不可用，价格仍正常更新。' };
+}
+
+export function validateComparisonQuote(input: unknown, exchange: Exchange, monitorId: SpreadMarket): ExchangeQuote {
+  if (exchange !== 'hyperliquid') return validateExchangeQuote(input, exchange, monitorId);
+  const quote = input as ExchangeQuote;
+  if (monitorId !== 'oil' || quote?.exchange !== exchange || quote.monitorId !== monitorId || quote.currency !== 'USD' || quote.priceBasis !== 'mark' || quote.fundingPriceBasis !== 'oracle' || !Number.isFinite(Date.parse(quote.fetchedAt)) || !['live', 'snapshot'].includes(quote.status)) throw new Error('Invalid Hyperliquid oil comparison');
+  for (const [leg, symbol] of [[quote.left, 'xyz:BRENTOIL'], [quote.right, 'xyz:CL']] as const) {
+    if (leg?.symbol !== symbol || !Number.isFinite(leg.price) || leg.price <= 0 || leg.fundingPrice === null || !Number.isFinite(leg.fundingPrice) || leg.fundingPrice <= 0 || leg.fundingRate === null || !Number.isFinite(leg.fundingRate) || Math.abs(leg.fundingRate) > 1 || leg.fundingIntervalHours !== 1) throw new Error('Invalid Hyperliquid comparison leg');
+  }
+  return quote;
 }

@@ -13,7 +13,7 @@ const tone = (value: number | null | undefined) => value == null || value === 0 
 const price = (value: number | undefined, digits: number) => value === undefined ? "—" : value.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 const rate = (value: number | null) => signed(value === null ? null : value * 100, 5, "%");
 
-function ExchangeComparison({ monitorId, hyperliquid, initial, renderedAt }: { monitorId: SpreadMarket; hyperliquid?: ExchangeQuote; initial?: ExternalQuoteSet; renderedAt?: number }) {
+function ExchangeComparison({ monitorId, primary, initial, renderedAt }: { monitorId: SpreadMarket; primary?: ExchangeQuote; initial?: ExternalQuoteSet; renderedAt?: number }) {
   const { quotes, errors, loading, refresh } = useExchangeQuotes(monitorId, initial);
   const [now, setNow] = useState(() => renderedAt ?? Date.now());
   const contracts = exchangeContracts[monitorId], oil = monitorId === "oil";
@@ -23,8 +23,9 @@ function ExchangeComparison({ monitorId, hyperliquid, initial, renderedAt }: { m
     return () => { clearInterval(timer); document.removeEventListener("visibilitychange", update); };
   }, []);
   const rows = exchanges.map(exchange => {
-    const quote = exchange === "hyperliquid" ? hyperliquid : quotes[exchange];
-    const error = exchange === "hyperliquid" ? "" : errors[exchange];
+    const secondary = quotes[exchange];
+    const quote = primary?.exchange === exchange && (!secondary || Date.parse(primary.fetchedAt) >= Date.parse(secondary.fetchedAt)) ? primary : secondary;
+    const error = errors[exchange];
     const stale = Boolean(quote && (error || externalQuoteStale(quote, now)));
     return { exchange, quote, metrics: quote ? calculateExchangeSpread(quote) : null, stale, status: !quote ? error ? "暂不可用" : "等待首次采集" : stale ? "保留数据 · 待更新" : quote.fundingError ? "价格已更新 · 资金费缺失" : "已更新" };
   });
@@ -46,7 +47,7 @@ function ExchangeComparison({ monitorId, hyperliquid, initial, renderedAt }: { m
       {rows.map(({ exchange, quote }) => <article key={exchange}><strong>{exchangeNames[exchange]}</strong>{quote ? <><p>{quote.left.symbol}：{rate(quote.left.fundingRate)} / {quote.left.fundingIntervalHours ?? "—"} 小时；{quote.right.symbol}：{rate(quote.right.fundingRate)} / {quote.right.fundingIntervalHours ?? "—"} 小时。</p>{quote.fundingFetchedAt && <p>资金费采集：{summaryTimestamp(quote.fundingFetchedAt)} 北京时间。</p>}{quote.left.nextFundingAt && <p>下次结算：{contracts.leftLabel} {summaryTimestamp(quote.left.nextFundingAt)}；{contracts.rightLabel} {summaryTimestamp(quote.right.nextFundingAt)} 北京时间。</p>}{quote.fundingError && <p className="exchange-stale">{quote.fundingError}</p>}</> : <p>尚未取得有效报价。</p>}</article>)}
       <p>净年化 =（空腿名义 × 空腿费率 ÷ 空腿周期小时 − 多腿名义 × 多腿费率 ÷ 多腿周期小时）÷ 两腿总名义 × 8,760。Hyperliquid 名义金额用预言机价格；Bybit、Binance 用标记价格。各腿按各自周期换算。</p>
       <p>{oil ? "布伦特溢价率 =（布伦特价格 ÷ WTI 价格 − 1）× 100%。" : "ADR 溢价率 =（ADR 价格 ÷（正股价格 ÷ 10）− 1）× 100%。USDT 接口报价已完成币种换算，不额外换算韩元。"}USD 与 USDT 分别标注，不假定两者严格等值；各行只计算同一交易所内的两腿。{!oil && "Hyperliquid 沿用当前中间价，另两家使用标记价。"}</p>
-      <p>本区为当前费率预估，实际结算费率可能变化。下方历史图表及告警仍对应 Hyperliquid。</p>
+      <p>本区为当前费率预估，实际结算费率可能变化。下方历史图表及告警使用 {oil ? 'Binance' : 'Hyperliquid'}。</p>
       <div className="exchange-source-links"><a href="https://hyperliquid.gitbook.io/hyperliquid-docs/trading/funding" target="_blank" rel="noreferrer">Hyperliquid 规则 ↗</a><a href="https://www.bybit.com/en/help-center/article/Funding-fee-calculation" target="_blank" rel="noreferrer">Bybit 规则 ↗</a><a href="https://www.binance.com/en/support/faq/detail/360033525031" target="_blank" rel="noreferrer">Binance 规则 ↗</a></div>
     </div></details>
   </section>;

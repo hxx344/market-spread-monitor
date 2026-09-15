@@ -1,4 +1,4 @@
-import archive from '../public/oil/data/hyperliquid-15m.json' with { type: 'json' };
+import archive from '../public/oil/data/binance-15m.json' with { type: 'json' };
 import { fetchIntradaySnapshot, validateIntradaySnapshot } from '../modules/oil/intraday.mjs';
 
 let latest = validateIntradaySnapshot(archive);

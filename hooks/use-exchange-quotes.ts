@@ -1,23 +1,23 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { externalExchanges, exchangeAction, validateExchangeQuote, EXCHANGE_REFRESH_MS, type ExternalExchange, type ExternalQuoteSet, type SpreadMarket } from "../lib/exchange-quotes";
+import { comparisonExchanges, exchangeAction, validateComparisonQuote, EXCHANGE_REFRESH_MS, type Exchange, type ExternalQuoteSet, type SpreadMarket } from "../lib/exchange-quotes";
 import { startPolling } from "../lib/polling";
 
 export function useExchangeQuotes(monitorId: SpreadMarket, initial?: ExternalQuoteSet) {
   const [quotes, setQuotes] = useState<ExternalQuoteSet>(initial ?? {});
-  const [errors, setErrors] = useState<Partial<Record<ExternalExchange, string>>>({});
+  const [errors, setErrors] = useState<Partial<Record<Exchange, string>>>({});
   const [loading, setLoading] = useState(false);
   const polls = useRef<ReturnType<typeof startPolling>[]>([]);
   const latest = useRef<ExternalQuoteSet>(initial ?? {});
   useEffect(() => {
-    const controls = externalExchanges.map(exchange => startPolling({
+    const controls = comparisonExchanges(monitorId).map(exchange => startPolling({
       intervalMs: EXCHANGE_REFRESH_MS,
       async load(signal) {
         if (document.hidden) return null;
         const response = await fetch(`/api/monitors/${monitorId}/${exchangeAction(exchange)}`, { cache: "no-store", signal: AbortSignal.any([signal, AbortSignal.timeout(12_000)]) });
         if (!response.ok) throw new Error("本轮更新失败，保留上次数据");
-        return validateExchangeQuote(await response.json(), exchange, monitorId);
+        return validateComparisonQuote(await response.json(), exchange, monitorId);
       },
       onData(value) {
         if (!value) return;

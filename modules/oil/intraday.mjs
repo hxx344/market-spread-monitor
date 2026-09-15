@@ -1,4 +1,4 @@
-import { ASSETS, API_URL, requestInfo } from './hyperliquid.mjs';
+import { ASSETS, API_URL, SOURCE, HISTORY_START, fetchCandles } from './binance.mjs';
 
 export const OIL_CANDLE_INTERVAL = '15m';
 export const OIL_CANDLE_MS = 900_000;
@@ -11,18 +11,18 @@ const price = value => {
 
 /** Each spread observation pairs the two completed trade-candle closes at the same UTC start. */
 export function pairIntradayCandles(brent, wti, now = Date.now()) {
-  const collect = (rows, coin) => {
+  const collect = rows => {
     if (!Array.isArray(rows)) throw Error('Invalid oil candle response');
     const result = new Map();
     for (const row of rows) {
-      if (row.s !== coin || row.i !== OIL_CANDLE_INTERVAL || !Number.isSafeInteger(row.t) || row.t < 0 || row.t % OIL_CANDLE_MS || row.T !== row.t + OIL_CANDLE_MS - 1) throw Error('Unexpected oil candle');
-      if (row.T >= now) continue;
-      if (result.has(row.t)) throw Error('Duplicate oil candle');
-      result.set(row.t, price(row.c));
+      if (!Array.isArray(row) || !Number.isSafeInteger(row[0]) || row[0] < HISTORY_START || row[0] % OIL_CANDLE_MS || row[6] !== row[0] + OIL_CANDLE_MS - 1) throw Error('Unexpected oil candle');
+      if (row[6] >= now) continue;
+      if (result.has(row[0])) throw Error('Duplicate oil candle');
+      result.set(row[0], price(row[4]));
     }
     return result;
   };
-  const left = collect(brent, ASSETS.brent.coin), right = collect(wti, ASSETS.wti.coin);
+  const left = collect(brent), right = collect(wti);
   if (!left.size || !right.size) throw Error('No completed oil candles');
   return [...new Set([...left.keys(), ...right.keys()])].sort((a, b) => a - b).map(time => ({ time, brent: left.get(time) ?? null, wti: right.get(time) ?? null }));
 }
@@ -33,7 +33,7 @@ export function createIntradaySnapshot(rows, fetchedAt, status = 'live') {
   if (!Number.isFinite(received) || !['live', 'snapshot'].includes(status) || !Array.isArray(rows) || !rows.length) throw Error('Invalid oil intraday snapshot');
   let previous = -1;
   const data = rows.map(row => {
-    if (!Number.isSafeInteger(row.time) || row.time < 0 || row.time % OIL_CANDLE_MS || row.time + OIL_CANDLE_MS > received || row.time <= previous) throw Error('Invalid oil candle timestamp');
+    if (!Number.isSafeInteger(row.time) || row.time < HISTORY_START || row.time % OIL_CANDLE_MS || row.time + OIL_CANDLE_MS > received || row.time <= previous) throw Error('Invalid oil candle timestamp');
     previous = row.time;
     const brent = row.brent === null ? null : price(row.brent), wti = row.wti === null ? null : price(row.wti);
     if (brent === null && wti === null) throw Error('Empty oil candle');
@@ -42,11 +42,11 @@ export function createIntradaySnapshot(rows, fetchedAt, status = 'live') {
   const paired = data.filter(row => row.brent !== null && row.wti !== null);
   if (!paired.length) throw Error('No paired 15-minute candles');
   const first = paired[0].time, last = paired.at(-1).time, expected = (last - first) / OIL_CANDLE_MS + 1;
-  return { status, metadata: { source: 'Hyperliquid / XYZ', api: API_URL, interval: OIL_CANDLE_INTERVAL, timezone: 'UTC', priceBasis: 'Paired completed 15-minute trade candle closes', fetchedAt, firstCommonObservation: new Date(first).toISOString(), lastCommonObservation: new Date(last).toISOString(), pairedObservationRows: paired.length, expectedObservationRows: expected, missingObservationRows: expected - paired.length }, data };
+  return { status, metadata: { source: SOURCE, api: API_URL, currency: 'USDT', symbols: [ASSETS.brent.coin, ASSETS.wti.coin], interval: OIL_CANDLE_INTERVAL, timezone: 'UTC', priceBasis: 'Paired completed 15-minute trade candle closes', fetchedAt, firstCommonObservation: new Date(first).toISOString(), lastCommonObservation: new Date(last).toISOString(), pairedObservationRows: paired.length, expectedObservationRows: expected, missingObservationRows: expected - paired.length }, data };
 }
 
 export function validateIntradaySnapshot(input) {
-  if (input?.metadata?.interval !== OIL_CANDLE_INTERVAL || input?.metadata?.timezone !== 'UTC' || !['live', 'snapshot'].includes(input?.status)) throw Error('Expected 15-minute UTC candles');
+  if (input?.metadata?.source !== SOURCE || input.metadata.currency !== 'USDT' || JSON.stringify(input.metadata.symbols) !== JSON.stringify([ASSETS.brent.coin, ASSETS.wti.coin]) || input.metadata.interval !== OIL_CANDLE_INTERVAL || input?.metadata?.timezone !== 'UTC' || !['live', 'snapshot'].includes(input?.status)) throw Error('Expected Binance 15-minute UTC candles');
   const snapshot = createIntradaySnapshot(input.data, input.metadata.fetchedAt, input.status);
   for (const field of ['firstCommonObservation', 'lastCommonObservation', 'pairedObservationRows', 'expectedObservationRows', 'missingObservationRows']) if (snapshot.metadata[field] !== input.metadata[field]) throw Error('Oil intraday metadata mismatch');
   return snapshot;
@@ -58,7 +58,7 @@ export function validateIntradaySnapshot(input) {
  */
 export async function fetchIntradaySnapshot(existing = null, options = {}) {
   const now = options.now ?? Date.now(), previous = existing ? validateIntradaySnapshot(existing) : null;
-  const earliestAvailable = Math.floor(now / OIL_CANDLE_MS) * OIL_CANDLE_MS - 5000 * OIL_CANDLE_MS;
+  const earliestAvailable = HISTORY_START;
   let missing = Infinity, expected = previous?.data[0]?.time;
   for (const row of previous?.data ?? []) {
     if (row.time > expected && row.time > earliestAvailable) missing = Math.min(missing, Math.max(expected, earliestAvailable));
@@ -66,7 +66,7 @@ export async function fetchIntradaySnapshot(existing = null, options = {}) {
     expected = row.time + OIL_CANDLE_MS;
   }
   const startTime = Math.max(0, earliestAvailable, previous ? Math.min(previous.data.at(-1).time - 96 * OIL_CANDLE_MS, missing) : earliestAvailable);
-  const [brent, wti] = await Promise.all(Object.values(ASSETS).map(asset => requestInfo({ type: 'candleSnapshot', req: { coin: asset.coin, interval: OIL_CANDLE_INTERVAL, startTime, endTime: now } }, options)));
+  const [brent, wti] = await Promise.all(Object.values(ASSETS).map(asset => fetchCandles(asset.coin, OIL_CANDLE_INTERVAL, startTime, now, options)));
   const merged = new Map((previous?.data ?? []).map(row => [row.time, row]));
   for (const row of pairIntradayCandles(brent, wti, now)) {
     const old = merged.get(row.time);

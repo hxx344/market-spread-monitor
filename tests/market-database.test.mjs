@@ -10,6 +10,7 @@ import { createMarketCollector, seedMarketDatabase } from '../server/market-coll
 import { createMonitorServices } from '../server/monitor-services.mjs';
 import { createHandler } from '../server/http.mjs';
 import { createFundingSnapshot, fetchFundingSnapshot } from '../modules/oil/funding-history.mjs';
+import { createFundingSnapshot as createBinanceFundingSnapshot } from '../modules/oil/binance-funding-history.mjs';
 import { loadMarket, getMarketSnapshot } from '../lib/market-service.ts';
 
 const NOW = Date.UTC(2026, 8, 16), HOUR = 3_600_000;
@@ -36,7 +37,7 @@ test('SQLite retains legacy history and 15-minute candles, sample keys and origi
     store.write('hynix', 'quote', quote());
     assert.equal(store.count('hynix', 'quote'), 1);
     assert.ok(store.count('hynix', 'funding') >= 1512);
-    assert.ok(store.count('oil', 'funding') > 4500);
+    assert.ok(store.count('oil', 'funding') >= 1000);
     assert.ok(store.count('oil', 'candles/15m') >= 5000);
     assert.ok(store.raw('oil', 'history').data[0].date.length === 10);
     assert.equal(store.raw('oil', 'candles/15m').metadata.interval, '15m');
@@ -62,13 +63,13 @@ test('SQLite retains legacy history and 15-minute candles, sample keys and origi
 test('a failed multi-row write rolls back samples and latest snapshot together', async t => {
   const { store, filename } = await database(t);
   try {
-    const rows = [{ time: NOW - 3 * HOUR, brent: 0.001, wti: 0 }];
-    store.write('oil', 'funding', createFundingSnapshot(rows, new Date(NOW - HOUR).toISOString()));
+    const rows = [{ time: NOW - 12 * HOUR, brent: 0.001, wti: 0 }];
+    store.write('oil', 'funding', createBinanceFundingSnapshot(rows, new Date(NOW - 4 * HOUR).toISOString()));
     const before = store.raw('oil', 'funding');
     const probe = new DatabaseSync(filename);
-    try { probe.exec(`CREATE TRIGGER reject_sample BEFORE INSERT ON market_observations WHEN NEW.time=${NOW - HOUR} BEGIN SELECT RAISE(ABORT,'simulated disk write failure'); END;`); }
+    try { probe.exec(`CREATE TRIGGER reject_sample BEFORE INSERT ON market_observations WHEN NEW.time=${NOW - 4 * HOUR} BEGIN SELECT RAISE(ABORT,'simulated disk write failure'); END;`); }
     finally { probe.close(); }
-    assert.throws(() => store.write('oil', 'funding', createFundingSnapshot([...rows, { time: NOW - 2 * HOUR, brent: 0.002, wti: 0 }, { time: NOW - HOUR, brent: 0.003, wti: 0 }], new Date(NOW).toISOString())));
+    assert.throws(() => store.write('oil', 'funding', createBinanceFundingSnapshot([...rows, { time: NOW - 8 * HOUR, brent: 0.002, wti: 0 }, { time: NOW - 4 * HOUR, brent: 0.003, wti: 0 }], new Date(NOW).toISOString())));
     assert.equal(store.count('oil', 'funding'), 1);
     assert.deepEqual(store.raw('oil', 'funding'), before);
   } finally { store.close(); }

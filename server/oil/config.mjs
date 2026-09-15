@@ -2,7 +2,7 @@ export const METRICS = Object.freeze({ spread: '布伦特 − WTI 价差', brent
 
 export function defaultConfig() {
   return { enabled: false, rules: [3, 5, 8].map((threshold, index) => ({
-    id: `spread-${index + 1}`, label: `价差 ${threshold} 美元`, metric: 'spread', operator: 'gte',
+    id: `spread-${index + 1}`, label: `价差 ${threshold} USDT`, metric: 'spread', operator: 'gte',
     threshold, cooldownMinutes: 30, hysteresis: 0.1, enabled: true
   })) };
 }

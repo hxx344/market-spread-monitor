@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { openStore } from "./alert-store.mjs";
 import { createAlertService } from "./alert-service.mjs";
-import { FileStore } from "./oil/store.mjs";
+import { FileStore, activateBinanceSource } from "./oil/store.mjs";
 import { Monitor } from "./oil/monitor.mjs";
 import { openNotificationStore } from "./notification-store.mjs";
 import { createNotificationService } from "./notification-service.mjs";
@@ -39,7 +39,9 @@ export async function createMonitorServices(directory, { externallyLocked = fals
     ]);
     const notifications = createNotificationService(notificationStore, notificationOptions);
     const hynix = createAlertService(hynixStore, { getQuote: async () => read("hynix", "quote", true), ...hynixOptions, notifications });
-    const oil = new Monitor({ store: oilStore, data: await oilStore.read(), fetchMarket: async () => read("oil", "quote", true), pollSeconds, ...oilOptions, notify: notifications.send, webhookConfigured: notifications.configured });
+    const previousOil = await oilStore.read(), oilData = activateBinanceSource(previousOil);
+    if (oilData !== previousOil) await oilStore.write(oilData);
+    const oil = new Monitor({ store: oilStore, data: oilData, fetchMarket: async () => read("oil", "quote", true), pollSeconds, ...oilOptions, notify: notifications.send, webhookConfigured: notifications.configured });
     const services = new Map([
       ["hynix", {
         start() { hynixRunning = true; hynix.start(); }, stop() { hynixRunning = false; return hynix.stop(); }, healthy: () => hynix.healthy(),
@@ -65,7 +67,7 @@ export async function createMonitorServices(directory, { externallyLocked = fals
           }
           if (action === "test-notification" && method === "POST") { await notifications.test(); return { ok: true }; }
         },
-        actions: { quote: ["GET"], history: ["GET"], funding: ["GET"], [OIL_CANDLE_ACTION]: ["GET"], ...exchangeActions, status: ["GET"], config: ["GET", "PUT"], events: ["GET"], "test-notification": ["POST"] },
+        actions: { quote: ["GET"], history: ["GET"], funding: ["GET"], [OIL_CANDLE_ACTION]: ["GET"], ...exchangeActions, 'exchanges/hyperliquid/quote': ['GET'], status: ["GET"], config: ["GET", "PUT"], events: ["GET"], "test-notification": ["POST"] },
       }],
     ]);
     services.notifications = notifications;

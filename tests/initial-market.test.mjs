@@ -50,17 +50,17 @@ test('a missing dataset cannot block other first-render data; the server provide
     assert.equal(first.oil.quote.revision, 0);
     revision++;
     assert.equal((await readServerInitialMarket()).oil.quote.revision, 1);
-    assert.equal(calls.length, 16);
+    assert.equal(calls.length, 18);
     assert.ok(!calls.some(([id, action]) => id === 'oil' && action === 'history'), 'Unused daily history is not serialized into the first render');
-    assert.ok(calls.every(([, action, method]) => ['quote', 'history', 'candles/15m', 'exchanges/bybit/quote', 'exchanges/binance/quote'].includes(action) && method === 'GET'));
+    assert.ok(calls.every(([, action, method]) => ['quote', 'history', 'candles/15m', 'exchanges/bybit/quote', 'exchanges/binance/quote', 'exchanges/hyperliquid/quote'].includes(action) && method === 'GET'));
   } finally { release(); }
   assert.equal(await readServerInitialMarket(), null, 'A stopped runtime cannot leak its provider into another instance');
 });
 
 test('first-render summaries retain valid zero quotes and stale status without changing the funding basis', () => {
   const fetchedAt = '2026-09-11T16:00:00Z';
-  const leg = { markPx: 100, oraclePx: 100, funding: 0 };
-  const summaries = initialSummaries({ renderedAt: Date.parse(fetchedAt), hynix: { quote: { fetchedAt, status: 'snapshot', adr: 20, ordinary: 200, equivalent: 20, spread: 0, premium: 0 }, history: null }, oil: { quote: { fetchedAt, status: 'live', brent: leg, wti: leg }, history: null } });
+  const leg = { markPx: 100, fundingRate: 0, fundingIntervalHours: 4, nextFundingAt: '2026-09-11T20:00:00Z' };
+  const summaries = initialSummaries({ renderedAt: Date.parse(fetchedAt), hynix: { quote: { fetchedAt, status: 'snapshot', adr: 20, ordinary: 200, equivalent: 20, spread: 0, premium: 0 }, history: null }, oil: { quote: { source: 'Binance', currency: 'USDT', fetchedAt, status: 'live', brent: { ...leg, coin: 'BZUSDT' }, wti: { ...leg, coin: 'CLUSDT' } }, history: null } });
   assert.equal(summaries.hynix.metrics[0].value, '0.00%');
   assert.equal(summaries.hynix.status, 'stale');
   assert.equal(summaries.oil.metrics[0].value, '0.000');

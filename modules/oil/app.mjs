@@ -1,10 +1,10 @@
 import { round, signed, filterRows, summarize, monthlyAverages, chartDomain } from './data-utils.mjs';
-import { calculateShortSpreadFunding, DAY } from './hyperliquid.mjs';
-import { createFundingSnapshot, analyzeFundingWindow } from './funding-history.mjs';
+import { calculateShortSpreadFunding, DAY } from './binance.mjs';
+import { validateFundingSnapshot, analyzeFundingWindow } from './binance-funding-history.mjs';
 
 import { intradayChartRows, validateIntradaySnapshot, OIL_CANDLE_MS, OIL_CANDLE_ACTION } from './intraday.mjs';
 import { createLifecycle } from './lifecycle.mjs';
-import { oilExchangeQuote } from '../../lib/exchange-quotes.ts';
+import { binanceOilExchangeQuote } from '../../lib/exchange-quotes.ts';
 import { nearestTimeIndex, tablePage, samePriceRows } from './chart-performance.mjs';
 /** @param {ShadowRoot} root @param {{ initial?: import('../../lib/initial-market').InitialMarketData['oil'], initialReadAt?: number, onSummary?: (summary: import('../../lib/monitor-summary').OilSummaryUpdate) => void }} options */
 export function mount(root, { onSummary, initial, initialReadAt = 0 } = {}) {
@@ -14,7 +14,7 @@ const state = { rows: [], range: '1w', view: 'spread', visible: [], chart: null,
 const labels = { '1d': '近 1 天', '1w': '近 1 周', '1m': '近 1 月', all: '全部历史' };
 let fundingHistoryView = 'annualized', fundingAnalysis = null, fundingAnalysisSource = null, fundingAnalysisRange = '';
 let fundingRangeDaily = new Map();
-const money = value => `${value.toFixed(3)}<small>美元 / 桶</small>`;
+const money = value => `${value.toFixed(3)}<small>USDT / 桶</small>`;
 const shortDate = date => beijingTime(date).slice(5, -3);
 const displayDate = date => date.length > 10 ? beijingTime(date).slice(0, -3) : date.replaceAll('-', '.');
 const priceClass = value => value < 0 ? 'negative' : value > 0 ? 'positive' : '';
@@ -41,7 +41,7 @@ function publishSummary(status = state.marketMode) {
     fundingHourlyRate: state.market ? calculateShortSpreadFunding(state.market, state.basis).hourlyRate : null,
     fundingBasis: state.basis,
     fetchedAt: state.market?.fetchedAt ?? null,
-    comparison: state.market ? oilExchangeQuote(state.market, status !== 'live') : undefined,
+    comparison: state.market ? binanceOilExchangeQuote(state.market, status !== 'live') : undefined,
     history: summaryHistory,
   });
 }
@@ -56,18 +56,27 @@ function showSignedValue(id, text, value) {
 function renderFunding() {
   if (!state.market) return;
   const result = calculateShortSpreadFunding(state.market, state.basis);
+  if (result.hourlyRate === null) {
+    for (const id of ['funding-net', 'funding-cash', 'funding-annual', 'brent-funding', 'wti-funding']) showSignedValue(id, '—', 0);
+    $('funding-direction').textContent = '资金费暂不可用';
+    for (const id of ['brent-payment', 'wti-payment', 'funding-formula', 'funding-basis-note']) $(id).textContent = '';
+    $('funding-cash-caption').textContent = '等待有效费率和结算周期';
+    $('funding-timestamp').textContent = `价格已保留：${beijingTime(state.market.fetchedAt)}（北京时间）`;
+    root.querySelectorAll('[data-basis]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.basis === state.basis)));
+    publishSummary(); return;
+  }
   const direction = result.hourlyRate > 0 ? '净收款' : result.hourlyRate < 0 ? '净付款' : '收支持平';
   showSignedValue('funding-net', `${percent(result.hourlyRate)}<small>/ 小时</small>`, result.hourlyRate);
-  showSignedValue('funding-cash', `${result.cashflowPer10k < 0 ? '−' : result.cashflowPer10k > 0 ? '+' : ''}$${Math.abs(result.cashflowPer10k).toFixed(4)}`, result.hourlyRate);
+  showSignedValue('funding-cash', `${result.cashflowPer10k < 0 ? '−' : result.cashflowPer10k > 0 ? '+' : ''}${Math.abs(result.cashflowPer10k).toFixed(4)} USDT`, result.hourlyRate);
   showSignedValue('funding-annual', percent(result.annualizedRate, 2), result.hourlyRate);
   showSignedValue('funding-direction', direction, result.hourlyRate);
-  $('funding-cash-caption').textContent = `两腿合计 10,000 美元预言机名义金额 · ${direction}`;
-  $('brent-funding').textContent = `${percent(result.brentRate)} / h`;
-  $('wti-funding').textContent = `${percent(result.wtiRate)} / h`;
+  $('funding-cash-caption').textContent = `两腿合计 10,000 USDT 标记名义金额 · ${direction}`;
+  $('brent-funding').textContent = `${percent(state.market.brent.fundingRate)} / ${state.market.brent.fundingIntervalHours} h`;
+  $('wti-funding').textContent = `${percent(state.market.wti.fundingRate)} / ${state.market.wti.fundingIntervalHours} h`;
   $('brent-payment').textContent = result.brentCashflow > 0 ? '空头收款' : result.brentCashflow < 0 ? '空头付款' : '无收付';
   $('wti-payment').textContent = result.wtiCashflow > 0 ? '多头收款' : result.wtiCashflow < 0 ? '多头付款' : '无收付';
-  $('funding-formula').textContent = state.basis === 'quantity' ? '净小时率 = (布伦特预言机价 × 布伦特费率 − WTI 预言机价 × WTI 费率) ÷ 两种预言机价之和。' : '净小时率 = (布伦特费率 − WTI 费率) ÷ 2。两腿名义金额相等，费率差需除以两腿总金额。';
-  $('funding-basis-note').textContent = state.basis === 'quantity' ? `空 1 桶布伦特、多 1 桶 WTI：预计每小时${result.hourlyCashflow < 0 ? '净付' : '净收'} $${Math.abs(result.hourlyCashflow).toFixed(6)}；总名义 $${result.grossNotional.toFixed(3)}。` : '两腿按预言机价格定义等美元名义，桶数不同；净率不以保证金或单腿名义为分母。';
+  $('funding-formula').textContent = state.basis === 'quantity' ? '净小时率 = (布伦特标记价 × 布伦特费率 ÷ 布伦特周期小时 − WTI 标记价 × WTI 费率 ÷ WTI 周期小时) ÷ 两种标记价之和。' : '净小时率 = (布伦特小时费率 − WTI 小时费率) ÷ 2。两腿名义金额相等，费率差需除以两腿总金额。';
+  $('funding-basis-note').textContent = state.basis === 'quantity' ? `空 1 桶布伦特、多 1 桶 WTI：预计每小时${result.hourlyCashflow < 0 ? '净付' : '净收'} ${Math.abs(result.hourlyCashflow).toFixed(6)} USDT；总名义 ${result.grossNotional.toFixed(3)} USDT。` : '两腿按标记价格定义等 USDT 名义，桶数不同；净率不以保证金或单腿名义为分母。';
   $('funding-timestamp').textContent = `${state.marketMode === 'live' ? '行情采集' : '保留数据'}：${beijingTime(state.market.fetchedAt)}（北京时间）`;
   root.querySelectorAll('[data-basis]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.basis === state.basis)));
   publishSummary();
@@ -81,7 +90,7 @@ function renderStatus() {
   if (!state.metadata) return;
   $('data-notice').textContent = `15 分钟 K 线收盘价差 · ${displayDate(state.metadata.firstCommonObservation)} — ${displayDate(state.metadata.lastCommonObservation)} 北京时间。${state.metadata.missingObservationRows ? `缺少 ${state.metadata.missingObservationRows} 根共同 K 线，缺口断线。` : ''}${state.historyMode !== 'live' ? '历史更新中断，保留已存数据。' : ''}`;
   $('data-notice').hidden = false;
-  $('source-note').textContent = `历史采用 Hyperliquid 两腿同一时段已收盘的 15 分钟 K 线；图表时间为北京时间，接口按 UTC 对齐。交易所仅返回最近约 5,000 根，后台持续保存已采集历史。采集：${beijingTime(state.metadata.fetchedAt)} 北京时间。`;
+  $('source-note').textContent = `历史采用 Binance BZUSDT 与 CLUSDT 同一时段已收盘的 15 分钟 K 线，按 USDT/桶报价。图表显示北京时间，按 UTC 对齐；从 4 月 1 日回补，后台持续保存新记录。采集：${beijingTime(state.metadata.fetchedAt)} 北京时间。`;
 }
 
 function svgElement(tag, attributes = {}, content) {
@@ -111,7 +120,7 @@ function fillMetrics() {
   if (!state.rows.length) return;
   const { first, latest } = summarize(state.rows);
   const yearChange = round(latest.spread - first.spread);
-  $('ytd-change').innerHTML = `${signed(yearChange)}<small>美元 / 桶</small>`;
+  $('ytd-change').innerHTML = `${signed(yearChange)}<small>USDT / 桶</small>`;
   $('ytd-change').classList.toggle('negative', yearChange < 0);
   $('ytd-change').classList.toggle('positive', yearChange > 0);
   $('ytd-reference').textContent = `${shortDate(first.date)} — ${shortDate(latest.date)} · 15 分钟收盘价差`;
@@ -127,7 +136,7 @@ function renderSummary(summary) {
   const span = summary.max.spread - summary.min.spread;
   const percentile = span === 0 ? 50 : (summary.latest.spread - summary.min.spread) / span * 100;
   $('range-marker').style.left = `clamp(0px, ${percentile.toFixed(3)}%, calc(100% - 3px))`;
-  $('range-description').textContent = `最近收盘价差位于区间${percentile < 33 ? '下部' : percentile > 66 ? '上部' : '中部'} · ${summary.latest.spread.toFixed(3)} 美元 / 桶`;
+  $('range-description').textContent = `最近收盘价差位于区间${percentile < 33 ? '下部' : percentile > 66 ? '上部' : '中部'} · ${summary.latest.spread.toFixed(3)} USDT / 桶`;
 }
 
 function renderMonthly() {
@@ -142,7 +151,7 @@ function renderMonthly() {
     item.className = 'month-item';
     item.setAttribute('role', 'listitem');
     item.tabIndex = 0;
-    const description = `${Number(month.month.slice(5))}月：平均价差 ${month.average.toFixed(3)} 美元/桶，${month.count} 根 15 分钟 K 线`;
+    const description = `${Number(month.month.slice(5))}月：平均价差 ${month.average.toFixed(3)} USDT/桶，${month.count} 根 15 分钟 K 线`;
     item.setAttribute('aria-label', description);
     item.title = description;
     const height = Math.abs(month.average) / span * 80;
@@ -175,7 +184,7 @@ function renderTable(changed = true) {
     const change = previous && row.time - previous.time === OIL_CANDLE_MS ? round(row.spread - previous.spread) : null;
     const tr = document.createElement('tr');
     const funding = state.fundingByTime.get(row.time);
-    tr.innerHTML = `<td>${displayDate(row.date)}</td><td>${row.brent.toFixed(3)}</td><td>${row.wti.toFixed(3)}</td><td>${row.spread.toFixed(3)}</td><td class="${change === null ? '' : priceClass(change)}">${change === null ? '—' : signed(change)}</td><td class="${funding ? priceClass(funding.longRate) : 'history-missing'}">${funding ? percent(funding.longRate) : '—'}</td><td class="${funding ? priceClass(funding.shortRate) : 'history-missing'}">${funding ? percent(funding.shortRate) : '—'}</td><td>${funding ? '整点已结算' : '—'}</td>`;
+    tr.innerHTML = `<td>${displayDate(row.date)}</td><td>${row.brent.toFixed(3)}</td><td>${row.wti.toFixed(3)}</td><td>${row.spread.toFixed(3)}</td><td class="${change === null ? '' : priceClass(change)}">${change === null ? '—' : signed(change)}</td><td class="${funding ? priceClass(funding.longRate) : 'history-missing'}">${funding ? percent(funding.longRate) : '—'}</td><td class="${funding ? priceClass(funding.shortRate) : 'history-missing'}">${funding ? percent(funding.shortRate) : '—'}</td><td>${funding ? '4 小时已结算' : '—'}</td>`;
     fragment.append(tr);
   }
   tbody.append(fragment);
@@ -207,7 +216,7 @@ function renderChart() {
   gradient.append(svgElement('stop', { offset: '0%', 'stop-color': '#cbf49a', 'stop-opacity': '.20' }), svgElement('stop', { offset: '100%', 'stop-color': '#cbf49a', 'stop-opacity': '.015' }));
   defs.append(gradient); svg.append(defs);
   svg.append(svgElement('title', {}, `${isSpread ? '布伦特减WTI价差' : '布伦特与WTI永续合约收盘价'}，${rows[0].date}至${rows.at(-1).date}`));
-  svg.append(svgElement('desc', {}, `共${rows.length}根共同 15 分钟 K 线。价差均值${summary.average.toFixed(3)}，最低${summary.min.spread.toFixed(3)}，最高${summary.max.spread.toFixed(3)}美元每桶。完整数值见页面下方15 分钟数据明细。`));
+  svg.append(svgElement('desc', {}, `共${rows.length}根共同 15 分钟 K 线。价差均值${summary.average.toFixed(3)}，最低${summary.min.spread.toFixed(3)}，最高${summary.max.spread.toFixed(3)}USDT 每桶。完整数值见页面下方15 分钟数据明细。`));
   for (let i = 0; i <= 4; i++) {
     const value = domain.min + (domain.max - domain.min) * i / 4;
     const py = y(value);
@@ -241,7 +250,7 @@ function renderChart() {
   const dots = series.map(item => { const dot = svgElement('circle', { r: 4, fill: item.color, stroke: '#181e1b', 'stroke-width': 2 }); crosshair.append(dot); return { field: item.field, node: dot }; });
   svg.append(crosshair);
   state.chart = { width, height, x, y, crosshair, guide, dots, padding, start, end, plotWidth };
-  svg.setAttribute('aria-label', isSpread ? '布伦特减WTI15分钟K线收盘价差走势，单位美元每桶' : '布伦特和WTI永续合约15分钟K线收盘价格走势，单位美元每桶');
+  svg.setAttribute('aria-label', isSpread ? '布伦特减WTI15分钟K线收盘价差走势，单位USDT 每桶' : '布伦特和WTI永续合约15分钟K线收盘价格走势，单位USDT 每桶');
   const previousIndex = rows.findIndex(row => row.date === state.selectedDate);
   const cursorIndex = previousIndex >= 0 ? previousIndex : rows.length - 1;
   const selected = rows[cursorIndex];
@@ -257,7 +266,7 @@ function renderChart() {
 
 function renderFundingHistoryStatus() {
   const mode = state.fundingHistoryMode;
-  $('funding-history-status').textContent = state.fundingSnapshot ? `${mode === 'live' ? '历史费率已同步' : mode === 'stale' ? '历史费率更新失败，保留数据' : '历史费率备用快照'} · ${beijingTime(state.fundingSnapshot.metadata.fetchedAt)} 北京时间。不足 24 个样本的日期按已有共同结算小时求均值，不补零。` : mode === 'error' ? '历史资金费率暂不可用；价格图表与当前预估仍可使用。可点击顶部刷新数据重试。' : '正在载入已结算资金费率。';
+  $('funding-history-status').textContent = state.fundingSnapshot ? `${mode === 'live' ? '历史费率已同步' : mode === 'stale' ? '历史费率更新失败，保留数据' : '历史费率备用快照'} · ${beijingTime(state.fundingSnapshot.metadata.fetchedAt)} 北京时间。每 4 小时结算；不足 6 次结算的日期按已有共同结算记录折算小时率，缺失不补零。` : mode === 'error' ? '历史资金费率暂不可用；价格图表与当前预估仍可使用。可点击顶部刷新数据重试。' : '正在载入已结算资金费率。';
 }
 
 function renderFundingHistoryChart() {
@@ -289,7 +298,7 @@ function renderFundingHistoryChart() {
   $('funding-history-tooltip').hidden = true;
   const mode = state.fundingHistoryMode;
   renderFundingHistoryStatus();
-  $('funding-history-count').textContent = state.fundingSnapshot ? `${fundingAnalysis.count.toLocaleString('zh-CN')} / ${fundingAnalysis.expectedHours.toLocaleString('zh-CN')} 个共同小时 · ${fundingAnalysis.missingHours ? `缺少 ${fundingAnalysis.missingHours.toLocaleString('zh-CN')} 小时，累计仅含已覆盖数据` : '覆盖完整'}` : '';
+  $('funding-history-count').textContent = state.fundingSnapshot ? `${fundingAnalysis.count.toLocaleString('zh-CN')} / ${fundingAnalysis.expectedSettlements.toLocaleString('zh-CN')} 次共同结算 · ${fundingAnalysis.missingSettlements ? `缺少 ${fundingAnalysis.missingSettlements.toLocaleString('zh-CN')} 次结算，累计仅含已覆盖数据` : '覆盖完整'}` : '';
   if (records.length) svg.removeAttribute('hidden'); else svg.setAttribute('hidden', '');
   empty.hidden = Boolean(records.length);
   $('funding-history-cursor').disabled = !records.length;
@@ -304,7 +313,7 @@ function renderFundingHistoryChart() {
   const y = rate => top + (maxAbs - rate) / (2 * maxAbs) * (height - top - bottom);
   svg.setAttribute('aria-label', `历史做多与做空价差的${metricLabel}`);
   svg.append(svgElement('title', {}, `${metricLabel}，${firstDate}至${lastDate}`));
-  svg.append(svgElement('desc', {}, `两腿等预言机美元名义，按两腿总敞口计算。做多为多布伦特空WTI，做空相反。正值收款，负值付款。累计年化为所选区间净小时率之和除以有效小时数乘8760，不复利。当前覆盖${fundingAnalysis.count}个小时，缺少${fundingAnalysis.missingHours}个小时。`));
+  svg.append(svgElement('desc', {}, `两腿等 USDT 名义，按两腿总敞口计算。做多为多布伦特空WTI，做空相反。正值收款，负值付款。累计年化为所选区间累计净结算费率除以（有效结算次数乘4小时），再乘8760，不复利。当前覆盖${fundingAnalysis.count}次结算，缺少${fundingAnalysis.missingSettlements}次结算。`));
   for (let i = -2; i <= 2; i++) {
     const value = maxAbs * i / 2;
     svg.append(svgElement('line', { x1: padding.left, x2: width - padding.right, y1: y(value), y2: y(value), stroke: i === 0 ? '#66725e' : '#2b352c', 'stroke-dasharray': i === 0 ? 'none' : '3 5' }));
@@ -317,7 +326,7 @@ function renderFundingHistoryChart() {
     for (const point of records) {
       const connected = previous && Date.parse(point.date) - Date.parse(previous.date) === DAY;
       path += `${connected ? 'L' : 'M'}${x(point.date).toFixed(3)},${y(point[item.field]).toFixed(3)} `;
-      if (!connected || point.count < 24) svg.append(svgElement('circle', { cx: x(point.date), cy: y(point[item.field]), r: 2.5, fill: '#181e1b', stroke: item.color, 'stroke-width': 1.5 }));
+      if (!connected || point.count < 6) svg.append(svgElement('circle', { cx: x(point.date), cy: y(point[item.field]), r: 2.5, fill: '#181e1b', stroke: item.color, 'stroke-width': 1.5 }));
       previous = point;
     }
     svg.append(svgElement('path', { d: path, fill: 'none', stroke: item.color, 'stroke-width': 1.8, 'stroke-linejoin': 'round', 'stroke-dasharray': item.dash }));
@@ -338,7 +347,7 @@ function renderFundingHistoryChart() {
 
 function historicalFundingDescription(date) {
   const row = fundingRangeDaily.get(date), annualized = fundingHistoryView === 'annualized';
-  return row ? `${date}，做多价差 ${percent(annualized ? row.longAnnualized : row.longRate, annualized ? 2 : 5)}，做空价差 ${percent(annualized ? row.shortAnnualized : row.shortRate, annualized ? 2 : 5)}，${annualized ? '区间累计年化' : '日均小时费率'}，等名义总敞口，当日${row.count}个结算小时，区间累计${row.cumulativeCount}个有效小时` : `${date}，没有共同历史资金费率样本`;
+  return row ? `${date}，做多价差 ${percent(annualized ? row.longAnnualized : row.longRate, annualized ? 2 : 5)}，做空价差 ${percent(annualized ? row.shortAnnualized : row.shortRate, annualized ? 2 : 5)}，${annualized ? '区间累计年化' : '日均小时费率'}，等名义总敞口，当日${row.count}次结算，区间累计${row.cumulativeCount}次有效结算` : `${date}，没有共同历史资金费率样本`;
 }
 
 function showHistoricalFundingTooltip(date) {
@@ -351,7 +360,7 @@ function showHistoricalFundingTooltip(date) {
     chart.guide.setAttribute('x1', px); chart.guide.setAttribute('x2', px);
     for (const dot of chart.dots) { dot.node.setAttribute('cx', px); dot.node.setAttribute('cy', chart.y(row[dot.field])); }
   }
-  tooltip.innerHTML = `<div class="tooltip-date">${displayDate(date)} · UTC 结算日</div>${row ? `<div class="tooltip-row funding-history-tooltip-long"><span>做多${annualized ? '年化' : '小时率'}</span><strong>${percent(annualized ? row.longAnnualized : row.longRate, annualized ? 2 : 5)}</strong></div><div class="tooltip-row funding-history-tooltip-short"><span>做空${annualized ? '年化' : '小时率'}</span><strong>${percent(annualized ? row.shortAnnualized : row.shortRate, annualized ? 2 : 5)}</strong></div><div class="tooltip-row"><span>做多累计</span><strong>${percent(row.longCumulative, 4)}</strong></div><div class="tooltip-row"><span>做空累计</span><strong>${percent(row.shortCumulative, 4)}</strong></div><div class="tooltip-date">区间内当日 ${row.count} 个整点<br>从区间起点累计 ${row.cumulativeCount} 个有效小时</div>` : '<div>当日无共同结算样本</div>'}`;
+  tooltip.innerHTML = `<div class="tooltip-date">${displayDate(date)} · UTC 结算日</div>${row ? `<div class="tooltip-row funding-history-tooltip-long"><span>做多${annualized ? '年化' : '小时率'}</span><strong>${percent(annualized ? row.longAnnualized : row.longRate, annualized ? 2 : 5)}</strong></div><div class="tooltip-row funding-history-tooltip-short"><span>做空${annualized ? '年化' : '小时率'}</span><strong>${percent(annualized ? row.shortAnnualized : row.shortRate, annualized ? 2 : 5)}</strong></div><div class="tooltip-row"><span>做多累计</span><strong>${percent(row.longCumulative, 4)}</strong></div><div class="tooltip-row"><span>做空累计</span><strong>${percent(row.shortCumulative, 4)}</strong></div><div class="tooltip-date">区间内当日 ${row.count} 次 4 小时结算<br>从区间起点累计 ${row.cumulativeCount} 次有效结算</div>` : '<div>当日无共同结算样本</div>'}`;
   tooltip.hidden = false;
   const displayWidth = $('funding-history-chart').clientWidth;
   tooltip.style.left = `${Math.max(0, Math.min(px * displayWidth / chart.width + 14, displayWidth - tooltip.offsetWidth))}px`;
@@ -360,7 +369,7 @@ function showHistoricalFundingTooltip(date) {
 }
 
 function cursorDescription(row) {
-  return `${displayDate(row.date)} 北京时间，布伦特 ${row.brent.toFixed(3)}，WTI ${row.wti.toFixed(3)}，价差 ${row.spread.toFixed(3)} 美元每桶`;
+  return `${displayDate(row.date)} 北京时间，布伦特 ${row.brent.toFixed(3)}，WTI ${row.wti.toFixed(3)}，价差 ${row.spread.toFixed(3)} USDT 每桶`;
 }
 
 function showTooltip(index) {
@@ -457,7 +466,7 @@ async function refreshData(full = true) {
     const failed = results.find(result => result.status === 'rejected');
     if (failed) throw failed.reason;
   } catch (error) { if (life.signal.aborted) return;
-    console.warn('Unable to refresh Hyperliquid observations:', error);
+    console.warn('Unable to refresh Binance observations:', error);
     if (full && state.rows.length) state.historyMode = 'stale';
     if (state.market) {
       if (!receivedLiveMarket) state.marketMode = 'stale';
@@ -477,7 +486,7 @@ async function loadData() {
 function applyFundingSnapshot(snapshot, mode) {
   if (life.signal.aborted) return;
   if (state.fundingSnapshot && Date.parse(snapshot.metadata.fetchedAt) < Date.parse(state.fundingSnapshot.metadata.fetchedAt)) return;
-  const validated = createFundingSnapshot(snapshot.data, snapshot.metadata.fetchedAt);
+  const validated = validateFundingSnapshot(snapshot);
   if (validated.metadata.pairedObservationRows !== snapshot.metadata.pairedObservationRows || validated.metadata.firstSettlementTime !== snapshot.metadata.firstSettlementTime || validated.metadata.lastSettlementTime !== snapshot.metadata.lastSettlementTime) throw new Error('Funding metadata mismatch');
   const changed = !state.fundingSnapshot || !samePriceRows(state.fundingSnapshot.data, validated.data);
   state.fundingSnapshot = changed ? validated : { ...validated, data: state.fundingSnapshot.data }; state.fundingHistoryMode = mode;

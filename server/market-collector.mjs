@@ -1,15 +1,15 @@
 import { loadQuote } from '../lib/quote-service.ts';
 import { loadMarket, getMarketSnapshot } from '../lib/market-service.ts';
 import { fetchHynixFundingSnapshot } from '../lib/hynix-funding-history.ts';
-import { fetchMarket, fetchSnapshot } from '../modules/oil/hyperliquid.mjs';
-import { fetchFundingSnapshot } from '../modules/oil/funding-history.mjs';
-import oilArchive from '../public/oil/data/hyperliquid-2026.json' with { type: 'json' };
-import oilFundingArchive from '../public/oil/data/hyperliquid-funding-2026.json' with { type: 'json' };
+import { fetchDailySnapshot, marketFromExchangeQuote } from '../modules/oil/binance.mjs';
+import { fetchFundingSnapshot } from '../modules/oil/binance-funding-history.mjs';
+import oilArchive from '../public/oil/data/binance-2026.json' with { type: 'json' };
+import oilFundingArchive from '../public/oil/data/binance-funding-2026.json' with { type: 'json' };
 import hynixFundingArchive from '../data/hynix-funding.json' with { type: 'json' };
-import { externalExchanges, exchangeAction, EXCHANGE_REFRESH_MS } from '../lib/exchange-quotes.ts';
+import { comparisonExchanges, exchangeAction, EXCHANGE_REFRESH_MS } from '../lib/exchange-quotes.ts';
 import { createExchangeReader } from '../lib/exchange-service.ts';
 import { fetchIntradaySnapshot, OIL_CANDLE_ACTION, OIL_CANDLE_REFRESH_MS } from '../modules/oil/intraday.mjs';
-import oilIntradayArchive from '../public/oil/data/hyperliquid-15m.json' with { type: 'json' };
+import oilIntradayArchive from '../public/oil/data/binance-15m.json' with { type: 'json' };
 
 export function seedMarketDatabase(store) {
   store.write('hynix', 'history', getMarketSnapshot(), { seed: true });
@@ -22,12 +22,13 @@ export function seedMarketDatabase(store) {
 
 export function marketJobs({ oilIntervalMs = 30_000 } = {}) {
   const readExchange = createExchangeReader();
+  const fetchMarket = async () => marketFromExchangeQuote(await readExchange('binance', 'oil'));
   return [
     { id: 'hynix', action: 'quote', intervalMs: 10_000, load: () => loadQuote() },
     { id: 'oil', action: 'quote', intervalMs: oilIntervalMs, load: () => fetchMarket() },
     { id: 'hynix', action: 'history', intervalMs: 60_000, load: previous => loadMarket(fetch, Date.now(), previous ?? getMarketSnapshot()) },
     { id: 'oil', action: 'history', intervalMs: 300_000, async load(previous) {
-      const next = await fetchSnapshot();
+      const next = await fetchDailySnapshot(await fetchMarket());
       const rows = new Map((previous?.data ?? []).map(row => [row.date, row]));
       for (const row of next.data) { const old = rows.get(row.date); rows.set(row.date, { date: row.date, brent: row.brent ?? old?.brent ?? null, wti: row.wti ?? old?.wti ?? null }); }
       const data = [...rows.values()].sort((a, b) => a.date.localeCompare(b.date));
@@ -36,7 +37,7 @@ export function marketJobs({ oilIntervalMs = 30_000 } = {}) {
     } },
     { id: 'hynix', action: 'funding', intervalMs: 300_000, load: previous => fetchHynixFundingSnapshot(previous ?? hynixFundingArchive, { signal: AbortSignal.timeout(12_000) }) },
     { id: 'oil', action: 'funding', intervalMs: 300_000, load: previous => fetchFundingSnapshot(previous ?? oilFundingArchive) },
-    ...externalExchanges.flatMap(exchange => ['oil', 'hynix'].map(id => ({ id, action: exchangeAction(exchange), intervalMs: EXCHANGE_REFRESH_MS, load: () => readExchange(exchange, id) }))),
+    ...['oil', 'hynix'].flatMap(id => comparisonExchanges(id).map(exchange => ({ id, action: exchangeAction(exchange), intervalMs: EXCHANGE_REFRESH_MS, load: () => readExchange(exchange, id) }))),
     { id: 'oil', action: OIL_CANDLE_ACTION, intervalMs: OIL_CANDLE_REFRESH_MS, load: previous => fetchIntradaySnapshot(previous ?? oilIntradayArchive) },
   ];
 }
