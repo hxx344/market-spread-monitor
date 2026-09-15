@@ -53,12 +53,12 @@ test("history snapshot status and closing points stay separate from fresh curren
   assert.equal(createTrend({ ...history, points: [] }, options, true).status, "stale");
 });
 
-test("oil uses historical daily spreads independently of the current mark spread", () => {
-  const summary = oilSummary({ status: "live", spread: 4.25, fundingHourlyRate: 0, fundingBasis: "quantity", fetchedAt: history.fetchedAt, history: { ...history, status: "stale", points: [{ time: 0, value: 3 }, { time: day, value: 3.5 }] } });
+test("oil uses historical 15-minute spreads independently of the current mark spread", () => {
+  const summary = oilSummary({ status: "live", spread: 4.25, fundingHourlyRate: 0, fundingBasis: "quantity", fetchedAt: history.fetchedAt, history: { ...history, status: "stale", points: [{ time: 0, value: 3 }, { time: 900_000, value: 3.5 }] } });
   assert.equal(summary.metrics[0].value, "+4.250");
   assert.equal(summary.trend.points.at(-1).value, 3.5);
   assert.equal(summary.trend.status, "stale");
-  assert.equal(summary.trend.intervalMs, day);
+  assert.equal(summary.trend.intervalMs, 900_000);
 });
 
 test("old completed candles are marked pending independently of live quote freshness", () => {

@@ -12,7 +12,7 @@ import { createHandler } from '../server/http.mjs';
 import { createFundingSnapshot, fetchFundingSnapshot } from '../modules/oil/funding-history.mjs';
 import { loadMarket, getMarketSnapshot } from '../lib/market-service.ts';
 
-const NOW = Date.UTC(2026, 8, 12), HOUR = 3_600_000;
+const NOW = Date.UTC(2026, 8, 16), HOUR = 3_600_000;
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const deferred = () => { let resolve; const promise = new Promise(accept => { resolve = accept; }); return { promise, resolve }; };
 const quote = (time = NOW, adr = 22) => ({ ordinary: 200, adr, equivalent: 20, spread: adr - 20, premium: (adr / 20 - 1) * 100, fetchedAt: new Date(time).toISOString() });
@@ -28,7 +28,7 @@ async function database(t, now = () => NOW) {
   return { filename, store, async close() { store.close(); } };
 }
 
-test('SQLite retains all six datasets, sample keys and original timestamps across restart; seeding is idempotent', async t => {
+test('SQLite retains legacy history and 15-minute candles, sample keys and original timestamps across restart; seeding is idempotent', async t => {
   const fixture = await database(t), { store, filename } = fixture;
   try {
     seedMarketDatabase(store);
@@ -37,6 +37,9 @@ test('SQLite retains all six datasets, sample keys and original timestamps acros
     assert.equal(store.count('hynix', 'quote'), 1);
     assert.ok(store.count('hynix', 'funding') >= 1512);
     assert.ok(store.count('oil', 'funding') > 4500);
+    assert.ok(store.count('oil', 'candles/15m') >= 5000);
+    assert.ok(store.raw('oil', 'history').data[0].date.length === 10);
+    assert.equal(store.raw('oil', 'candles/15m').metadata.interval, '15m');
     const before = store.status();
     seedMarketDatabase(store);
     assert.deepEqual(store.status(), before);
@@ -171,7 +174,7 @@ test('authenticated APIs only read SQLite, including old URLs, with the collecto
     const base = `http://127.0.0.1:${server.address().port}`, headers = { Authorization: `Basic ${Buffer.from('admin:database-test-password').toString('base64')}` };
     const before = services.market.status();
     assert.equal((await fetch(`${base}/api/monitors/oil/history`)).status, 401);
-    for (let repeat = 0; repeat < 3; repeat++) for (const path of ['/api/quote', '/api/market', ...['oil', 'hynix'].flatMap(id => ['quote', 'history', 'funding'].map(action => `/api/monitors/${id}/${action}`))]) {
+    for (let repeat = 0; repeat < 3; repeat++) for (const path of ['/api/quote', '/api/market', '/api/monitors/oil/candles/15m', ...['oil', 'hynix'].flatMap(id => ['quote', 'history', 'funding'].map(action => `/api/monitors/${id}/${action}`))]) {
       const response = await fetch(base + path, { headers }); assert.equal(response.status, 200, path);
       assert.equal((await response.json()).collection.source, 'database');
     }

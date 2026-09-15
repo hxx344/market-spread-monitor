@@ -79,6 +79,26 @@ export function analyzeFundingRange(rows, firstDate, lastDate) {
   return { points, count, expectedHours, missingHours: expectedHours - count, shortCumulative: count ? cumulative : null, longCumulative: count ? -cumulative : null, shortAnnualized: count ? cumulative / count * 8760 : null, longAnnualized: count ? -cumulative / count * 8760 : null };
 }
 
+/** Exact intraday window, grouped by UTC settlement day for the funding chart. */
+export function analyzeFundingWindow(rows, start, end) {
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start) throw Error('Invalid funding time window');
+  const days = new Map();
+  for (const row of validateFundingRows(rows)) {
+    if (row.time < start || row.time >= end || row.brent === null || row.wti === null) continue;
+    const date = new Date(row.time).toISOString().slice(0, 10), day = days.get(date) ?? { date, count: 0, sum: 0, time: row.time };
+    day.sum += (row.brent - row.wti) / 2; day.count++; day.time = row.time; days.set(date, day);
+  }
+  let count = 0, cumulative = 0;
+  const points = [...days.values()].map(day => {
+    count += day.count; cumulative += day.sum;
+    const annualized = cumulative / count * 8760;
+    if (!Number.isFinite(cumulative) || !Number.isFinite(annualized)) throw Error('Historical funding calculation overflow');
+    return { date: day.date, time: day.time, count: day.count, cumulativeCount: count, shortRate: day.sum / day.count, longRate: -day.sum / day.count, shortCumulative: cumulative, longCumulative: -cumulative, shortAnnualized: annualized, longAnnualized: -annualized };
+  });
+  const expectedHours = Math.ceil(end / HOUR) - Math.ceil(start / HOUR);
+  return { points, count, expectedHours, missingHours: expectedHours - count, shortCumulative: count ? cumulative : null, longCumulative: count ? -cumulative : null, shortAnnualized: count ? cumulative / count * 8760 : null, longAnnualized: count ? -cumulative / count * 8760 : null };
+}
+
 export function createFundingSnapshot(data, fetchedAt = new Date().toISOString()) {
   const validated = validateFundingRows(data);
   const paired = validated.filter(row => row.brent !== null && row.wti !== null);

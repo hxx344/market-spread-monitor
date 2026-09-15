@@ -86,8 +86,8 @@ try {
   };
   let collected = inspect();
   for (let attempt = 0; attempt < 90 && collected.datasets.some(dataset => !dataset.attempt_ms); attempt++) { await delay(500); collected = inspect(); }
-  assert.equal(collected.datasets.length, 10);
-  assert.ok(collected.datasets.every(dataset => dataset.attempt_ms), "All ten datasets collect in the background");
+  assert.equal(collected.datasets.length, 11);
+  assert.ok(collected.datasets.every(dataset => dataset.attempt_ms), "All eleven datasets collect in the background");
   const oilStatus = await fetch(`${base}/api/monitors/oil/status`, { headers }).then(r=>r.json());
   assert.ok(oilStatus.lastAttemptAt, "Oil monitor runs independently of page visits");
   await stop(); start(); await ready();

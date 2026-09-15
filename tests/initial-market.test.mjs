@@ -26,7 +26,10 @@ test('first render reads persisted history immediately with collection stopped a
     assert.notEqual(summaries.oil.metrics[0].value, '—');
     assert.equal(summaries.hynix.metrics[0].value, '—');
     assert.equal(summaries.hynix.trend.points.length, 168);
-    assert.equal(summaries.oil.trend.points.length, 30);
+    assert.equal(summaries.oil.trend.points.length, 672);
+    assert.equal(summaries.oil.trend.intervalMs, 900_000);
+    assert.equal(data.oil.candles.metadata.interval, '15m');
+    assert.equal(data.oil.candles.collection.source, 'database');
   } finally { if (services) { await services.market.stop(); await services.notifications.stop(); } await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -47,8 +50,8 @@ test('a missing dataset cannot block other first-render data; the server provide
     assert.equal(first.oil.quote.revision, 0);
     revision++;
     assert.equal((await readServerInitialMarket()).oil.quote.revision, 1);
-    assert.equal(calls.length, 16);
-    assert.ok(calls.every(([, action, method]) => ['quote', 'history', 'exchanges/bybit/quote', 'exchanges/binance/quote'].includes(action) && method === 'GET'));
+    assert.equal(calls.length, 18);
+    assert.ok(calls.every(([, action, method]) => ['quote', 'history', 'candles/15m', 'exchanges/bybit/quote', 'exchanges/binance/quote'].includes(action) && method === 'GET'));
   } finally { release(); }
   assert.equal(await readServerInitialMarket(), null, 'A stopped runtime cannot leak its provider into another instance');
 });

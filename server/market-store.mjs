@@ -3,8 +3,10 @@ import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { validateHynixQuote, validateHynixHistory, validateHynixFunding, validateOilQuote, validateOilHistory, validateOilFunding } from '../lib/market-validation.ts';
 import { externalExchanges, exchangeAction, validateExchangeQuote } from '../lib/exchange-quotes.ts';
+import { OIL_CANDLE_ACTION, validateIntradaySnapshot } from '../modules/oil/intraday.mjs';
 
 const validators = { 'hynix/quote': validateHynixQuote, 'hynix/history': validateHynixHistory, 'hynix/funding': validateHynixFunding, 'oil/quote': validateOilQuote, 'oil/history': validateOilHistory, 'oil/funding': validateOilFunding };
+validators[`oil/${OIL_CANDLE_ACTION}`] = validateIntradaySnapshot;
 for (const id of ['oil', 'hynix']) for (const exchange of externalExchanges) validators[`${id}/${exchangeAction(exchange)}`] = value => validateExchangeQuote(value, exchange, id);
 export const datasetKeys = Object.keys(validators);
 const timestamp = value => Date.parse(value.fetchedAt ?? value.metadata?.fetchedAt);

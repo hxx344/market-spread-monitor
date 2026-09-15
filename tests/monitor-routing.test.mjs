@@ -20,6 +20,21 @@ test("registered modules isolate cached requests and retry failed live quotes", 
   assert.equal(new Set(monitors.map(m => m.id)).size, monitors.length);
 });
 
+test("15-minute candles have an independent one-minute cache, shorter retained-data retry and explicit module capability", async () => {
+  let now = 0, calls = 0, status = 'live';
+  const read = createDataReader({ oil: { quote: async () => ({}), history: async () => ({ kind: 'daily' }), 'candles/15m': async () => ({ kind: '15m', status, call: ++calls }) }, hynix: { quote: async () => ({}), history: async () => ({}) } }, () => now);
+  assert.equal((await read('oil', 'history')).kind, 'daily');
+  assert.equal((await read('oil', 'candles/15m')).call, 1);
+  now = 59_000;
+  assert.equal((await read('oil', 'candles/15m')).call, 1);
+  now = 60_001; status = 'snapshot';
+  assert.equal((await read('oil', 'candles/15m')).call, 2);
+  now += 15_001;
+  assert.equal((await read('oil', 'candles/15m')).call, 3);
+  await assert.rejects(read('hynix', 'candles/15m'));
+  assert.ok(monitors.find(item => item.id === 'oil').capabilities.includes('candles/15m'));
+});
+
 test("module APIs authenticate, protect writes and keep revisions separate", async t => {
   const state = { oil: 0, hynix: 0 };
   const services = new Map(Object.keys(state).map(id => [id, { actions: { config: ["GET", "PUT"] }, async handle(_action, method, input) { if (method === "PUT") { if (input.revision !== state[id]) { const error=Error("conflict"); error.status=409; throw error; } state[id]++; } return { revision: state[id], id }; } }]));

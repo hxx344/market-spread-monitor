@@ -18,7 +18,7 @@
     "data:archive": "node scripts/archive-market.mjs",
     "db:generate": "drizzle-kit generate",
     "start:windows": "node --experimental-strip-types --env-file-if-exists=.env.linux server/linux.mjs",
-    "data:oil": "node scripts/refresh-snapshot.mjs && node scripts/refresh-funding-snapshot.mjs"
+    "data:oil": "node scripts/refresh-snapshot.mjs && node scripts/refresh-funding-snapshot.mjs && node scripts/archive-oil-intraday.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",

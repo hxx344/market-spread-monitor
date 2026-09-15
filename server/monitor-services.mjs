@@ -8,6 +8,7 @@ import { createNotificationService } from "./notification-service.mjs";
 import { openMarketStore } from "./market-store.mjs";
 import { createMarketCollector, marketJobs, seedMarketDatabase } from "./market-collector.mjs";
 import { externalExchanges, exchangeAction, exchangeFromAction, EXCHANGE_REFRESH_MS } from "../lib/exchange-quotes.ts";
+import { OIL_CANDLE_ACTION, OIL_CANDLE_REFRESH_MS } from "../modules/oil/intraday.mjs";
 
 const exchangeActions = Object.fromEntries(externalExchanges.map(exchange => [exchangeAction(exchange), ["GET"]]));
 
@@ -27,7 +28,7 @@ export async function createMonitorServices(directory, { externallyLocked = fals
     });
     const read = (id, action, fresh = false) => {
       if (fresh && !collector.healthy()) throw new Error("行情数据库写入失败，暂停告警。");
-      const interval = exchangeFromAction(action) ? EXCHANGE_REFRESH_MS : action === "quote" ? id === "oil" ? pollSeconds * 1000 : 10_000 : action === "history" && id === "hynix" ? 60_000 : 300_000;
+      const interval = action === OIL_CANDLE_ACTION ? OIL_CANDLE_REFRESH_MS : exchangeFromAction(action) ? EXCHANGE_REFRESH_MS : action === "quote" ? id === "oil" ? pollSeconds * 1000 : 10_000 : action === "history" && id === "hynix" ? 60_000 : 300_000;
       const value = marketStore.read(id, action, { fresh, maxAgeMs: interval * 2 + 15_000 });
       return collector.healthy() ? value : { ...value, status: "snapshot", collection: { ...value.collection, stale: true, error: "行情数据库写入失败，保留已保存数据。" } };
     };
@@ -54,6 +55,7 @@ export async function createMonitorServices(directory, { externallyLocked = fals
         start() { oilRunning = true; oil.start(); }, healthy: () => !oil.storageError, async stop() { oilRunning = false; await oil.stop(); },
         async handle(action, method, input) {
           if (action === "status" && method === "GET") return { ...oil.status(), available: true, monitorId: "oil" };
+          if (action === OIL_CANDLE_ACTION && method === "GET") return read("oil", action);
           if ((["quote", "history", "funding"].includes(action) || exchangeFromAction(action)) && method === "GET") return read("oil", action);
           if (action === "config" && method === "GET") return oil.configuration();
           if (action === "events" && method === "GET") return { events: oil.data.events };
@@ -63,7 +65,7 @@ export async function createMonitorServices(directory, { externallyLocked = fals
           }
           if (action === "test-notification" && method === "POST") { await notifications.test(); return { ok: true }; }
         },
-        actions: { quote: ["GET"], history: ["GET"], funding: ["GET"], ...exchangeActions, status: ["GET"], config: ["GET", "PUT"], events: ["GET"], "test-notification": ["POST"] },
+        actions: { quote: ["GET"], history: ["GET"], funding: ["GET"], [OIL_CANDLE_ACTION]: ["GET"], ...exchangeActions, status: ["GET"], config: ["GET", "PUT"], events: ["GET"], "test-notification": ["POST"] },
       }],
     ]);
     services.notifications = notifications;

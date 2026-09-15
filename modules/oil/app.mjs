@@ -1,20 +1,21 @@
-import { round, signed, validateRows, filterRows, summarize, monthlyAverages, chartDomain } from './data-utils.mjs';
+import { round, signed, filterRows, summarize, monthlyAverages, chartDomain } from './data-utils.mjs';
 import { calculateShortSpreadFunding, DAY } from './hyperliquid.mjs';
-import { createFundingSnapshot, dailyFundingRates, analyzeFundingRange } from './funding-history.mjs';
+import { createFundingSnapshot, analyzeFundingWindow } from './funding-history.mjs';
 
+import { intradayChartRows, validateIntradaySnapshot, OIL_CANDLE_MS, OIL_CANDLE_ACTION } from './intraday.mjs';
 import { createLifecycle } from './lifecycle.mjs';
 import { oilExchangeQuote } from '../../lib/exchange-quotes.ts';
 /** @param {ShadowRoot} root @param {{ initial?: import('../../lib/initial-market').InitialMarketData['oil'], onSummary?: (summary: import('../../lib/monitor-summary').OilSummaryUpdate) => void }} options */
 export function mount(root, { onSummary, initial } = {}) {
 const life = createLifecycle();
 const $ = id => root.getElementById(id);
-const state = { rows: [], rawDates: [], range: 'ytd', view: 'spread', visible: [], chart: null, selectedDate: null, market: null, metadata: null, basis: 'quantity', marketMode: 'snapshot', historyMode: 'snapshot', refreshing: false, fundingSnapshot: null, fundingDaily: new Map(), fundingChart: null, fundingHistoryMode: 'loading', fundingRefreshing: false };
-const labels = { ytd: '今年以来', '1m': '近 1 月', '3m': '近 3 月' };
+const state = { rows: [], rawDates: [], range: '1w', view: 'spread', visible: [], chart: null, selectedDate: null, market: null, metadata: null, basis: 'quantity', marketMode: 'snapshot', historyMode: 'snapshot', refreshing: false, fundingSnapshot: null, fundingByTime: new Map(), fundingChart: null, fundingHistoryMode: 'loading', fundingRefreshing: false };
+const labels = { '1d': '近 1 天', '1w': '近 1 周', '1m': '近 1 月', all: '全部历史' };
 let fundingHistoryView = 'annualized', fundingAnalysis = null, fundingAnalysisSource = null, fundingAnalysisRange = '';
 let fundingRangeDaily = new Map();
 const money = value => `${value.toFixed(3)}<small>美元 / 桶</small>`;
-const shortDate = date => `${Number(date.slice(5, 7))} 月 ${Number(date.slice(8))} 日`;
-const displayDate = date => date.replaceAll('-', '.');
+const shortDate = date => beijingTime(date).slice(5, -3);
+const displayDate = date => date.length > 10 ? beijingTime(date).slice(0, -3) : date.replaceAll('-', '.');
 const priceClass = value => value < 0 ? 'negative' : value > 0 ? 'positive' : '';
 const ns = 'http://www.w3.org/2000/svg';
 const percent = (value, digits = 5) => `${value > 0 ? '+' : value < 0 ? '−' : ''}${Math.abs(value * 100).toFixed(digits)}%`;
@@ -32,7 +33,7 @@ function publishSummary(status = state.marketMode) {
     fundingBasis: state.basis,
     fetchedAt: state.market?.fetchedAt ?? null,
     comparison: state.market ? oilExchangeQuote(state.market, status !== 'live') : undefined,
-    history: state.metadata ? { points: state.rows.map(row => ({ time: Date.parse(`${row.date}T00:00:00Z`), value: row.spread })), status: state.historyMode, fetchedAt: state.metadata.fetchedAt } : undefined,
+    history: state.metadata ? { points: state.rows.map(row => ({ time: row.time, value: row.spread })), status: state.historyMode, fetchedAt: state.metadata.fetchedAt } : undefined,
   });
 }
 
@@ -64,13 +65,14 @@ function renderFunding() {
 }
 
 function renderStatus() {
-  if (!state.market) return;
-  $('connection-status').textContent = state.marketMode === 'live' ? '行情已更新' : state.marketMode === 'stale' ? '更新失败 · 保留数据' : '备用快照';
-  $('data-through').textContent = `${beijingTime(state.market.fetchedAt)} 北京时间`;
+  if (state.market) {
+    $('connection-status').textContent = state.marketMode === 'live' ? '行情已更新' : state.marketMode === 'stale' ? '更新失败 · 保留数据' : '备用快照';
+    $('data-through').textContent = `${beijingTime(state.market.fetchedAt)} 北京时间`;
+  }
   if (!state.metadata) return;
-  $('data-notice').textContent = `历史图表：${state.metadata.firstCommonObservation} — ${state.metadata.lastCommonObservation} 的已收盘 UTC 日 K。两合约共同历史从 ${state.metadata.firstCommonObservation} 开始，此前不补值。${state.historyMode === 'snapshot' ? '历史当前使用备用快照。' : ''}${state.marketMode !== 'live' ? '当前价格与资金费为保留快照，请留意采集时间。' : ''}`;
+  $('data-notice').textContent = `15 分钟 K 线收盘价差 · ${displayDate(state.metadata.firstCommonObservation)} — ${displayDate(state.metadata.lastCommonObservation)} 北京时间。${state.metadata.missingObservationRows ? `缺少 ${state.metadata.missingObservationRows} 根共同 K 线，缺口断线。` : ''}${state.historyMode !== 'live' ? '历史更新中断，保留已存数据。' : ''}`;
   $('data-notice').hidden = false;
-  $('source-note').textContent = `历史采用 Hyperliquid 已收盘日 K（UTC），缺失日期断线，不拼接其他来源。历史采集：${beijingTime(state.metadata.fetchedAt)} 北京时间。资金费以预言机价格计算，API 小时率已含 XYZ 倍率。`;
+  $('source-note').textContent = `历史采用 Hyperliquid 两腿同一时段已收盘的 15 分钟 K 线；图表时间为北京时间，接口按 UTC 对齐。交易所仅返回最近约 5,000 根，后台持续保存已采集历史。采集：${beijingTime(state.metadata.fetchedAt)} 北京时间。`;
 }
 
 function svgElement(tag, attributes = {}, content) {
@@ -78,6 +80,17 @@ function svgElement(tag, attributes = {}, content) {
   for (const [key, value] of Object.entries(attributes)) element.setAttribute(key, value);
   if (content !== undefined) element.textContent = content;
   return element;
+}
+
+function drawTimeTicks(svg, rows, width, height, x) {
+  const count = Math.min(width < 500 ? 3 : 6, rows.length);
+  const indices = [...new Set(Array.from({ length: count }, (_, i) => Math.round(i * (rows.length - 1) / (count - 1 || 1))))];
+  indices.forEach((index, i) => {
+    const row = rows[index], label = beijingTime(row.date), px = x(row.date);
+    const text = svgElement('text', { x: px, y: height - 22, 'text-anchor': i === 0 ? 'start' : i === indices.length - 1 ? 'end' : 'middle' });
+    text.append(svgElement('tspan', { x: px }, label.slice(5, 10)), svgElement('tspan', { x: px, dy: 15 }, label.slice(11, 16)));
+    svg.append(text);
+  });
 }
 
 function fillMetrics() {
@@ -92,7 +105,7 @@ function fillMetrics() {
   $('ytd-change').innerHTML = `${signed(yearChange)}<small>美元 / 桶</small>`;
   $('ytd-change').classList.toggle('negative', yearChange < 0);
   $('ytd-change').classList.toggle('positive', yearChange > 0);
-  $('ytd-reference').textContent = `${shortDate(first.date)} — ${shortDate(latest.date)} · 日 K 收盘价差`;
+  $('ytd-reference').textContent = `${shortDate(first.date)} — ${shortDate(latest.date)} · 15 分钟收盘价差`;
 }
 
 function renderSummary(summary) {
@@ -120,7 +133,7 @@ function renderMonthly() {
     item.className = 'month-item';
     item.setAttribute('role', 'listitem');
     item.tabIndex = 0;
-    const description = `${Number(month.month.slice(5))}月：平均价差 ${month.average.toFixed(3)} 美元/桶，${month.count} 个有效报价日`;
+    const description = `${Number(month.month.slice(5))}月：平均价差 ${month.average.toFixed(3)} 美元/桶，${month.count} 根 15 分钟 K 线`;
     item.setAttribute('aria-label', description);
     item.title = description;
     const height = Math.abs(month.average) / span * 80;
@@ -128,7 +141,7 @@ function renderMonthly() {
     item.innerHTML = `<div class="month-bar-area"><div class="month-zero" style="bottom:${zero}%"></div><div class="month-bar" style="height:${height}%;bottom:${bottom}%"></div><span class="month-value" style="bottom:calc(${month.average >= 0 ? zero + height : zero}% + 6px)">${month.average.toFixed(3)}</span></div><span class="month-label">${Number(month.month.slice(5))} 月</span>`;
     $('monthly-chart').append(item);
   }
-  $('monthly-note').textContent = `${labels[state.range]} · 按所选区间内的有效报价日计算；首尾月份可能不完整。`;
+  $('monthly-note').textContent = `${labels[state.range]} · 按所选区间内的 15 分钟收盘价差计算；首尾月份可能不完整。`;
 }
 
 function renderTable(changed = true) {
@@ -139,13 +152,13 @@ function renderTable(changed = true) {
   const tbody = $('data-table');
   tbody.replaceChildren();
   const fragment = document.createDocumentFragment();
+  const previousRows = new Map(state.rows.map((row, index) => [row.time, state.rows[index - 1]]));
   for (const row of [...state.visible].reverse()) {
-    const index = state.rows.indexOf(row);
-    const previous = state.rows[index - 1];
-    const change = previous ? round(row.spread - previous.spread) : null;
+    const previous = previousRows.get(row.time);
+    const change = previous && row.time - previous.time === OIL_CANDLE_MS ? round(row.spread - previous.spread) : null;
     const tr = document.createElement('tr');
-    const funding = state.fundingDaily.get(row.date);
-    tr.innerHTML = `<td>${row.date}</td><td>${row.brent.toFixed(3)}</td><td>${row.wti.toFixed(3)}</td><td>${row.spread.toFixed(3)}</td><td class="${change === null ? '' : priceClass(change)}">${change === null ? '—' : signed(change)}</td><td class="${funding ? priceClass(funding.longRate) : 'history-missing'}">${funding ? percent(funding.longRate) : '—'}</td><td class="${funding ? priceClass(funding.shortRate) : 'history-missing'}">${funding ? percent(funding.shortRate) : '—'}</td><td>${funding ? `${funding.count} / 24` : '—'}</td>`;
+    const funding = state.fundingByTime.get(row.time);
+    tr.innerHTML = `<td>${displayDate(row.date)}</td><td>${row.brent.toFixed(3)}</td><td>${row.wti.toFixed(3)}</td><td>${row.spread.toFixed(3)}</td><td class="${change === null ? '' : priceClass(change)}">${change === null ? '—' : signed(change)}</td><td class="${funding ? priceClass(funding.longRate) : 'history-missing'}">${funding ? percent(funding.longRate) : '—'}</td><td class="${funding ? priceClass(funding.shortRate) : 'history-missing'}">${funding ? percent(funding.shortRate) : '—'}</td><td>${funding ? '整点已结算' : '—'}</td>`;
     fragment.append(tr);
   }
   tbody.append(fragment);
@@ -160,14 +173,14 @@ function renderChart() {
   const height = Math.max(Math.round(svg.clientHeight), 250);
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
   svg.replaceChildren();
-  const padding = { left: 68, right: 18, top: 20, bottom: 33 };
+  const padding = { left: 62, right: 18, top: 20, bottom: 47 };
   const plotWidth = width - padding.left - padding.right;
   const plotHeight = height - padding.top - padding.bottom;
   const isSpread = state.view === 'spread';
   const summary = summarize(rows);
   const domain = chartDomain(isSpread ? rows.map(row => row.spread) : rows.flatMap(row => [row.wti, row.brent]));
   const start = Date.parse(rows[0].date), end = Date.parse(rows.at(-1).date);
-  const x = date => padding.left + (start === end ? 0.5 : (Date.parse(date) - start) / (end - start)) * plotWidth;
+  const x = date => padding.left + (start === end ? 0.5 : ((typeof date === 'number' ? date : Date.parse(date)) - start) / (end - start)) * plotWidth;
   const y = value => padding.top + (domain.max - value) / (domain.max - domain.min) * plotHeight;
   const baseline = y(Math.max(domain.min, Math.min(domain.max, 0)));
   const defs = svgElement('defs');
@@ -175,7 +188,7 @@ function renderChart() {
   gradient.append(svgElement('stop', { offset: '0%', 'stop-color': '#cbf49a', 'stop-opacity': '.20' }), svgElement('stop', { offset: '100%', 'stop-color': '#cbf49a', 'stop-opacity': '.015' }));
   defs.append(gradient); svg.append(defs);
   svg.append(svgElement('title', {}, `${isSpread ? '布伦特减WTI价差' : '布伦特与WTI永续合约收盘价'}，${rows[0].date}至${rows.at(-1).date}`));
-  svg.append(svgElement('desc', {}, `共${rows.length}个共同报价日。价差均值${summary.average.toFixed(3)}，最低${summary.min.spread.toFixed(3)}，最高${summary.max.spread.toFixed(3)}美元每桶。完整数值见页面下方日度数据明细。`));
+  svg.append(svgElement('desc', {}, `共${rows.length}根共同 15 分钟 K 线。价差均值${summary.average.toFixed(3)}，最低${summary.min.spread.toFixed(3)}，最高${summary.max.spread.toFixed(3)}美元每桶。完整数值见页面下方15 分钟数据明细。`));
   for (let i = 0; i <= 4; i++) {
     const value = domain.min + (domain.max - domain.min) * i / 4;
     const py = y(value);
@@ -185,19 +198,14 @@ function renderChart() {
   if (isSpread && domain.min < 0 && domain.max > 0) {
     svg.append(svgElement('line', { x1: padding.left, y1: y(0), x2: width - padding.right, y2: y(0), stroke: '#66725e', 'stroke-width': 1 }));
   }
-  const tickCount = width < 500 ? 4 : 7;
-  const tickIndices = [...new Set(Array.from({ length: Math.min(tickCount, rows.length) }, (_, i) => Math.round(i * (rows.length - 1) / (Math.min(tickCount, rows.length) - 1 || 1))))];
-  for (let i = 0; i < tickIndices.length; i++) {
-    const row = rows[tickIndices[i]];
-    svg.append(svgElement('text', { x: x(row.date), y: height - 7, 'text-anchor': i === 0 ? 'start' : i === tickIndices.length - 1 ? 'end' : 'middle' }, `${Number(row.date.slice(5, 7))}/${Number(row.date.slice(8))}`));
-  }
+  drawTimeTicks(svg, rows, width, height, x);
   if (isSpread) svg.append(svgElement('line', { x1: padding.left, y1: y(summary.average), x2: width - padding.right, y2: y(summary.average), stroke: '#81936a', 'stroke-dasharray': '5 5', opacity: '.75' }));
   const series = isSpread ? [{ field: 'spread', color: '#cbf49a' }] : [{ field: 'brent', color: '#cbf49a' }, { field: 'wti', color: '#99bdf2' }];
   for (const { field, color } of series) {
     const segments = [];
     for (const row of rows) {
       const last = segments.at(-1)?.at(-1);
-      if (!last || Date.parse(row.date) - Date.parse(last.date) > DAY) segments.push([]);
+      if (!last || Date.parse(row.date) - Date.parse(last.date) > OIL_CANDLE_MS) segments.push([]);
       segments.at(-1).push(row);
     }
     for (const segment of segments) {
@@ -214,7 +222,7 @@ function renderChart() {
   const dots = series.map(item => { const dot = svgElement('circle', { r: 4, fill: item.color, stroke: '#181e1b', 'stroke-width': 2 }); crosshair.append(dot); return { field: item.field, node: dot }; });
   svg.append(crosshair);
   state.chart = { width, height, x, y, crosshair, guide, dots, padding, start, end, plotWidth };
-  svg.setAttribute('aria-label', isSpread ? '布伦特减WTI日K收盘价差走势，单位美元每桶' : '布伦特和WTI永续合约日K收盘价格走势，单位美元每桶');
+  svg.setAttribute('aria-label', isSpread ? '布伦特减WTI15分钟K线收盘价差走势，单位美元每桶' : '布伦特和WTI永续合约15分钟K线收盘价格走势，单位美元每桶');
   const previousIndex = rows.findIndex(row => row.date === state.selectedDate);
   const cursorIndex = previousIndex >= 0 ? previousIndex : rows.length - 1;
   const selected = rows[cursorIndex];
@@ -235,7 +243,7 @@ function renderFundingHistoryChart() {
   const rangeKey = `${firstDate}/${lastDate}`;
   const source = state.fundingSnapshot?.data;
   if (!fundingAnalysis || fundingAnalysisSource !== source || fundingAnalysisRange !== rangeKey) {
-    fundingAnalysis = analyzeFundingRange(source ?? [], firstDate, lastDate);
+    fundingAnalysis = analyzeFundingWindow(source ?? [], Date.parse(firstDate), Date.parse(lastDate) + OIL_CANDLE_MS);
     fundingAnalysisSource = source; fundingAnalysisRange = rangeKey;
     fundingRangeDaily = new Map(fundingAnalysis.points.map(row => [row.date, row]));
   }
@@ -245,7 +253,7 @@ function renderFundingHistoryChart() {
   const fields = annualized ? ['longAnnualized', 'shortAnnualized'] : ['longRate', 'shortRate'];
   root.querySelectorAll('[data-funding-view]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.fundingView === fundingHistoryView)));
   $('funding-history-unit').textContent = annualized ? '% / 年 · 简单年化' : '% / 小时 · 日均值';
-  $('funding-history-range').textContent = `${labels[state.range]} · ${displayDate(firstDate)} — ${displayDate(lastDate)} · UTC 结算日`;
+  $('funding-history-range').textContent = `${labels[state.range]} · ${displayDate(firstDate)} — ${displayDate(lastDate)} · 北京时间；按 UTC 日汇总`;
   for (const direction of ['long', 'short']) {
     const value = fundingAnalysis[`${direction}Annualized`];
     showSignedValue(`funding-history-${direction}-annual`, value === null ? '—' : percent(value, 2), value ?? 0);
@@ -262,10 +270,11 @@ function renderFundingHistoryChart() {
   empty.hidden = Boolean(records.length);
   $('funding-history-cursor').disabled = !records.length;
   if (!records.length) { empty.textContent = mode === 'loading' ? '正在读取历史结算费率…' : mode === 'error' ? '历史资金费率暂不可用' : '所选区间暂无共同结算数据'; return; }
-  const { width, x, padding } = state.chart;
+  const { width, padding } = state.chart;
+  const x = date => state.chart.x(fundingRangeDaily.get(date)?.time ?? date);
   const height = Math.max(svg.clientHeight, 185);
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-  const top = 15, bottom = 29;
+  const top = 15, bottom = 43;
   const maxAbs = Math.max(...records.map(row => Math.abs(row[fields[1]])), annualized ? 0.0001 : 0.000001) * 1.18;
   const axisDigits = Math.min(6, Math.max(annualized ? 1 : 3, 1 - Math.floor(Math.log10(maxAbs * 100))));
   const y = rate => top + (maxAbs - rate) / (2 * maxAbs) * (height - top - bottom);
@@ -277,9 +286,7 @@ function renderFundingHistoryChart() {
     svg.append(svgElement('line', { x1: padding.left, x2: width - padding.right, y1: y(value), y2: y(value), stroke: i === 0 ? '#66725e' : '#2b352c', 'stroke-dasharray': i === 0 ? 'none' : '3 5' }));
     svg.append(svgElement('text', { x: padding.left - 9, y: y(value) + 4, 'text-anchor': 'end' }, `${(value * 100).toFixed(axisDigits)}%`));
   }
-  const tickCount = width < 500 ? 4 : 7;
-  const indices = [...new Set(Array.from({ length: Math.min(tickCount, state.visible.length) }, (_, i) => Math.round(i * (state.visible.length - 1) / (Math.min(tickCount, state.visible.length) - 1 || 1))))];
-  indices.forEach((index, i) => { const date = state.visible[index].date; svg.append(svgElement('text', { x: x(date), y: height - 6, 'text-anchor': i === 0 ? 'start' : i === indices.length - 1 ? 'end' : 'middle' }, `${Number(date.slice(5, 7))}/${Number(date.slice(8))}`)); });
+  drawTimeTicks(svg, state.visible, width, height, state.chart.x);
   const series = [{ field: fields[0], color: '#99bdf2', dash: 'none' }, { field: fields[1], color: '#e9b288', dash: '5 3' }];
   for (const item of series) {
     let path = '', previous = null;
@@ -298,7 +305,7 @@ function renderFundingHistoryChart() {
   svg.append(crosshair);
   state.fundingChart = { width, x, y, crosshair, guide, dots };
   $('funding-history-cursor').max = records.length - 1;
-  const index = Math.max(0, records.findIndex(row => row.date === state.selectedDate));
+  const index = Math.max(0, records.findIndex(row => row.date === state.selectedDate?.slice(0, 10)));
   $('funding-history-cursor').value = index;
   $('funding-history-cursor').setAttribute('aria-valuetext', historicalFundingDescription(records[index].date));
   if (root.activeElement === $('funding-history-cursor')) showFundingObservation(index);
@@ -320,7 +327,7 @@ function showHistoricalFundingTooltip(date) {
     chart.guide.setAttribute('x1', px); chart.guide.setAttribute('x2', px);
     for (const dot of chart.dots) { dot.node.setAttribute('cx', px); dot.node.setAttribute('cy', chart.y(row[dot.field])); }
   }
-  tooltip.innerHTML = `<div class="tooltip-date">${displayDate(date)} · UTC 结算日</div>${row ? `<div class="tooltip-row funding-history-tooltip-long"><span>做多${annualized ? '年化' : '小时率'}</span><strong>${percent(annualized ? row.longAnnualized : row.longRate, annualized ? 2 : 5)}</strong></div><div class="tooltip-row funding-history-tooltip-short"><span>做空${annualized ? '年化' : '小时率'}</span><strong>${percent(annualized ? row.shortAnnualized : row.shortRate, annualized ? 2 : 5)}</strong></div><div class="tooltip-row"><span>做多累计</span><strong>${percent(row.longCumulative, 4)}</strong></div><div class="tooltip-row"><span>做空累计</span><strong>${percent(row.shortCumulative, 4)}</strong></div><div class="tooltip-date">当日 ${row.count} / 24 小时<br>从区间起点累计 ${row.cumulativeCount} 个有效小时</div>` : '<div>当日无共同结算样本</div>'}`;
+  tooltip.innerHTML = `<div class="tooltip-date">${displayDate(date)} · UTC 结算日</div>${row ? `<div class="tooltip-row funding-history-tooltip-long"><span>做多${annualized ? '年化' : '小时率'}</span><strong>${percent(annualized ? row.longAnnualized : row.longRate, annualized ? 2 : 5)}</strong></div><div class="tooltip-row funding-history-tooltip-short"><span>做空${annualized ? '年化' : '小时率'}</span><strong>${percent(annualized ? row.shortAnnualized : row.shortRate, annualized ? 2 : 5)}</strong></div><div class="tooltip-row"><span>做多累计</span><strong>${percent(row.longCumulative, 4)}</strong></div><div class="tooltip-row"><span>做空累计</span><strong>${percent(row.shortCumulative, 4)}</strong></div><div class="tooltip-date">区间内当日 ${row.count} 个整点<br>从区间起点累计 ${row.cumulativeCount} 个有效小时</div>` : '<div>当日无共同结算样本</div>'}`;
   tooltip.hidden = false;
   const displayWidth = $('funding-history-chart').clientWidth;
   tooltip.style.left = `${Math.max(0, Math.min(px * displayWidth / chart.width + 14, displayWidth - tooltip.offsetWidth))}px`;
@@ -329,7 +336,7 @@ function showHistoricalFundingTooltip(date) {
 }
 
 function cursorDescription(row) {
-  return `${row.date}，布伦特 ${row.brent.toFixed(3)}，WTI ${row.wti.toFixed(3)}，价差 ${row.spread.toFixed(3)} 美元每桶`;
+  return `${displayDate(row.date)} 北京时间，布伦特 ${row.brent.toFixed(3)}，WTI ${row.wti.toFixed(3)}，价差 ${row.spread.toFixed(3)} 美元每桶`;
 }
 
 function showTooltip(index) {
@@ -341,21 +348,21 @@ function showTooltip(index) {
   chart.guide.setAttribute('x1', px); chart.guide.setAttribute('x2', px);
   for (const dot of chart.dots) { dot.node.setAttribute('cx', px); dot.node.setAttribute('cy', chart.y(row[dot.field])); }
   const tooltip = $('chart-tooltip');
-  tooltip.innerHTML = `<div class="tooltip-date">${displayDate(row.date)}</div><div class="tooltip-row"><span>布伦特</span><strong>${row.brent.toFixed(3)}</strong></div><div class="tooltip-row"><span>WTI</span><strong>${row.wti.toFixed(3)}</strong></div><div class="tooltip-row accent-text"><span>价差</span><strong>${signed(row.spread)}</strong></div>`;
+  tooltip.innerHTML = `<div class="tooltip-date">${displayDate(row.date)} · 北京时间</div><div class="tooltip-row"><span>布伦特</span><strong>${row.brent.toFixed(3)}</strong></div><div class="tooltip-row"><span>WTI</span><strong>${row.wti.toFixed(3)}</strong></div><div class="tooltip-row accent-text"><span>价差</span><strong>${signed(row.spread)}</strong></div>`;
   tooltip.hidden = false;
   tooltip.style.left = `${Math.max(0, Math.min(px + 14, chart.width - tooltip.offsetWidth))}px`;
   tooltip.style.top = '38px';
   $('chart-cursor').setAttribute('aria-valuetext', cursorDescription(row));
   $('chart-cursor').value = index;
-  const fundingIndex = fundingAnalysis?.points.findIndex(point => point.date === row.date) ?? -1;
+  const fundingIndex = fundingAnalysis?.points.findIndex(point => point.date === row.date.slice(0, 10)) ?? -1;
   if (fundingIndex >= 0) $('funding-history-cursor').value = fundingIndex;
-  showHistoricalFundingTooltip(row.date);
+  showHistoricalFundingTooltip(row.date.slice(0, 10));
 }
 
 function showFundingObservation(index) {
   const point = fundingAnalysis?.points[index];
   if (!point) return;
-  const priceIndex = state.visible.findIndex(row => row.date === point.date);
+  const priceIndex = state.visible.findIndex(row => row.time === point.time);
   if (priceIndex >= 0) showTooltip(priceIndex);
   else { hideTooltip(); state.selectedDate = point.date; showHistoricalFundingTooltip(point.date); }
   $('funding-history-cursor').value = index;
@@ -369,12 +376,12 @@ function hideTooltip() {
 }
 
 function render(full = true) {
-  state.visible = filterRows(state.rows, state.range);
+  state.visible = filterRows(state.rows, state.range, OIL_CANDLE_MS);
   const summary = summarize(state.visible);
-  $('range-caption').textContent = `${displayDate(summary.first.date)} — ${displayDate(summary.latest.date)} · UTC 日 K 收盘`;
-  $('observation-count').textContent = `${summary.count} 个共同日 K`;
+  $('range-caption').textContent = `${displayDate(summary.first.date)} — ${displayDate(summary.latest.date)} · 北京时间 · 15 分钟 K 线收盘`;
+  $('observation-count').textContent = `${summary.count} 根共同 15 分钟 K 线`;
   $('chart-title').textContent = state.view === 'spread' ? '布伦特 − WTI' : '两种原油永续合约的收盘价';
-  $('chart-legend').innerHTML = state.view === 'spread' ? '<span><i class="legend-line brent"></i>日度价差</span><span><i class="legend-line average"></i>区间均值</span>' : '<span><i class="legend-line brent"></i>布伦特</span><span><i class="legend-line wti"></i>WTI</span>';
+  $('chart-legend').innerHTML = state.view === 'spread' ? '<span><i class="legend-line brent"></i>15 分钟价差</span><span><i class="legend-line average"></i>区间均值</span>' : '<span><i class="legend-line brent"></i>布伦特</span><span><i class="legend-line wti"></i>WTI</span>';
   root.querySelectorAll('[data-range]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.range === state.range)));
   root.querySelectorAll('[data-view]').forEach(button => { const active = button.dataset.view === state.view; button.setAttribute('aria-selected', String(active)); button.tabIndex = active ? 0 : -1; });
   $('chart-content').setAttribute('aria-labelledby', `${state.view}-tab`);
@@ -385,16 +392,9 @@ function render(full = true) {
 function applySnapshot(snapshot, mode) {
   if (life.signal.aborted) return;
   if (state.metadata && Date.parse(snapshot.metadata.fetchedAt) < Date.parse(state.metadata.fetchedAt)) return;
-  const rows = validateRows(snapshot.data.filter(row => row.brent !== null && row.wti !== null));
-  if (rows.at(-1).date !== snapshot.metadata.lastCommonObservation || rows[0].date !== snapshot.metadata.firstCommonObservation || rows.length !== snapshot.metadata.pairedObservationRows || !Number.isFinite(Date.parse(snapshot.metadata.fetchedAt)) || !Number.isFinite(Date.parse(snapshot.market.fetchedAt))) throw new Error('Observation metadata mismatch');
-  calculateShortSpreadFunding(snapshot.market);
-  if (![snapshot.market.brent.markPx, snapshot.market.wti.markPx].every(value => Number.isFinite(value) && value > 0)) throw new Error('Invalid mark prices');
-  state.rows = rows; state.rawDates = snapshot.data.map(row => row.date);
-  // A slow fallback/history response cannot overwrite a newer live quote.
-  if (!state.market || Date.parse(snapshot.market.fetchedAt) > Date.parse(state.market.fetchedAt)) {
-    state.market = snapshot.market; state.marketMode = mode;
-  }
-  state.metadata = snapshot.metadata; state.historyMode = mode;
+  const validated = validateIntradaySnapshot(snapshot);
+  state.rows = intradayChartRows(validated); state.rawDates = validated.data.map(row => new Date(row.time).toISOString());
+  state.metadata = validated.metadata; state.historyMode = mode;
   $('loading').hidden = true; $('error').hidden = true; $('dashboard').hidden = false;
   fillMetrics(); renderFunding(); renderStatus(); render();
 }
@@ -425,7 +425,7 @@ async function refreshData(full = true) {
     const reads = [readMarketData('quote').then(market => {
       if (generation === refreshGeneration) { applyLiveMarket(market); receivedLiveMarket = market.status !== 'snapshot'; }
     })];
-    if (full || !state.rows.length) reads.push(readMarketData('history').then(snapshot => applySnapshot(snapshot, snapshot.status === 'snapshot' ? 'snapshot' : 'live')));
+    if (full || !state.rows.length) reads.push(readMarketData(OIL_CANDLE_ACTION).then(snapshot => applySnapshot(snapshot, snapshot.status === 'snapshot' ? 'snapshot' : 'live')));
     const results = await Promise.allSettled(reads);
     const failed = results.find(result => result.status === 'rejected');
     if (failed) throw failed.reason;
@@ -453,7 +453,7 @@ function applyFundingSnapshot(snapshot, mode) {
   const validated = createFundingSnapshot(snapshot.data, snapshot.metadata.fetchedAt);
   if (validated.metadata.pairedObservationRows !== snapshot.metadata.pairedObservationRows || validated.metadata.firstSettlementTime !== snapshot.metadata.firstSettlementTime || validated.metadata.lastSettlementTime !== snapshot.metadata.lastSettlementTime) throw new Error('Funding metadata mismatch');
   state.fundingSnapshot = validated; state.fundingHistoryMode = mode;
-  state.fundingDaily = new Map(dailyFundingRates(validated.data).map(row => [row.date, row]));
+  state.fundingByTime = new Map(validated.data.filter(row => row.brent !== null && row.wti !== null).map(row => [row.time, { shortRate: (row.brent - row.wti) / 2, longRate: (row.wti - row.brent) / 2 }]));
   if (state.visible.length) { renderFundingHistoryChart(); renderTable(); }
 }
 
@@ -494,7 +494,7 @@ function handleChartPointer(event) {
   const rows = funding ? fundingAnalysis?.points ?? [] : state.visible;
   if (!rows.length) return;
   let index = 0;
-  rows.forEach((row, i) => { if (Math.abs(Date.parse(row.date) - target) < Math.abs(Date.parse(rows[index].date) - target)) index = i; });
+  rows.forEach((row, i) => { if (Math.abs((row.time ?? Date.parse(row.date)) - target) < Math.abs((rows[index].time ?? Date.parse(rows[index].date)) - target)) index = i; });
   if (funding) showFundingObservation(index);
   else { $('chart-cursor').value = index; showTooltip(index); }
 }
@@ -518,7 +518,7 @@ root.querySelectorAll('[data-basis]').forEach(button => button.addEventListener(
 function refreshWhenVisible() {
   if (document.hidden || state.refreshing) return;
   const historyAge = state.metadata ? Date.now() - Date.parse(state.metadata.fetchedAt) : Infinity;
-  refreshData(historyAge > 5 * 60_000);
+  refreshData(historyAge > 60_000);
   const fundingAge = state.fundingSnapshot ? Date.now() - Date.parse(state.fundingSnapshot.metadata.fetchedAt) : Infinity;
   if (fundingAge > 5 * 60_000) refreshHistoricalFunding();
 }
@@ -531,10 +531,10 @@ const resizeObserver = new ResizeObserver(() => { if (life.signal.aborted) retur
 
 // Hydrate persisted data before starting refreshes; preserve the server-rendered cards.
 if (initial?.quote) applyLiveMarket(initial.quote);
-if (initial?.history) applySnapshot(initial.history, initial.history.status === 'snapshot' ? 'snapshot' : 'live');
+if (initial?.candles) applySnapshot(initial.candles, initial.candles.status === 'snapshot' ? 'snapshot' : 'live');
 if (!state.market) publishSummary('loading');
 loadData();
 loadHistoricalFunding();
-return { setView(input) { if (!['1m','3m','ytd'].includes(input.range) || !['spread','prices'].includes(input.view)) throw new Error('Invalid chart view'); if (!state.rows.length) throw new Error('行情尚未加载'); state.range=input.range; state.view=input.view; render(); return summarize(state.visible); }, dispose() { life.dispose(); clearInterval(refreshTimer); resizeObserver.disconnect(); cancelAnimationFrame(resizeFrame); } };
+return { setView(input) { if (!['1d','1w','1m','all'].includes(input.range) || !['spread','prices'].includes(input.view)) throw new Error('Invalid chart view'); if (!state.rows.length) throw new Error('行情尚未加载'); state.range=input.range; state.view=input.view; render(); return summarize(state.visible); }, dispose() { life.dispose(); clearInterval(refreshTimer); resizeObserver.disconnect(); cancelAnimationFrame(resizeFrame); } };
 
 }

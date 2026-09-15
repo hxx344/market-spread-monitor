@@ -11,14 +11,17 @@ export function validateRows(rows) {
   });
 }
 
-export function filterRows(rows, range) {
-  if (range === 'ytd') return rows;
-  const end = new Date(`${rows.at(-1).date}T00:00:00Z`);
+export function filterRows(rows, range, intervalMs = 0) {
+  if (range === 'ytd' || range === 'all' || !rows.length) return rows;
+  const end = new Date(Date.parse(rows.at(-1).date) + intervalMs);
+  if (range === '1d' || range === '1w') return rows.filter(row => Date.parse(row.date) >= end.getTime() - (range === '1d' ? 1 : 7) * 86_400_000);
+  if (!['1m', '3m'].includes(range)) throw Error('Invalid chart range');
   const months = range === '1m' ? 1 : 3;
   const cutoff = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth() - months, 1));
   const lastDay = new Date(Date.UTC(cutoff.getUTCFullYear(), cutoff.getUTCMonth() + 1, 0)).getUTCDate();
   cutoff.setUTCDate(Math.min(end.getUTCDate(), lastDay));
-  return rows.filter(row => row.date >= cutoff.toISOString().slice(0, 10));
+  cutoff.setUTCHours(end.getUTCHours(), end.getUTCMinutes(), end.getUTCSeconds(), end.getUTCMilliseconds());
+  return rows.filter(row => Date.parse(row.date) >= cutoff.getTime());
 }
 
 export function summarize(rows) {

@@ -8,6 +8,8 @@ import oilFundingArchive from '../public/oil/data/hyperliquid-funding-2026.json'
 import hynixFundingArchive from '../data/hynix-funding.json' with { type: 'json' };
 import { externalExchanges, exchangeAction, EXCHANGE_REFRESH_MS } from '../lib/exchange-quotes.ts';
 import { createExchangeReader } from '../lib/exchange-service.ts';
+import { fetchIntradaySnapshot, OIL_CANDLE_ACTION, OIL_CANDLE_REFRESH_MS } from '../modules/oil/intraday.mjs';
+import oilIntradayArchive from '../public/oil/data/hyperliquid-15m.json' with { type: 'json' };
 
 export function seedMarketDatabase(store) {
   store.write('hynix', 'history', getMarketSnapshot(), { seed: true });
@@ -15,6 +17,7 @@ export function seedMarketDatabase(store) {
   store.write('oil', 'quote', oilArchive.market, { seed: true });
   store.write('oil', 'history', oilArchive, { seed: true });
   store.write('oil', 'funding', oilFundingArchive, { seed: true });
+  store.write('oil', OIL_CANDLE_ACTION, oilIntradayArchive, { seed: true });
 }
 
 export function marketJobs({ oilIntervalMs = 30_000 } = {}) {
@@ -34,6 +37,7 @@ export function marketJobs({ oilIntervalMs = 30_000 } = {}) {
     { id: 'hynix', action: 'funding', intervalMs: 300_000, load: previous => fetchHynixFundingSnapshot(previous ?? hynixFundingArchive, { signal: AbortSignal.timeout(12_000) }) },
     { id: 'oil', action: 'funding', intervalMs: 300_000, load: previous => fetchFundingSnapshot(previous ?? oilFundingArchive) },
     ...externalExchanges.flatMap(exchange => ['oil', 'hynix'].map(id => ({ id, action: exchangeAction(exchange), intervalMs: EXCHANGE_REFRESH_MS, load: () => readExchange(exchange, id) }))),
+    { id: 'oil', action: OIL_CANDLE_ACTION, intervalMs: OIL_CANDLE_REFRESH_MS, load: previous => fetchIntradaySnapshot(previous ?? oilIntradayArchive) },
   ];
 }
 

@@ -13,7 +13,7 @@ export type MonitorTrend = {
 export function createTrend(history: TrendHistory | undefined, options: { days: number; intervalMs: number; label: string; shortLabel: string; unit: string }, error = false): MonitorTrend {
   const valid = [...new Map((history?.points ?? []).filter(point => Number.isFinite(point.time) && Number.isFinite(point.value)).map(point => [point.time, point])).values()].sort((a, b) => a.time - b.time);
   const end = valid.length ? valid.at(-1)!.time + options.intervalMs : 0;
-  // Use completed candle periods; a full window contains exactly 30 days / 168 hours.
+  // Include completed periods only: seven days contain 168 hourly or 672 quarter-hour bars.
   const points = valid.filter(point => point.time >= end - options.days * 86_400_000);
   return { ...options, points, status: history ? error ? "stale" : history.status : error ? "error" : "loading", fetchedAt: history?.fetchedAt ?? null };
 }
