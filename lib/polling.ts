@@ -2,12 +2,13 @@ export const QUOTE_REFRESH_MS = 10_000;
 export const HISTORY_REFRESH_MS = 60_000;
 
 /** Fixed-cadence polling with a shared in-flight request and unmount cancellation. */
-export function startPolling<T>({ load, onData, onError, onSettled, intervalMs }: {
+export function startPolling<T>({ load, onData, onError, onSettled, intervalMs, immediate = true }: {
   load: (signal: AbortSignal) => Promise<T>;
   onData: (value: T) => void;
   onError: (error: unknown) => void;
   onSettled?: () => void;
   intervalMs: number;
+  immediate?: boolean;
 }) {
   let stopped = false;
   let pending: Promise<void> | undefined;
@@ -25,7 +26,7 @@ export function startPolling<T>({ load, onData, onError, onSettled, intervalMs }
     return pending;
   };
   const timer = setInterval(() => { void refresh(); }, intervalMs);
-  void refresh();
+  if (immediate) void refresh();
   return {
     refresh,
     stop() { stopped = true; clearInterval(timer); controller?.abort(); },

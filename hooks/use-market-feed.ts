@@ -13,7 +13,7 @@ async function request<T>(path: string, signal: AbortSignal): Promise<T> {
   return response.json();
 }
 
-export function useMarketFeed(initial?: InitialMarketData["hynix"]) {
+export function useMarketFeed(initial?: InitialMarketData["hynix"], initialReadAt?: number) {
   const [data,setData] = useState<MarketData | null>(initial?.history ?? null);
   const [quote,setQuote] = useState<LiveQuote | null>(initial?.quote ?? null);
   const [historyLoading,setHistoryLoading] = useState(!initial?.history);
@@ -21,10 +21,12 @@ export function useMarketFeed(initial?: InitialMarketData["hynix"]) {
   const [error,setError] = useState("");
   const [quoteError,setQuoteError] = useState(initial?.quote?.status === "snapshot" ? retainedQuote : "");
   const controls = useRef<{ refresh: () => void } | null>(null);
+  const hydrated = useRef({ history: Boolean(initial?.history), readAt: initialReadAt ?? 0 });
 
   useEffect(() => {
     const history = startPolling({
       intervalMs: HISTORY_REFRESH_MS,
+      immediate: !hydrated.current.history || Date.now() - hydrated.current.readAt >= HISTORY_REFRESH_MS,
       load: async signal => {
         const next = await request<MarketData>("/api/monitors/hynix/history",signal);
         if (!next.points?.length) throw new Error("暂时没有可对齐的历史行情。");

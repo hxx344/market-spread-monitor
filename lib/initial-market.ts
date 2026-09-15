@@ -9,7 +9,7 @@ import type { createIntradaySnapshot } from "../modules/oil/intraday.mjs";
 export type InitialMarketData = {
   renderedAt: number;
   hynix: { quote: LiveQuote | null; history: MarketData | null; exchanges?: ExternalQuoteSet };
-  oil: { quote: (ReturnType<typeof validateOilQuote> & { status: "live" | "snapshot" }) | null; history: ReturnType<typeof validateOilHistory> | null; candles?: ReturnType<typeof createIntradaySnapshot> | null; exchanges?: ExternalQuoteSet };
+  oil: { quote: (ReturnType<typeof validateOilQuote> & { status: "live" | "snapshot" }) | null; history?: ReturnType<typeof validateOilHistory> | null; candles?: ReturnType<typeof createIntradaySnapshot> | null; exchanges?: ExternalQuoteSet };
 };
 
 export function initialSummaries(initial: InitialMarketData | null) {

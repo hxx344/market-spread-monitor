@@ -5,11 +5,12 @@ import { createFundingSnapshot, analyzeFundingWindow } from './funding-history.m
 import { intradayChartRows, validateIntradaySnapshot, OIL_CANDLE_MS, OIL_CANDLE_ACTION } from './intraday.mjs';
 import { createLifecycle } from './lifecycle.mjs';
 import { oilExchangeQuote } from '../../lib/exchange-quotes.ts';
-/** @param {ShadowRoot} root @param {{ initial?: import('../../lib/initial-market').InitialMarketData['oil'], onSummary?: (summary: import('../../lib/monitor-summary').OilSummaryUpdate) => void }} options */
-export function mount(root, { onSummary, initial } = {}) {
+import { nearestTimeIndex, tablePage, samePriceRows } from './chart-performance.mjs';
+/** @param {ShadowRoot} root @param {{ initial?: import('../../lib/initial-market').InitialMarketData['oil'], initialReadAt?: number, onSummary?: (summary: import('../../lib/monitor-summary').OilSummaryUpdate) => void }} options */
+export function mount(root, { onSummary, initial, initialReadAt = 0 } = {}) {
 const life = createLifecycle();
 const $ = id => root.getElementById(id);
-const state = { rows: [], rawDates: [], range: '1w', view: 'spread', visible: [], chart: null, selectedDate: null, market: null, metadata: null, basis: 'quantity', marketMode: 'snapshot', historyMode: 'snapshot', refreshing: false, fundingSnapshot: null, fundingByTime: new Map(), fundingChart: null, fundingHistoryMode: 'loading', fundingRefreshing: false };
+const state = { rows: [], range: '1w', view: 'spread', visible: [], chart: null, selectedDate: null, market: null, metadata: null, basis: 'quantity', marketMode: 'snapshot', historyMode: 'snapshot', refreshing: false, fundingSnapshot: null, fundingByTime: new Map(), fundingChart: null, fundingHistoryMode: 'loading', fundingRefreshing: false, tablePage: 0 };
 const labels = { '1d': '近 1 天', '1w': '近 1 周', '1m': '近 1 月', all: '全部历史' };
 let fundingHistoryView = 'annualized', fundingAnalysis = null, fundingAnalysisSource = null, fundingAnalysisRange = '';
 let fundingRangeDaily = new Map();
@@ -19,13 +20,21 @@ const displayDate = date => date.length > 10 ? beijingTime(date).slice(0, -3) : 
 const priceClass = value => value < 0 ? 'negative' : value > 0 ? 'positive' : '';
 const ns = 'http://www.w3.org/2000/svg';
 const percent = (value, digits = 5) => `${value > 0 ? '+' : value < 0 ? '−' : ''}${Math.abs(value * 100).toFixed(digits)}%`;
-const beijingTime = iso => new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(iso));
+const timeFormatter = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+const beijingTime = iso => timeFormatter.format(new Date(iso));
 let tableDirty = true;
+let summaryRows, summaryHistory, tablePreviousSource, tablePreviousRows;
+let pointerFrame = 0, queuedPointer = null, chartDirty = true;
 let refreshGeneration = 0;
 const tableDetails = $('data-table').closest('details');
 
 function publishSummary(status = state.marketMode) {
   if (life.signal.aborted) return;
+  if (state.metadata && (summaryRows !== state.rows || summaryHistory?.status !== state.historyMode || summaryHistory?.fetchedAt !== state.metadata.fetchedAt)) {
+    const points = summaryRows === state.rows ? summaryHistory.points : state.rows.map(row => ({ time: row.time, value: row.spread }));
+    summaryRows = state.rows;
+    summaryHistory = { points, status: state.historyMode, fetchedAt: state.metadata.fetchedAt };
+  }
   onSummary?.({
     status,
     spread: state.market ? state.market.brent.markPx - state.market.wti.markPx : null,
@@ -33,7 +42,7 @@ function publishSummary(status = state.marketMode) {
     fundingBasis: state.basis,
     fetchedAt: state.market?.fetchedAt ?? null,
     comparison: state.market ? oilExchangeQuote(state.market, status !== 'live') : undefined,
-    history: state.metadata ? { points: state.rows.map(row => ({ time: row.time, value: row.spread })), status: state.historyMode, fetchedAt: state.metadata.fetchedAt } : undefined,
+    history: summaryHistory,
   });
 }
 
@@ -150,11 +159,19 @@ function renderTable(changed = true) {
   // The default-collapsed detail table must not compete with the visible charts.
   if (!tableDetails.open || !tableDirty) return;
   const tbody = $('data-table');
+  const page = tablePage(state.visible, state.tablePage);
+  state.tablePage = page.page;
+  $('table-page-status').textContent = `第 ${page.page + 1} / ${page.pages} 页 · ${page.first}–${page.last} 条`;
+  $('table-prev').disabled = page.page === 0;
+  $('table-next').disabled = page.page === page.pages - 1;
   tbody.replaceChildren();
   const fragment = document.createDocumentFragment();
-  const previousRows = new Map(state.rows.map((row, index) => [row.time, state.rows[index - 1]]));
-  for (const row of [...state.visible].reverse()) {
-    const previous = previousRows.get(row.time);
+  if (tablePreviousSource !== state.rows) {
+    tablePreviousRows = new Map(state.rows.map((row, index) => [row.time, state.rows[index - 1]]));
+    tablePreviousSource = state.rows;
+  }
+  for (const row of page.rows) {
+    const previous = tablePreviousRows.get(row.time);
     const change = previous && row.time - previous.time === OIL_CANDLE_MS ? round(row.spread - previous.spread) : null;
     const tr = document.createElement('tr');
     const funding = state.fundingByTime.get(row.time);
@@ -169,6 +186,8 @@ function renderChart() {
   const rows = state.visible;
   if (!rows.length) return;
   const svg = $('main-chart');
+  if (!svg.clientWidth) { chartDirty = true; return; }
+  chartDirty = false;
   const width = Math.max(Math.round(svg.clientWidth), 270);
   const height = Math.max(Math.round(svg.clientHeight), 250);
   svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
@@ -236,6 +255,11 @@ function renderChart() {
   else if (root.activeElement === $('funding-history-cursor')) showFundingObservation(Number($('funding-history-cursor').value));
 }
 
+function renderFundingHistoryStatus() {
+  const mode = state.fundingHistoryMode;
+  $('funding-history-status').textContent = state.fundingSnapshot ? `${mode === 'live' ? '历史费率已同步' : mode === 'stale' ? '历史费率更新失败，保留数据' : '历史费率备用快照'} · ${beijingTime(state.fundingSnapshot.metadata.fetchedAt)} 北京时间。不足 24 个样本的日期按已有共同结算小时求均值，不补零。` : mode === 'error' ? '历史资金费率暂不可用；价格图表与当前预估仍可使用。可点击顶部刷新数据重试。' : '正在载入已结算资金费率。';
+}
+
 function renderFundingHistoryChart() {
   if (!state.chart || !state.visible.length) return;
   const svg = $('funding-history-chart');
@@ -264,7 +288,7 @@ function renderFundingHistoryChart() {
   svg.replaceChildren(); state.fundingChart = null;
   $('funding-history-tooltip').hidden = true;
   const mode = state.fundingHistoryMode;
-  $('funding-history-status').textContent = state.fundingSnapshot ? `${mode === 'live' ? '历史费率已同步' : mode === 'stale' ? '历史费率更新失败，保留数据' : '历史费率备用快照'} · ${beijingTime(state.fundingSnapshot.metadata.fetchedAt)} 北京时间。不足 24 个样本的日期按已有共同结算小时求均值，不补零。` : mode === 'error' ? '历史资金费率暂不可用；价格图表与当前预估仍可使用。可点击顶部刷新数据重试。' : '正在载入已结算资金费率。';
+  renderFundingHistoryStatus();
   $('funding-history-count').textContent = state.fundingSnapshot ? `${fundingAnalysis.count.toLocaleString('zh-CN')} / ${fundingAnalysis.expectedHours.toLocaleString('zh-CN')} 个共同小时 · ${fundingAnalysis.missingHours ? `缺少 ${fundingAnalysis.missingHours.toLocaleString('zh-CN')} 小时，累计仅含已覆盖数据` : '覆盖完整'}` : '';
   if (records.length) svg.removeAttribute('hidden'); else svg.setAttribute('hidden', '');
   empty.hidden = Boolean(records.length);
@@ -369,6 +393,7 @@ function showFundingObservation(index) {
 }
 
 function hideTooltip() {
+  cancelAnimationFrame(pointerFrame); pointerFrame = 0; queuedPointer = null;
   $('chart-tooltip').hidden = true;
   state.chart?.crosshair.setAttribute('visibility', 'hidden');
   $('funding-history-tooltip').hidden = true;
@@ -393,10 +418,12 @@ function applySnapshot(snapshot, mode) {
   if (life.signal.aborted) return;
   if (state.metadata && Date.parse(snapshot.metadata.fetchedAt) < Date.parse(state.metadata.fetchedAt)) return;
   const validated = validateIntradaySnapshot(snapshot);
-  state.rows = intradayChartRows(validated); state.rawDates = validated.data.map(row => new Date(row.time).toISOString());
+  const changed = !samePriceRows(state.rows, validated.data.filter(row => row.brent !== null && row.wti !== null));
+  if (changed) state.rows = intradayChartRows(validated);
   state.metadata = validated.metadata; state.historyMode = mode;
   $('loading').hidden = true; $('error').hidden = true; $('dashboard').hidden = false;
-  fillMetrics(); renderFunding(); renderStatus(); render();
+  if (changed) { fillMetrics(); render(); }
+  renderStatus(); publishSummary();
 }
 
 function applyLiveMarket(market) {
@@ -444,7 +471,7 @@ async function refreshData(full = true) {
 }
 
 async function loadData() {
-  await refreshData(true);
+  await refreshData(!initial?.candles || Date.now() - initialReadAt >= 60_000);
 }
 
 function applyFundingSnapshot(snapshot, mode) {
@@ -452,9 +479,10 @@ function applyFundingSnapshot(snapshot, mode) {
   if (state.fundingSnapshot && Date.parse(snapshot.metadata.fetchedAt) < Date.parse(state.fundingSnapshot.metadata.fetchedAt)) return;
   const validated = createFundingSnapshot(snapshot.data, snapshot.metadata.fetchedAt);
   if (validated.metadata.pairedObservationRows !== snapshot.metadata.pairedObservationRows || validated.metadata.firstSettlementTime !== snapshot.metadata.firstSettlementTime || validated.metadata.lastSettlementTime !== snapshot.metadata.lastSettlementTime) throw new Error('Funding metadata mismatch');
-  state.fundingSnapshot = validated; state.fundingHistoryMode = mode;
-  state.fundingByTime = new Map(validated.data.filter(row => row.brent !== null && row.wti !== null).map(row => [row.time, { shortRate: (row.brent - row.wti) / 2, longRate: (row.wti - row.brent) / 2 }]));
-  if (state.visible.length) { renderFundingHistoryChart(); renderTable(); }
+  const changed = !state.fundingSnapshot || !samePriceRows(state.fundingSnapshot.data, validated.data);
+  state.fundingSnapshot = changed ? validated : { ...validated, data: state.fundingSnapshot.data }; state.fundingHistoryMode = mode;
+  if (changed) state.fundingByTime = new Map(validated.data.filter(row => row.brent !== null && row.wti !== null).map(row => [row.time, { shortRate: (row.brent - row.wti) / 2, longRate: (row.wti - row.brent) / 2 }]));
+  if (state.visible.length) { if (changed) { renderFundingHistoryChart(); renderTable(); } else renderFundingHistoryStatus(); }
 }
 
 async function refreshHistoricalFunding() {
@@ -464,7 +492,7 @@ async function refreshHistoricalFunding() {
   catch (error) { if (life.signal.aborted) return;
     console.warn('Unable to update settled funding history:', error);
     state.fundingHistoryMode = state.fundingSnapshot ? 'stale' : 'error';
-    renderFundingHistoryChart();
+    if (state.fundingSnapshot) renderFundingHistoryStatus(); else renderFundingHistoryChart();
   } finally { if (life.signal.aborted) return; state.fundingRefreshing = false; }
 }
 
@@ -472,7 +500,7 @@ async function loadHistoricalFunding() {
   await refreshHistoricalFunding();
 }
 
-root.querySelectorAll('[data-range]').forEach(button => button.addEventListener('click', () => { state.range = button.dataset.range; render(); }));
+root.querySelectorAll('[data-range]').forEach(button => button.addEventListener('click', () => { if (state.range === button.dataset.range) return; state.range = button.dataset.range; state.tablePage = 0; render(); }));
 root.querySelectorAll('[data-funding-view]').forEach(button => life.on(button, 'click', () => { fundingHistoryView = button.dataset.fundingView; renderFundingHistoryChart(); }));
 const tabs = [...root.querySelectorAll('[data-view]')];
 for (const button of tabs) {
@@ -485,18 +513,28 @@ for (const button of tabs) {
   });
 }
 life.on(tableDetails, 'toggle', () => { if (tableDetails.open) renderTable(false); });
+for (const [id, step] of [['table-prev', -1], ['table-next', 1]]) life.on($(id), 'click', () => {
+  state.tablePage += step; renderTable(); $('data-table').closest('.table-scroll').scrollTop = 0;
+});
 function handleChartPointer(event) {
-  if (!state.chart) return;
-  const rect = event.currentTarget.getBoundingClientRect();
-  const px = (event.clientX - rect.left) * state.chart.width / rect.width;
-  const target = state.chart.start + (px - state.chart.padding.left) / state.chart.plotWidth * (state.chart.end - state.chart.start);
-  const funding = event.currentTarget.id === 'funding-history-chart';
-  const rows = funding ? fundingAnalysis?.points ?? [] : state.visible;
-  if (!rows.length) return;
-  let index = 0;
-  rows.forEach((row, i) => { if (Math.abs((row.time ?? Date.parse(row.date)) - target) < Math.abs((rows[index].time ?? Date.parse(rows[index].date)) - target)) index = i; });
-  if (funding) showFundingObservation(index);
-  else { $('chart-cursor').value = index; showTooltip(index); }
+  queuedPointer = { element: event.currentTarget, clientX: event.clientX };
+  if (pointerFrame) return;
+  pointerFrame = requestAnimationFrame(() => {
+    pointerFrame = 0;
+    const pointer = queuedPointer; queuedPointer = null;
+    if (!pointer || life.signal.aborted) return;
+    if (!state.chart) return;
+    const rect = pointer.element.getBoundingClientRect();
+    const px = (pointer.clientX - rect.left) * state.chart.width / rect.width;
+    const target = state.chart.start + (px - state.chart.padding.left) / state.chart.plotWidth * (state.chart.end - state.chart.start);
+    const funding = pointer.element.id === 'funding-history-chart';
+    const rows = funding ? fundingAnalysis?.points ?? [] : state.visible;
+    if (!rows.length) return;
+    const index = nearestTimeIndex(rows, target);
+    if (!funding && !$('chart-tooltip').hidden && state.selectedDate === rows[index].date) return;
+    if (funding) showFundingObservation(index);
+    else { $('chart-cursor').value = index; showTooltip(index); }
+  });
 }
 $('main-chart').addEventListener('pointermove', handleChartPointer);
 $('funding-history-chart').addEventListener('pointermove', handleChartPointer);
@@ -526,7 +564,10 @@ const refreshTimer = setInterval(refreshWhenVisible, 60_000);
 life.on(document, 'visibilitychange', () => { if (!document.hidden && (!state.market || Date.now() - Date.parse(state.market.fetchedAt) > 60_000)) refreshWhenVisible(); });
 life.on(window, 'pagehide', event => { if (!event.persisted) clearInterval(refreshTimer); });
 let resizeFrame;
-const resizeObserver = new ResizeObserver(() => { if (life.signal.aborted) return; cancelAnimationFrame(resizeFrame); resizeFrame = requestAnimationFrame(() => { if (!life.signal.aborted && state.visible.length) renderChart(); }); }); resizeObserver.observe($('chart-area'));
+const resizeObserver = new ResizeObserver(() => { if (life.signal.aborted) return; cancelAnimationFrame(resizeFrame); resizeFrame = requestAnimationFrame(() => {
+  const svg = $('main-chart');
+  if (!life.signal.aborted && state.visible.length && svg.clientWidth && (chartDirty || Math.max(Math.round(svg.clientWidth), 270) !== state.chart?.width || Math.max(Math.round(svg.clientHeight), 250) !== state.chart?.height)) renderChart();
+}); }); resizeObserver.observe($('chart-area'));
 
 
 // Hydrate persisted data before starting refreshes; preserve the server-rendered cards.
@@ -535,6 +576,6 @@ if (initial?.candles) applySnapshot(initial.candles, initial.candles.status === 
 if (!state.market) publishSummary('loading');
 loadData();
 loadHistoricalFunding();
-return { setView(input) { if (!['1d','1w','1m','all'].includes(input.range) || !['spread','prices'].includes(input.view)) throw new Error('Invalid chart view'); if (!state.rows.length) throw new Error('行情尚未加载'); state.range=input.range; state.view=input.view; render(); return summarize(state.visible); }, dispose() { life.dispose(); clearInterval(refreshTimer); resizeObserver.disconnect(); cancelAnimationFrame(resizeFrame); } };
+return { setView(input) { if (!['1d','1w','1m','all'].includes(input.range) || !['spread','prices'].includes(input.view)) throw new Error('Invalid chart view'); if (!state.rows.length) throw new Error('行情尚未加载'); if (state.range !== input.range) state.tablePage=0; state.range=input.range; state.view=input.view; render(); return summarize(state.visible); }, dispose() { life.dispose(); clearInterval(refreshTimer); resizeObserver.disconnect(); cancelAnimationFrame(resizeFrame); cancelAnimationFrame(pointerFrame); } };
 
 }

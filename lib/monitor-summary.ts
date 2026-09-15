@@ -35,7 +35,9 @@ export function hynixSummary(quote: LiveQuote | null, error = "", trend?: Monito
   };
 }
 
-export function oilSummary(update?: OilSummaryUpdate): MonitorSummary {
+const oilTrendOptions = { days: 7, intervalMs: 900_000, label: "7 天 · 15 分钟线", shortLabel: "7天", unit: " 美元 / 桶" };
+
+export function oilSummary(update?: OilSummaryUpdate, trend?: MonitorTrend): MonitorSummary {
   return {
     status: update?.status ?? "loading",
     fetchedAt: update?.fetchedAt ?? null,
@@ -44,8 +46,24 @@ export function oilSummary(update?: OilSummaryUpdate): MonitorSummary {
       metric("净资金费 / 年化", update?.fundingHourlyRate == null ? null : update.fundingHourlyRate * 24 * 365 * 100, 2, "%"),
     ],
     note: `空布伦特、多 WTI · ${update?.fundingBasis === "notional" ? "等名义" : "等桶数"}`,
-    trend: createTrend(update?.history, { days: 7, intervalMs: 900_000, label: "7 天 · 15 分钟线", shortLabel: "7天", unit: " 美元 / 桶" }, update?.status === "error"),
+    trend: trend ?? createTrend(update?.history, oilTrendOptions, update?.status === "error"),
     comparison: update?.comparison,
+  };
+}
+
+/** Each mounted panel owns its cache; quote changes never rebuild historical geometry. */
+export function createOilSummaryReader() {
+  let previousHistory: TrendHistory | undefined, previousTrend: MonitorTrend | undefined;
+  return (update: OilSummaryUpdate) => {
+    const history = update.history, error = update.status === "error";
+    if (!previousTrend || history?.points !== previousHistory?.points) previousTrend = createTrend(history, oilTrendOptions, error);
+    else {
+      const status = history ? error ? "stale" : history.status : error ? "error" : "loading";
+      const fetchedAt = history?.fetchedAt ?? null;
+      if (status !== previousTrend.status || fetchedAt !== previousTrend.fetchedAt) previousTrend = { ...previousTrend, status, fetchedAt };
+    }
+    previousHistory = history;
+    return oilSummary(update, previousTrend);
   };
 }
 

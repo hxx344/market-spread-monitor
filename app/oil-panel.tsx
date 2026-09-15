@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { mount as mountChart } from "../modules/oil/app.mjs";
-import { oilSummary, type SummaryProps } from "../lib/monitor-summary";
+import { createOilSummaryReader, type SummaryProps } from "../lib/monitor-summary";
 import { initialSummaries, type InitialMarketData } from "../lib/initial-market";
 type Mounted = { dispose: () => void };
 
@@ -14,6 +14,7 @@ export default function OilPanel({ onSummary, initial = null }: SummaryProps & {
     const node = host.current!;
     const root = node.shadowRoot ?? node.attachShadow({ mode: "open" });
     const mounted: Mounted[] = [];
+    const summarize = createOilSummaryReader();
     async function load() {
       try {
         const responses = await Promise.all(["/oil/panel.html", "/oil/styles.css"].map(url => fetch(url, { signal: controller.signal })));
@@ -22,7 +23,7 @@ export default function OilPanel({ onSummary, initial = null }: SummaryProps & {
         controller.signal.throwIfAborted();
         // This markup is a checked-in first-party asset, never user/API HTML.
         root.innerHTML = `<style>${css}</style>${html}`;
-        mounted.push(mountChart(root, { initial: initial?.oil, onSummary: update => onSummary?.(oilSummary(update)) }));
+        mounted.push(mountChart(root, { initial: initial?.oil, initialReadAt: initial?.renderedAt, onSummary: update => onSummary?.(summarize(update)) }));
         root.querySelectorAll<HTMLAnchorElement>("[data-local-anchor]").forEach(anchor => anchor.addEventListener("click", event => { event.preventDefault(); root.getElementById(anchor.hash.slice(1))?.scrollIntoView({ behavior: "smooth" }); }, { signal: controller.signal }));
       } catch (cause) {
         if (!controller.signal.aborted) {

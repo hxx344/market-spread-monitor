@@ -19,7 +19,7 @@ import ExchangeComparison from "./exchange-comparison";
 
 const panels = { oil: memo(OilPanel), hynix: memo(Dashboard) };
 
-function CardSummary({ summary, intervalMs, renderedAt }: { summary: MonitorSummary; intervalMs: number; renderedAt?: number }) {
+const CardSummary = memo(function CardSummary({ summary, intervalMs, renderedAt }: { summary: MonitorSummary; intervalMs: number; renderedAt?: number }) {
   const [now, setNow] = useState(() => renderedAt ?? Date.now());
   useEffect(() => {
     const updateClock = () => setNow(Date.now());
@@ -34,7 +34,7 @@ function CardSummary({ summary, intervalMs, renderedAt }: { summary: MonitorSumm
     {summary.note && <span className="hub-card-note">{summary.note}</span>}
     <span className={`hub-card-status ${expired ? "stale" : summary.status}`}><span><i aria-hidden="true"/>{expired ? "行情待更新" : summaryStatusLabels[summary.status]}</span>{timestamp && <time dateTime={summary.fetchedAt!}>{timestamp} 北京时间</time>}</span>
   </>;
-}
+});
 
 export default function MonitorHub({ initial = null }: { initial?: InitialMarketData | null }) {
   const [active, setActive] = useState("oil");

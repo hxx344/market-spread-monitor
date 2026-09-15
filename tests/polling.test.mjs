@@ -5,6 +5,24 @@ import { loadQuote } from "../lib/quote-service.ts";
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
+test('hydrated history skips the duplicate first request but polls at its existing cadence and supports immediate manual refresh', async t => {
+  t.mock.timers.enable({apis:['setInterval']});
+  let calls = 0;
+  const poll = startPolling({ intervalMs:60_000, immediate:false, load:async()=>++calls, onData:()=>{}, onError:assert.fail });
+  await flush(); assert.equal(calls,0);
+  t.mock.timers.tick(59_999); await flush(); assert.equal(calls,0);
+  t.mock.timers.tick(1); await flush(); assert.equal(calls,1);
+  await poll.refresh(); assert.equal(calls,2);
+  poll.stop(); t.mock.timers.tick(60_000); await flush(); assert.equal(calls,2);
+});
+
+test('an unmounted hydrated panel cancels its scheduled first fetch', async t => {
+  t.mock.timers.enable({apis:['setInterval']});
+  let calls=0;
+  const poll=startPolling({intervalMs:60_000,immediate:false,load:async()=>++calls,onData:()=>{},onError:assert.fail});
+  poll.stop();t.mock.timers.tick(60_000);await flush();assert.equal(calls,0);
+});
+
 test("fetch immediately and at 10-second intervals without overlapping manual refresh",async t=>{
   t.mock.timers.enable({apis:["setInterval"]});
   let calls=0,resolvePending;
