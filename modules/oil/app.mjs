@@ -6,6 +6,7 @@ import { intradayChartRows, validateIntradaySnapshot, OIL_CANDLE_MS, OIL_CANDLE_
 import { createLifecycle } from './lifecycle.mjs';
 import { binanceOilExchangeQuote } from '../../lib/exchange-quotes.ts';
 import { nearestTimeIndex, tablePage, samePriceRows } from './chart-performance.mjs';
+import { startOilAutoRefresh } from './auto-refresh.mjs';
 /** @param {ShadowRoot} root @param {{ initial?: import('../../lib/initial-market').InitialMarketData['oil'], initialReadAt?: number, onSummary?: (summary: import('../../lib/monitor-summary').OilSummaryUpdate) => void }} options */
 export function mount(root, { onSummary, initial, initialReadAt = 0 } = {}) {
 const life = createLifecycle();
@@ -562,16 +563,7 @@ $('chart-cursor').addEventListener('keydown', event => { if (event.key === 'Esca
 $('retry').addEventListener('click', () => refreshData(true));
 $('refresh-data').addEventListener('click', () => { refreshData(true); refreshHistoricalFunding(); });
 root.querySelectorAll('[data-basis]').forEach(button => button.addEventListener('click', () => { state.basis = button.dataset.basis; renderFunding(); }));
-function refreshWhenVisible() {
-  if (document.hidden || state.refreshing) return;
-  const historyAge = state.metadata ? Date.now() - Date.parse(state.metadata.fetchedAt) : Infinity;
-  refreshData(historyAge > 60_000);
-  const fundingAge = state.fundingSnapshot ? Date.now() - Date.parse(state.fundingSnapshot.metadata.fetchedAt) : Infinity;
-  if (fundingAge > 5 * 60_000) refreshHistoricalFunding();
-}
-const refreshTimer = setInterval(refreshWhenVisible, 60_000);
-life.on(document, 'visibilitychange', () => { if (!document.hidden && (!state.market || Date.now() - Date.parse(state.market.fetchedAt) > 60_000)) refreshWhenVisible(); });
-life.on(window, 'pagehide', event => { if (!event.persisted) clearInterval(refreshTimer); });
+const stopAutoRefresh = startOilAutoRefresh({ prices: () => refreshData(true), funding: refreshHistoricalFunding });
 let resizeFrame;
 const resizeObserver = new ResizeObserver(() => { if (life.signal.aborted) return; cancelAnimationFrame(resizeFrame); resizeFrame = requestAnimationFrame(() => {
   const svg = $('main-chart');
@@ -585,6 +577,6 @@ if (initial?.candles) applySnapshot(initial.candles, initial.candles.status === 
 if (!state.market) publishSummary('loading');
 loadData();
 loadHistoricalFunding();
-return { setView(input) { if (!['1d','1w','1m','all'].includes(input.range) || !['spread','prices'].includes(input.view)) throw new Error('Invalid chart view'); if (!state.rows.length) throw new Error('行情尚未加载'); if (state.range !== input.range) state.tablePage=0; state.range=input.range; state.view=input.view; render(); return summarize(state.visible); }, dispose() { life.dispose(); clearInterval(refreshTimer); resizeObserver.disconnect(); cancelAnimationFrame(resizeFrame); cancelAnimationFrame(pointerFrame); } };
+return { setView(input) { if (!['1d','1w','1m','all'].includes(input.range) || !['spread','prices'].includes(input.view)) throw new Error('Invalid chart view'); if (!state.rows.length) throw new Error('行情尚未加载'); if (state.range !== input.range) state.tablePage=0; state.range=input.range; state.view=input.view; render(); return summarize(state.visible); }, dispose() { life.dispose(); stopAutoRefresh(); resizeObserver.disconnect(); cancelAnimationFrame(resizeFrame); cancelAnimationFrame(pointerFrame); } };
 
 }
