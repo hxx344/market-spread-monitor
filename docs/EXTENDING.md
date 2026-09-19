@@ -78,6 +78,8 @@ interface DataAdapter {
 
 浏览器先接收带 `streamId` / `sequence` 的完整基线，再接收 `type: "patch"`、`baseSequence` 和 `patches: [["exchange:symbol", changedFields]]`。新合约必须带完整报价，字段清空使用 `null`，删除使用 `removed`。时间确认仍传真实字段时间和 `receivedAt`。缺帧、服务实例变化及慢读者恢复必须重新同步完整基线，不能继续拼接缺失的变化；不需要定时全量广播。
 
+合约目录可输出 `delisting: boolean`、`delistingAt: number | null`（UTC 毫秒），只接受交易所明确的下架信号。目录默认每 5 分钟核对；两个字段不属于订阅签名，更新时直接修正缓存与增量流，保留所有价格/接收时间，不重连。WS/REST 报价统一使用最新目录元数据，旧订阅的上下文不能覆盖已更新公告；成功读取可以撤销标记，失败保留上次结果。没有信号的 `false` 不表示保证不会下架；已终止、只减仓等状态不能仅为展示标记而放宽原交易资格。具体字段映射见 [PERPETUAL_DELISTING.md](PERPETUAL_DELISTING.md)。
+
 `perpetual` 使用专属最新报价库 `ALERT_DATA_DIR/perpetual/market.sqlite`，不积累每秒全市场历史。新建只读流接口需要显式声明 `actions.stream` 和 `stream(request,response)`，公共层先完成登录和方法验证；服务须提供 `closeStreams()`，停机时在等待 HTTP 排空前关闭长连接，并清理慢客户端缓冲。
 
 每个模块使用 `ALERT_DATA_DIR/{id}` 保存告警状态，维护独立数据版本、revision 和原子写入；行情由共享的 `services.market` 管理 SQLite 与独立采集调度。报价落盘后触发告警检查，告警也继续定时检查，均只使用库中未过期报价。持久化失败不得继续无限重发通知；不要读写其他模块状态。初始化失败释放已取得资源，关闭时先排空 HTTP，再停止告警、采集并关闭数据库和通知服务。

@@ -8,7 +8,7 @@ export const PERPETUAL_STALE_MS = 30_000;
 const MAX_FUTURE_MS = 5_000;
 const fields = ['bid', 'ask', 'mark', 'last', 'fundingRate', 'fundingIntervalHours', 'nextFundingAt'];
 const priceFields = new Set(['bid', 'ask', 'mark', 'last']);
-const streamValueFields = [...fields, 'base', 'quoteCurrency', 'multiplier', 'displayBase', 'contractUnit', 'collateralCurrency', 'comparable', 'transport'];
+const streamValueFields = [...fields, 'base', 'quoteCurrency', 'multiplier', 'displayBase', 'contractUnit', 'collateralCurrency', 'comparable', 'transport', 'delisting', 'delistingAt'];
 const streamTimeFields = ['bidAt', 'askAt', 'bidAskAt', 'markAt', 'lastAt', 'fundingAt', 'fundingIntervalHoursUpdatedAt', 'nextFundingAtUpdatedAt', 'receivedAt', 'sourceTime'];
 
 /** Only changed fields cross the wire. The retained baseline is exactly what readers received. */
@@ -92,7 +92,13 @@ export function mergePerpetualQuote(previous, update, now = Date.now()) {
   return next;
 }
 
-export function createPerpetualService({ store, exchanges = EXCHANGES, discover = discoverMarkets, subscriptions = createSubscriptions, parse = parseMessage, control = getControlResponse, WebSocketImpl = PerpetualWebSocket, clock = Date.now, staleAfterMs = PERPETUAL_STALE_MS, retryMs = 5_000, discoveryIntervalMs = 30 * 60_000, saveIntervalMs = 15_000, broadcastIntervalMs = 1_000, watchdogIntervalMs = 10_000, quoteTimeoutMs = 45_000 } = {}) {
+function withLifecycle(quote, market) {
+  const delisting = market?.delisting === true;
+  const delistingAt = delisting && Number.isSafeInteger(market.delistingAt) && market.delistingAt > 0 && market.delistingAt <= 8.64e15 ? market.delistingAt : null;
+  return quote.delisting === delisting && quote.delistingAt === delistingAt ? quote : { ...quote, delisting, delistingAt };
+}
+
+export function createPerpetualService({ store, exchanges = EXCHANGES, discover = discoverMarkets, subscriptions = createSubscriptions, parse = parseMessage, control = getControlResponse, WebSocketImpl = PerpetualWebSocket, clock = Date.now, staleAfterMs = PERPETUAL_STALE_MS, retryMs = 5_000, discoveryIntervalMs = 5 * 60_000, saveIntervalMs = 15_000, broadcastIntervalMs = 1_000, watchdogIntervalMs = 10_000, quoteTimeoutMs = 45_000 } = {}) {
   const quotes = new Map(), dirty = new Map(), pendingPrunes = new Map(), connections = new Set(), clients = new Map(), timers = new Set(), discoveries = new Map(), publishedQuotes = new Map(), pollBudgets = new Map();
   const states = new Map(exchanges.map(exchange => [exchange.id, { ...exchange, kind: exchange.kind ?? exchange.type, marketCount: 0, lastMessageAt: null, lastSourceLagMs: null, rejectedFuture: 0, error: null, discovering: false }]));
   let running = false, storageError = null, broadcastTimer, saveTimer, refreshTimer, metricsTimer, sequence = 0;
@@ -163,7 +169,8 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
         }
         const key = `${exchange}:${update.symbol}`, previous = quotes.get(key), next = mergePerpetualQuote(previous, transport === 'rest' ? { ...update, transport } : update, now);
         if (next && next !== previous) {
-          metrics.updates++; quotes.set(key, next); dirty.set(key, next);
+          const current = withLifecycle(next, state.markets?.get(update.symbol));
+          metrics.updates++; quotes.set(key, current); dirty.set(key, current);
           if (transport === 'ws') connection.lastQuoteAt = now;
           state.lastMessageAt = now; state.error = null; attempt = 0;
         }
@@ -267,10 +274,18 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
         if (!specs.length) throw new Error('No subscriptions');
         state.marketCount = markets.length;
         // Funding intervals, contract multipliers and channel IDs may change while symbols stay the same.
-        const signature = JSON.stringify([...markets].sort((left, right) => left.symbol.localeCompare(right.symbol)));
+        // Lifecycle notices must reach readers even without a new price, and
+        // must not tear down subscriptions or refresh the original price times.
+        const identities = new Map(markets.map(market => [market.symbol, market]));
+        const signature = JSON.stringify([...markets].sort((left, right) => left.symbol.localeCompare(right.symbol)), (key, value) => key === 'delisting' || key === 'delistingAt' ? undefined : value);
+        state.markets = identities;
+        for (const [key, quote] of quotes) {
+          if (quote.exchange !== exchange || !identities.has(quote.symbol)) continue;
+          const current = withLifecycle(quote, identities.get(quote.symbol));
+          if (current !== quote) { quotes.set(key, current); dirty.set(key, current); }
+        }
         if (signature === state.signature) return;
         const symbols = new Set(markets.map(market => market.symbol));
-        const identities = new Map(markets.map(market => [market.symbol, market]));
         const keepStored = new Set(symbols);
         for (const [key, quote] of quotes) {
           if (quote.exchange !== exchange) continue;

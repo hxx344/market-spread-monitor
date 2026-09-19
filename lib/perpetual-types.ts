@@ -39,6 +39,9 @@ export interface PerpetualQuote {
   contractUnit?: string;
   collateralCurrency?: string;
   comparable?: boolean;
+  /** Official venue lifecycle metadata, independent of price freshness. */
+  delisting?: boolean;
+  delistingAt?: number | null;
 }
 
 export interface PerpetualSnapshot {

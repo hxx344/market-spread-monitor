@@ -4,6 +4,20 @@ import { createPerpetualClock, createPerpetualSnapshotAccumulator, parsePerpetua
 
 const snapshot = generatedAt => ({ schemaVersion: 1, monitorId: "perpetual", generatedAt, staleAfterMs: 30000, status: "live", exchanges: [], quotes: [] });
 const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('lifecycle field patches add and remove notices without changing quote ages', () => {
+  const merge = createPerpetualSnapshotAccumulator();
+  const initial = { ...snapshot(1000), streamId: 'notice-test', sequence: 0, quotes: [{ exchange: 'test', symbol: 'BTCUSDT', base: 'BTC', quoteCurrency: 'USDT', bid: 100, bidAskAt: 1000, receivedAt: 1000 }] };
+  merge(initial);
+  const frame = { ...snapshot(2000), type: 'patch', streamId: 'notice-test', baseSequence: 0, sequence: 1, removed: [], patches: [['test:BTCUSDT', { delisting: true, delistingAt: 100000 }]] };
+  const marked = merge(frame).quotes[0];
+  assert.equal(marked.delisting, true); assert.equal(marked.delistingAt, 100000);
+  assert.equal(marked.bidAskAt, 1000); assert.equal(marked.receivedAt, 1000);
+  const cleared = merge({ ...frame, baseSequence: 1, sequence: 2, patches: [['test:BTCUSDT', { delisting: false, delistingAt: null }]] }).quotes[0];
+  assert.equal(cleared.delisting, false); assert.equal(cleared.delistingAt, null);
+  assert.equal(cleared.bid, 100); assert.equal(cleared.bidAskAt, 1000);
+});
+
 function fixture(fetchSnapshot = async () => snapshot(1), options = {}) {
   const streams = [], timers = new Map(), data = [], statuses = [], errors = [];
   let id = 0;

@@ -1,5 +1,7 @@
 .perpetual-panel{--perp-surface:#111e29;--perp-border:#2b404f;--perp-muted:#97acbc;--perp-accent:#8dbbff;padding:30px 4.2% 36px;color:#dce8f1;font-variant-numeric:tabular-nums}
 .perpetual-panel button,.perpetual-panel input,.perpetual-panel select{font:inherit}
+.perpetual-panel .perp-delisting{margin-top:8px;font-size:11px;font-weight:400;line-height:1.6;white-space:normal;overflow-wrap:anywhere}.perp-delisting-label{display:inline-block;padding:1px 6px;border:1px solid #775a35;border-radius:3px;background:#35291b;color:#f4cd96}.perp-delisting-time{display:block;margin-top:3px;color:#d8bc95}.perp-delisting.is-due .perp-delisting-label{border-color:#8f5550;background:#392322;color:#f2b8ae}
+.perp-delisting-time :is(time,.perp-delisting-zone){display:inline-block;white-space:nowrap}
 .perpetual-panel button{cursor:pointer}.perpetual-panel button:disabled{cursor:default;opacity:.45}
 .perpetual-panel :is(button,input,select,summary):focus-visible{outline:2px solid var(--perp-accent);outline-offset:3px}
 .perp-heading{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:20px}.perp-heading h2{font-size:25px;font-weight:650;letter-spacing:-.025em;margin:0 0 8px}.perp-heading p{font-size:14px;color:var(--perp-muted)}

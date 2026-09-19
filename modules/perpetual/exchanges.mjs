@@ -47,7 +47,36 @@ export function normalizeUnderlying(rawBase, exchange = '') {
 }
 
 function market(exchange, symbol, rawBase, quoteCurrency, extra = {}) {
-  return { id: `${exchange}:${symbol}`, exchange, symbol, rawBase, ...normalizeUnderlying(rawBase, exchange), quoteCurrency, ...extra };
+  return { id: `${exchange}:${symbol}`, exchange, symbol, rawBase, ...normalizeUnderlying(rawBase, exchange), quoteCurrency, delisting: false, delistingAt: null, ...extra };
+}
+
+/** Explicit perpetual delisting metadata from the existing bulk directories.
+ * Missing metadata means no published signal in this feed, not a guarantee.
+ * Binance/Aster deliveryDate is milliseconds; 4133404800000 is their exact
+ * normal perpetual placeholder (2100-12-25T08:00:00Z), not a real expiry.
+ * https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data#exchange-information
+ * https://asterdex.github.io/aster-api-website/futures/market-data/#exchange-information
+ * Bybit deliveryTime and OKX expTime explicitly include perpetual delisting.
+ * https://bybit-exchange.github.io/docs/v5/market/instrument
+ * https://www.okx.com/docs-v5/en/#public-data-rest-api-get-instruments
+ * Bitget offTime is the halt deadline; -1 means normal. maintainTime and
+ * limitOpenTime are separate and must not imply a delisting announcement.
+ * https://www.bitget.com/api-doc/classic/contract/market/Get-All-Symbols-Contracts
+ * Gate timestamps default to seconds. delisted_time is the final deadline;
+ * delisting_time is ONLY the start of reduce-only trading, never the deadline.
+ * https://www.gate.com/docs/developers/apiv4/en/futures/
+ */
+function delistingMetadata(exchange, row) {
+  let value;
+  if (exchange === 'binance' || exchange === 'aster') value = row.deliveryDate;
+  else if (exchange === 'bybit') value = row.deliveryTime;
+  else if (exchange === 'okx') value = row.expTime;
+  else if (exchange === 'bitget') value = row.offTime;
+  else if (exchange === 'gate') value = row.delisted_time;
+  let delistingAt = timestamp(value, exchange === 'gate' ? 's' : 'ms');
+  if (!Number.isSafeInteger(delistingAt) || delistingAt > 8_640_000_000_000_000
+    || (['binance', 'aster'].includes(exchange) && delistingAt === 4_133_404_800_000)) delistingAt = null;
+  return { delisting: delistingAt !== null || (exchange === 'gate' && row.in_delisting === true), delistingAt };
 }
 
 /** Symbols are not asset identities. Classified non-crypto contracts are isolated
@@ -121,7 +150,7 @@ async function request(url, { fetchImpl, signal }, body) {
 }
 
 /** Dynamic discovery includes active, stablecoin quoted perpetual contracts only. */
-export async function discoverMarkets(exchangeId, { fetchImpl = fetch, signal } = {}) {
+export async function discoverMarkets(exchangeId, { fetchImpl = fetch, signal, now = Date.now() } = {}) {
   const options = { fetchImpl, signal };
   if (ADDITIONAL_IDS.has(exchangeId)) return discoverAdditionalMarkets(exchangeId, options);
   let rows;
@@ -137,6 +166,7 @@ export async function discoverMarkets(exchangeId, { fetchImpl = fetch, signal } 
       .filter(row => row.status === 'TRADING' && row.contractType === 'PERPETUAL' && STABLE_QUOTES.has(row.quoteAsset) && row.marginAsset === row.quoteAsset)
       .map(row => market(exchangeId, row.symbol, row.baseAsset, row.quoteAsset, {
         ...classifyMarketIdentity(exchangeId, row.baseAsset, row),
+        ...delistingMetadata(exchangeId, row),
         // Binance fundingInfo lists adjusted intervals; unlisted contracts use 8h.
         // On a failed metadata read, keep the interval unknown.
         fundingIntervalHours: fundingBySymbol.get(row.symbol) ?? (exchangeId === 'binance' && funding ? 8 : null),
@@ -149,7 +179,7 @@ export async function discoverMarkets(exchangeId, { fetchImpl = fetch, signal } 
       const data = await request(`https://api.bybit.com/v5/market/instruments-info?category=linear&limit=1000${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, options);
       rows.push(...assertArray(data.result?.list, exchangeId)
         .filter(row => row.status === 'Trading' && row.contractType === 'LinearPerpetual' && !row.isPreListing && STABLE_QUOTES.has(row.quoteCoin) && row.settleCoin === row.quoteCoin)
-        .map(row => market(exchangeId, row.symbol, row.baseCoin, row.quoteCoin, { ...classifyMarketIdentity(exchangeId, row.baseCoin, row), fundingIntervalHours: number(row.fundingInterval, true) === null ? null : Number(row.fundingInterval) / 60 })));
+        .map(row => market(exchangeId, row.symbol, row.baseCoin, row.quoteCoin, { ...classifyMarketIdentity(exchangeId, row.baseCoin, row), ...delistingMetadata(exchangeId, row), fundingIntervalHours: number(row.fundingInterval, true) === null ? null : Number(row.fundingInterval) / 60 })));
       cursor = data.result.nextPageCursor || '';
       if (cursor && seen.has(cursor)) throw new Error('Bybit: repeated pagination cursor');
       seen.add(cursor);
@@ -159,21 +189,23 @@ export async function discoverMarkets(exchangeId, { fetchImpl = fetch, signal } 
     const data = await request('https://www.okx.com/api/v5/public/instruments?instType=SWAP', options);
     rows = assertArray(data.data, exchangeId)
       .filter(row => row.state === 'live' && row.instType === 'SWAP' && row.ctType === 'linear' && STABLE_QUOTES.has(row.settleCcy) && row.instId.endsWith(`-${row.settleCcy}-SWAP`))
-      .map(row => market(exchangeId, row.instId, row.ctValCcy || row.instId.split('-')[0], row.settleCcy, classifyMarketIdentity(exchangeId, row.ctValCcy || row.instId.split('-')[0], row)));
+      .map(row => market(exchangeId, row.instId, row.ctValCcy || row.instId.split('-')[0], row.settleCcy, { ...classifyMarketIdentity(exchangeId, row.ctValCcy || row.instId.split('-')[0], row), ...delistingMetadata(exchangeId, row) }));
   } else if (exchangeId === 'bitget') {
     const results = await Promise.allSettled(['USDT-FUTURES', 'USDC-FUTURES'].map(async productType => {
       const data = await request(`https://api.bitget.com/api/v2/mix/market/contracts?productType=${productType}`, options);
       return assertArray(data.data, exchangeId)
         .filter(row => row.symbolStatus === 'normal' && row.symbolType === 'perpetual' && row.isRwa !== 'YES' && STABLE_QUOTES.has(row.quoteCoin))
-        .map(row => market(exchangeId, row.symbol, row.baseCoin, row.quoteCoin, { productType, fundingIntervalHours: number(row.fundInterval, true) }));
+        .map(row => market(exchangeId, row.symbol, row.baseCoin, row.quoteCoin, { productType, ...delistingMetadata(exchangeId, row), fundingIntervalHours: number(row.fundInterval, true) }));
     }));
     if (results.every(result => result.status === 'rejected')) throw results[0].reason;
     rows = results.flatMap(result => result.status === 'fulfilled' ? result.value : []);
   } else if (exchangeId === 'gate') {
     const data = await request('https://api.gateio.ws/api/v4/futures/usdt/contracts', options);
     rows = assertArray(data, exchangeId)
-      .filter(row => !row.in_delisting && row.type === 'direct' && row.name?.endsWith('_USDT') && (!row.status || row.status === 'trading'))
-      .map(row => market(exchangeId, row.name, row.name.slice(0, -5), 'USDT', { ...classifyMarketIdentity(exchangeId, row.name.slice(0, -5), row), fundingIntervalHours: number(row.funding_interval, true) === null ? null : Number(row.funding_interval) / 3600 }));
+      // Keep announced delistings while trading. A true flag with zero open
+      // positions is explicitly already delisted in Gate's contract schema.
+      .filter(row => row.type === 'direct' && row.name?.endsWith('_USDT') && (!row.status || row.status === 'trading') && !(row.in_delisting === true && number(row.position_size) === 0))
+      .map(row => market(exchangeId, row.name, row.name.slice(0, -5), 'USDT', { ...classifyMarketIdentity(exchangeId, row.name.slice(0, -5), row), ...delistingMetadata(exchangeId, row), fundingIntervalHours: number(row.funding_interval, true) === null ? null : Number(row.funding_interval) / 3600 }));
   } else if (exchangeId === 'hyperliquid') {
     const data = await request('https://api.hyperliquid.xyz/info', options, { type: 'meta' });
     rows = assertArray(data.universe, exchangeId)
@@ -187,7 +219,9 @@ export async function discoverMarkets(exchangeId, { fetchImpl = fetch, signal } 
   } else {
     throw new Error(`Unsupported exchange: ${exchangeId}`);
   }
-  return [...new Map(rows.filter(row => row.symbol && row.base).map(row => [row.id, row])).values()].sort((a, b) => a.base.localeCompare(b.base) || a.symbol.localeCompare(b.symbol));
+  // Do not subscribe after an explicit final deadline even if the directory's
+  // operational status has not yet caught up. Missing deadlines impose no limit.
+  return [...new Map(rows.filter(row => row.symbol && row.base && (row.delistingAt === null || row.delistingAt > now)).map(row => [row.id, row])).values()].sort((a, b) => a.base.localeCompare(b.base) || a.symbol.localeCompare(b.symbol));
 }
 
 function chunks(values, size) {

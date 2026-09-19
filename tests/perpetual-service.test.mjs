@@ -97,7 +97,7 @@ test('latest quotes survive restart with original timestamps and delisted instru
   try {
     const filename = join(directory, 'market.sqlite');
     store = await openPerpetualStore(filename);
-    const quote = mergePerpetualQuote(null, update(), 1000);
+    const quote = { ...mergePerpetualQuote(null, update(), 1000), delisting: true, delistingAt: 200000 };
     store.save([quote]); store.close();
     store = await openPerpetualStore(filename);
     assert.deepEqual(store.load(), [quote]);
@@ -168,6 +168,43 @@ test('discovered identity changes invalidate restored prices before the first ne
   service.start(); await until(() => sockets.length === 1);
   assert.equal(service.snapshot().quotes.length, 0);
   assert.deepEqual(pruned, [[]]);
+});
+
+test('lifecycle discovery updates, persists and clears notices without reconnecting or freshening prices', async t => {
+  let now = 1000, catalog = { delisting: false, delistingAt: null }, fail = false, attempts = 0;
+  const { service, sockets, saved } = setup({ clock: () => now, discoveryIntervalMs: 20,
+    discover: async () => { attempts++; if (fail) throw Error('offline'); return [{ ...update(), ...catalog }]; },
+  });
+  t.after(() => service.stop()); service.start(); await until(() => sockets.length === 1);
+  sockets[0].open(); sockets[0].message([update()]);
+  const original = service.snapshot().quotes[0];
+  const baseline = new Map([['test:BTCUSDT', original]]);
+  now = 32000; catalog = { delisting: true, delistingAt: 200000 };
+  await until(() => service.snapshot().quotes[0].delisting === true);
+  const announced = service.snapshot().quotes[0];
+  assert.equal(announced.delistingAt, 200000);
+  assert.equal(announced.receivedAt, original.receivedAt);
+  assert.equal(announced.bidAskAt, original.bidAskAt);
+  assert.equal(service.snapshot().exchanges[0].status, 'stale');
+  assert.equal(sockets.length, 1, 'A metadata-only refresh must keep the existing WS connection');
+  const patch = createPerpetualPatch(service.snapshot(), baseline).patches[0][1];
+  assert.equal(patch.delisting, true); assert.equal(patch.delistingAt, 200000);
+  assert.equal(Object.hasOwn(patch, 'bidAskAt'), false);
+  await until(() => saved.some(quote => quote.delisting && quote.delistingAt === 200000));
+
+  // Price parsers from old subscriptions must not override newer catalog data.
+  sockets[0].message([update({ sourceTime: now, delisting: false, delistingAt: null })]);
+  assert.equal(service.snapshot().quotes[0].delisting, true);
+  fail = true; const before = attempts;
+  await until(() => attempts > before);
+  assert.equal(service.snapshot().quotes[0].delistingAt, 200000, 'A failed directory read retains the last official notice');
+
+  fail = false; catalog = { delisting: false, delistingAt: null };
+  await until(() => service.snapshot().quotes[0].delisting === false);
+  assert.equal(service.snapshot().quotes[0].delistingAt, null);
+  assert.equal(sockets.length, 1);
+  const cleared = createPerpetualPatch(service.snapshot(), baseline).patches[0][1];
+  assert.equal(cleared.delisting, false); assert.equal(cleared.delistingAt, null);
 });
 
 test('slow SSE clients resynchronize with a full frame after missing a delta', async t => {

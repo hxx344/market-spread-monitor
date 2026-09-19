@@ -10,6 +10,99 @@ function reader(handler) {
   return async (url, options) => ({ ok: true, status: 200, json: async () => handler(url, options) });
 }
 
+function directoryFixture(exchange, changes) {
+  const defaults = {
+    binance: { status: 'TRADING', contractType: 'PERPETUAL', quoteAsset: 'USDT', marginAsset: 'USDT' },
+    aster: { status: 'TRADING', contractType: 'PERPETUAL', quoteAsset: 'USDT', marginAsset: 'USDT' },
+    bybit: { status: 'Trading', contractType: 'LinearPerpetual', quoteCoin: 'USDT', settleCoin: 'USDT' },
+    okx: { state: 'live', instType: 'SWAP', ctType: 'linear', settleCcy: 'USDT' },
+    bitget: { symbolStatus: 'normal', symbolType: 'perpetual', quoteCoin: 'USDT' },
+    gate: { status: 'trading', type: 'direct' },
+  };
+  const rows = changes.map((change, i) => ({ ...defaults[exchange], symbol: `COIN${i}USDT`, baseAsset: `COIN${i}`, baseCoin: `COIN${i}`, ctValCcy: `COIN${i}`, instId: `COIN${i}-USDT-SWAP`, name: `COIN${i}_USDT`, ...change }));
+  const calls = [];
+  return { calls, fetchImpl: reader(url => {
+    calls.push(url);
+    if (exchange === 'binance' || exchange === 'aster') return url.endsWith('fundingInfo') ? [] : { symbols: rows };
+    if (exchange === 'bybit') return { retCode: 0, result: { list: rows, nextPageCursor: '' } };
+    if (exchange === 'okx') return { code: '0', data: rows };
+    if (exchange === 'bitget') return { code: '00000', data: url.endsWith('USDT-FUTURES') ? rows : [] };
+    return rows;
+  }) };
+}
+
+test('bulk directories expose scheduled delistings as UTC milliseconds without extra requests', async () => {
+  const deadline = Date.parse('2026-09-22T15:00:00+08:00');
+  const fields = { binance: 'deliveryDate', aster: 'deliveryDate', bybit: 'deliveryTime', okx: 'expTime', bitget: 'offTime', gate: 'delisted_time' };
+  for (const [exchange, field] of Object.entries(fields)) {
+    const fixture = directoryFixture(exchange, [{ [field]: String(exchange === 'gate' ? deadline / 1000 : deadline) }]);
+    const [row] = await discoverMarkets(exchange, { fetchImpl: fixture.fetchImpl, now: NOW });
+    assert.equal(row.delisting, true, exchange);
+    assert.equal(row.delistingAt, 1_790_060_400_000, exchange);
+    assert.equal(new Date(row.delistingAt).toISOString(), '2026-09-22T07:00:00.000Z');
+    assert.equal(fixture.calls.length, ['binance', 'aster', 'bitget'].includes(exchange) ? 2 : 1, exchange);
+  }
+});
+
+test('normal perpetual placeholders, missing dates and invalid data never announce delisting', async () => {
+  const fields = { binance: 'deliveryDate', aster: 'deliveryDate', bybit: 'deliveryTime', okx: 'expTime', bitget: 'offTime', gate: 'delisted_time' };
+  for (const [exchange, field] of Object.entries(fields)) {
+    const emptyValues = [undefined, null, '', ' ', '0', '-1', 'NaN', 'Infinity', '2026-09-22T07:00:00Z', 8_640_000_000_000_001];
+    if (['binance', 'aster'].includes(exchange)) emptyValues.push(4_133_404_800_000, '4133404800000');
+    const fixture = directoryFixture(exchange, emptyValues.map(value => ({ [field]: value })));
+    const rows = await discoverMarkets(exchange, { fetchImpl: fixture.fetchImpl, now: NOW });
+    assert.equal(rows.length, emptyValues.length, exchange);
+    for (const row of rows) {
+      assert.equal(row.delisting, false, `${exchange} ${row.symbol}`);
+      assert.equal(row.delistingAt, null, `${exchange} ${row.symbol}`);
+    }
+  }
+  // A far-future real date must not be dismissed by an arbitrary horizon rule.
+  for (const exchange of ['binance', 'aster']) {
+    const deadline = Date.parse('2120-01-01T00:00:00Z');
+    const fixture = directoryFixture(exchange, [{ deliveryDate: deadline }]);
+    const [row] = await discoverMarkets(exchange, { fetchImpl: fixture.fetchImpl, now: NOW });
+    assert.equal(row.delisting, true); assert.equal(row.delistingAt, deadline);
+  }
+});
+
+test('Gate preserves an explicit trading delisting flag without guessing its final deadline', async () => {
+  const fixture = directoryFixture('gate', [
+    { in_delisting: true, position_size: '12' },
+    { in_delisting: true },
+    { in_delisting: false, delisting_time: (NOW + 60000) / 1000 },
+    { in_delisting: 'false' },
+    { in_delisting: true, position_size: '0' },
+    { in_delisting: true, position_size: '10', status: 'delisting' },
+    { in_delisting: true, position_size: '10', status: 'delisted' },
+    { status: 'prelaunch' },
+    { status: 'circuit_breaker' },
+  ]);
+  const rows = await discoverMarkets('gate', { fetchImpl: fixture.fetchImpl, now: NOW });
+  assert.deepEqual(rows.map(row => row.base), ['COIN0', 'COIN1', 'COIN2', 'COIN3']);
+  assert.deepEqual(rows.map(row => row.delisting), [true, true, false, false]);
+  assert.ok(rows.every(row => row.delistingAt === null));
+});
+
+test('final deadlines and terminal states remove markets; operational maintenance is never a delisting signal', async () => {
+  const fields = { binance: 'deliveryDate', aster: 'deliveryDate', bybit: 'deliveryTime', okx: 'expTime', bitget: 'offTime', gate: 'delisted_time' };
+  const terminal = { binance: { status: 'SETTLING' }, aster: { status: 'SETTLING' }, bybit: { status: 'Closed' }, okx: { state: 'suspend' }, bitget: { symbolStatus: 'off' }, gate: { status: 'delisted' } };
+  for (const [exchange, field] of Object.entries(fields)) {
+    const scale = exchange === 'gate' ? 1000 : 1;
+    const fixture = directoryFixture(exchange, [{ [field]: (NOW - 1000) / scale }, { [field]: NOW / scale }, { [field]: (NOW + 1000) / scale }, { ...terminal[exchange], [field]: (NOW + 1000) / scale }]);
+    const rows = await discoverMarkets(exchange, { fetchImpl: fixture.fetchImpl, now: NOW });
+    assert.deepEqual(rows.map(row => row.base), ['COIN2'], exchange);
+  }
+  const fixture = directoryFixture('bitget', [
+    { maintainTime: String(NOW + 60000), limitOpenTime: String(NOW + 60000), offTime: '-1' },
+    { symbolStatus: 'maintain', maintainTime: String(NOW + 60000) },
+    { symbolStatus: 'limit_open', offTime: String(NOW + 60000) },
+    { symbolType: 'delivery', deliveryTime: String(NOW + 60000) },
+  ]);
+  const rows = await discoverMarkets('bitget', { fetchImpl: fixture.fetchImpl, now: NOW });
+  assert.equal(rows.length, 1); assert.equal(rows[0].delisting, false); assert.equal(rows[0].delistingAt, null);
+});
+
 test('normalizes explicit contract baskets without guessing arbitrary digit or namespace symbols', () => {
   assert.deepEqual(normalizeUnderlying('1000PEPE'), { base: 'PEPE', multiplier: 1000 });
   assert.deepEqual(normalizeUnderlying('1000000MOG'), { base: 'MOG', multiplier: 1000000 });
