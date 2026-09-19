@@ -1,16 +1,48 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { createServer } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createPerpetualService, mergePerpetualQuote, createPerpetualDelta } from '../server/perpetual-service.mjs';
+import { createPerpetualService, mergePerpetualQuote, createPerpetualDelta, createPerpetualPatch } from '../server/perpetual-service.mjs';
 import { openPerpetualStore } from '../server/perpetual-store.mjs';
 import { createHandler } from '../server/http.mjs';
 
 const update = (patch = {}) => ({ exchange: 'test', symbol: 'BTCUSDT', base: 'BTC', quoteCurrency: 'USDT', bid: 100, ask: 101, sourceTime: 1000, ...patch });
+
+test('field patches preserve independent prices and refresh unchanged book times without full quote payloads', () => {
+  const snapshot = quotes => ({ schemaVersion: 1, monitorId: 'perpetual', generatedAt: 1000, quotes });
+  const first = mergePerpetualQuote(null, update(), 1000), previous = new Map();
+  assert.deepEqual(createPerpetualPatch(snapshot([first]), previous).patches, [['test:BTCUSDT', first]]);
+  const repeated = mergePerpetualQuote(first, update({ sourceTime: 2000 }), 2000);
+  assert.equal(createPerpetualPatch(snapshot([repeated]), previous).patches.length, 0);
+  const changed = mergePerpetualQuote(repeated, update({ bid: 100.5, sourceTime: 2100 }), 2100);
+  const patch = createPerpetualPatch(snapshot([changed]), previous).patches[0][1];
+  assert.deepEqual(patch, { bid: 100.5, bidAt: 2100, bidAskAt: 2100, receivedAt: 2100, sourceTime: 2100 });
+  assert.equal(previous.get('test:BTCUSDT').askAt, 1000, 'Unchanged confirmations have their own cadence');
+  const confirmed = mergePerpetualQuote(changed, update({ bid: 100.5, sourceTime: 5000 }), 5000);
+  const confirmation = createPerpetualPatch(snapshot([confirmed]), previous).patches[0][1];
+  assert.equal(confirmation.bidAskAt, 5000);
+  assert.equal(confirmation.receivedAt, 5000);
+  assert.equal(Object.hasOwn(confirmation, 'base'), false);
+  assert.equal(Object.hasOwn(confirmation, 'bid'), false);
+  const fundingOnly = mergePerpetualQuote(confirmed, update({ bid: undefined, ask: undefined, fundingRate: 0.001, sourceTime: 6000 }), 6000);
+  const fundingPatch = createPerpetualPatch(snapshot([fundingOnly]), previous).patches[0][1];
+  assert.equal(fundingPatch.fundingAt, 6000);
+  assert.equal(Object.hasOwn(fundingPatch, 'bidAskAt'), false);
+  assert.deepEqual(createPerpetualPatch(snapshot([]), previous).removed, ['test:BTCUSDT']);
+});
+
+test('identity resets explicitly clear old wire price timestamps', () => {
+  const first = mergePerpetualQuote(null, update(), 1000), previous = new Map([['test:BTCUSDT', first]]);
+  const next = mergePerpetualQuote(first, update({ base: 'OTHER', bid: undefined, ask: undefined, mark: 12, sourceTime: 6000 }), 6000);
+  const patch = createPerpetualPatch({ quotes: [next] }, previous).patches[0][1];
+  assert.equal(patch.base, 'OTHER'); assert.equal(patch.bid, null); assert.equal(patch.bidAskAt, null);
+  assert.equal(previous.get('test:BTCUSDT').bidAt, null);
+});
 
 test('incremental frames send changed values, pace time confirmations and remove delisted quotes', () => {
   const first = mergePerpetualQuote(null, update(), 1000), previous = new Map();
@@ -78,6 +110,33 @@ test('latest quotes survive restart with original timestamps and delisted instru
   }
 });
 
+test('repeated market updates reuse latest rows and bound retained SQLite journal space', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'perpetual-test-'));
+  let store, inspection;
+  try {
+    const filename = join(directory, 'market.sqlite');
+    store = await openPerpetualStore(filename);
+    const values = Array.from({ length: 1000 }, (_, index) => mergePerpetualQuote(null, update({ symbol: `ASSET${index}USDT`, sourceTime: 1800000000000 }), 1800000000000));
+    store.save(values);
+    inspection = new DatabaseSync(filename);
+    inspection.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    const initialBytes = (await stat(filename)).size;
+    for (let batch = 0; batch < 60; batch++) store.save(values.map(quote => ({ ...quote, bid: 101 + batch % 2, receivedAt: 1800000000000 + batch * 15000 })));
+    assert.equal(inspection.prepare('SELECT COUNT(*) AS count FROM quotes').get().count, 1000);
+    const journalBytes = (await stat(`${filename}-wal`)).size;
+    assert.ok(journalBytes <= 4194304 + initialBytes * 2, `journal ${journalBytes} bytes exceeds checkpoint plus one batch`);
+    inspection.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    assert.ok((await stat(filename)).size <= initialBytes * 2, 'Database must not grow with update count');
+    assert.equal((await stat(`${filename}-wal`)).size, 0);
+    store.prune('test', new Set(values.slice(0, 50).map(quote => quote.symbol)));
+    assert.equal(store.load().length, 50);
+  } finally {
+    inspection?.close(); store?.close();
+    assert.ok(resolve(directory).startsWith(resolve(tmpdir()) + sep + 'perpetual-test-'));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 function setup(overrides = {}) {
   const sockets = [], saved = [];
   class Socket extends EventTarget {
@@ -131,7 +190,103 @@ test('slow SSE clients resynchronize with a full frame after missing a delta', a
   await until(() => response.packets.length > 1);
   assert.equal(response.packets[1].type, undefined);
   assert.equal(response.packets[1].quotes[0].bid, 100.5);
+  assert.ok(response.packets[1].sequence > response.packets[0].sequence);
+  assert.equal(response.packets[1].streamId, response.packets[0].streamId);
   service.closeStreams(); assert.equal(service.metrics().clients, 0);
+});
+
+test('new SSE clients align with the shared baseline after a price reverses before broadcast', async t => {
+  let now = 1000;
+  const { service, sockets } = setup({ clock: () => now, broadcastIntervalMs: 50 });
+  t.after(() => service.stop()); service.start(); await until(() => sockets.length === 1);
+  sockets[0].open(); sockets[0].message([update()]);
+  const reader = () => Object.assign(new EventEmitter(), {
+    packets: [], writableLength: 0, writableNeedDrain: false, destroyed: false, writableEnded: false,
+    writeHead() {}, write(message) { this.packets.push(JSON.parse(message.split('data: ')[1].trim())); },
+    end() { this.writableEnded = true; this.emit('close'); }, destroy() { this.destroyed = true; this.emit('close'); },
+  });
+  const existing = reader(), joining = reader();
+  service.stream({ headers: {} }, existing);
+  assert.equal(existing.packets[0].quotes[0].bid, 100);
+
+  // All three operations happen in one event-loop turn, between broadcasts.
+  now = 1100; sockets[0].message([update({ bid: 101, ask: 102, sourceTime: now })]);
+  assert.equal(service.snapshot().quotes[0].bid, 101);
+  service.stream({ headers: {} }, joining);
+  assert.equal(joining.packets[0].quotes[0].bid, 100, 'New reader starts with the already-published baseline');
+  assert.equal(joining.packets[0].quotes[0].bidAt, 1000, 'Retain the original quote time');
+  now = 1200; sockets[0].message([update({ sourceTime: now })]);
+  await until(() => existing.packets.length > 1 && joining.packets.length > 1);
+  assert.equal(existing.packets[1].type, 'patch', 'First client needs no redundant full snapshot');
+  assert.equal(joining.packets[1].type, 'patch');
+  assert.equal(joining.packets[1].baseSequence, joining.packets[0].sequence);
+  const changes = joining.packets[1].patches.find(([key]) => key === 'test:BTCUSDT')?.[1] ?? {};
+  assert.equal({ ...joining.packets[0].quotes[0], ...changes }.bid, 100);
+  assert.equal(joining.packets[1].sequence, existing.packets[1].sequence);
+  assert.equal(service.metrics().fullFrames, 2, 'Only one full snapshot per reader');
+
+  const before = joining.packets.length, baseline = joining.packets.at(-1).sequence;
+  now = 1300; sockets[0].message([update({ bid: 100.5, sourceTime: now })]);
+  await until(() => joining.packets.length > before);
+  const patch = joining.packets[before];
+  assert.equal(patch.type, 'patch'); assert.equal(patch.baseSequence, baseline);
+  assert.equal(patch.patches.find(([key]) => key === 'test:BTCUSDT')[1].bid, 100.5);
+});
+
+test('WS snapshot requests are paced and REST confirmation cannot continue after connection disposal', async t => {
+  let requests = 0, signal, resolveSnapshot;
+  const { service, sockets } = setup({ subscriptions: (_id, markets) => [{
+    url: 'wss://example.invalid', markets, poll: { messages: [{ request: 1 }, { request: 2 }], intervalMs: 20, sendIntervalMs: 5 },
+    snapshot: options => { requests++; signal = options.signal; return new Promise(resolve => { resolveSnapshot = resolve; }); },
+  }], saveIntervalMs: 10_000 });
+  t.after(() => service.stop()); service.start(); await until(() => sockets.length === 1); sockets[0].open();
+  await delay(130);
+  assert.deepEqual(sockets[0].sent.slice(0, 2).map(JSON.parse), [{ request: 1 }, { request: 2 }]);
+  await until(() => requests === 1);
+  await service.stop();
+  assert.equal(signal.aborted, true);
+  const sent = sockets[0].sent.length;
+  resolveSnapshot([update()]); await delay(30);
+  assert.equal(service.snapshot().quotes.length, 0);
+  assert.equal(sockets[0].sent.length, sent);
+  assert.equal(requests, 1);
+});
+
+test('optional book confirmations skip fresh quotes, share a host budget and back off 429 without disconnecting BBO', async t => {
+  let now = 100_000;
+  const info = symbol => ({ method: 'post', id: symbol, request: { type: 'info', payload: { type: 'l2Book', coin: symbol } } });
+  const { service, sockets } = setup({ clock: () => now, saveIntervalMs: 10_000,
+    subscriptions: (_id, markets) => [0, 1].map(() => ({
+      url: 'wss://shared.example.invalid', markets, sendIntervalMs: 1,
+      poll: { messages: [info('BTCUSDT'), info('MISSING')], intervalMs: 10, sendIntervalMs: 1, staleBookAfterMs: 15_000, maxPerMinute: 60 },
+    })),
+  });
+  t.after(() => service.stop()); service.start(); await until(() => sockets.length === 2);
+  for (const socket of sockets) { socket.open(); socket.message([update({ sourceTime: now })]); }
+  await until(() => sockets.some(socket => socket.sent.length));
+  const sent = sockets.flatMap(socket => socket.sent).map(JSON.parse);
+  assert.equal(sent.length, 1, 'Only one host-wide request is allowed in a one-second slot');
+  assert.equal(sent[0].request.payload.coin, 'MISSING', 'Fresh BBO never needs a redundant info request');
+  sockets[0].message({ channel: 'post', data: { response: { type: 'error', payload: '429 Too Many Requests' } } });
+  now += 1000;
+  for (const socket of sockets) socket.message([update({ sourceTime: now, bid: 100.5 })]);
+  await delay(35);
+  assert.equal(sockets.length, 2); assert.ok(sockets.every(socket => socket.readyState === 1));
+  assert.equal(sockets.reduce((total, socket) => total + socket.sent.length, 0), 1);
+  assert.equal(service.snapshot().quotes[0].bid, 100.5, 'Main BBO remains active during optional request backoff');
+  assert.match(service.metrics().venues[0].lastProtocolError, /429/);
+  assert.ok(service.metrics().auxiliary[0].retryAt > now);
+});
+
+test('healthy main WS cannot hide a failing whole-market REST confirmation', async t => {
+  const { service, sockets } = setup({ subscriptions: (_id, markets) => [{ url: 'wss://example.invalid', markets,
+    snapshot: async () => { throw Error('temporarily unreachable'); }, snapshotIntervalMs: 10_000,
+  }] });
+  t.after(() => service.stop()); service.start(); await until(() => sockets.length === 1); sockets[0].open();
+  await until(() => /快照/.test(service.snapshot().exchanges[0].error ?? ''));
+  sockets[0].message([update({ sourceTime: Date.now() })]);
+  assert.equal(service.snapshot().exchanges[0].status, 'live');
+  assert.match(service.snapshot().exchanges[0].error, /盘口补充快照/);
 });
 
 test('collector runs without readers, rejects bad clocks, persists updates and reconnects with fresh context', async t => {
@@ -162,6 +317,15 @@ test('empty and crossed BBOs do not count as fresh market coverage', async t => 
   assert.equal(service.snapshot().exchanges[0].quoteCount, 0);
   sockets[0].message([update({ bid: 103, ask: 101 })]);
   assert.equal(service.snapshot().exchanges[0].quoteCount, 0);
+});
+
+test('restored quotes from a future server clock never count as live coverage', async t => {
+  const future = mergePerpetualQuote(null, update({ sourceTime: 100_000 }), 100_000);
+  const { service, sockets } = setup({ clock: () => 1000, store: { load: () => [future], prune() {}, close() {} } });
+  t.after(() => service.stop()); service.start(); await until(() => sockets.length === 1); sockets[0].open();
+  const view = service.snapshot().exchanges[0];
+  assert.equal(view.quoteCount, 0); assert.equal(view.freshBookCount, 0); assert.equal(view.missingBookCount, 1);
+  assert.equal(view.status, 'stale');
 });
 
 test('failed delisting cleanup retries even without new quote writes', async t => {

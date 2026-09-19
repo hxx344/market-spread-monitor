@@ -12,6 +12,9 @@ export interface PerpetualExchange {
   quoteCount: number;
   lastMessageAt: number | null;
   error: string | null;
+  freshBookCount?: number;
+  staleBookCount?: number;
+  missingBookCount?: number;
 }
 
 export interface PerpetualQuote {
@@ -28,7 +31,7 @@ export interface PerpetualQuote {
   nextFundingAt: number | null;
   sourceTime: number | null;
   receivedAt: number;
-  transport: "ws";
+  transport: "ws" | "rest";
   bidAskAt?: number;
   markAt?: number;
   fundingAt?: number;
@@ -49,11 +52,22 @@ export interface PerpetualSnapshot {
   error?: string | null;
   note?: string | null;
   storageError?: string | null;
+  streamId?: string;
+  sequence?: number;
 }
 
 export interface PerpetualDelta extends Omit<PerpetualSnapshot, "quotes"> {
   type: "delta";
   updates: PerpetualQuote[];
+  removed: string[];
+}
+
+export interface PerpetualPatch extends Omit<PerpetualSnapshot, "quotes"> {
+  type: "patch";
+  streamId: string;
+  baseSequence: number;
+  sequence: number;
+  patches: [string, { [K in keyof PerpetualQuote]?: PerpetualQuote[K] | null }][];
   removed: string[];
 }
 

@@ -44,7 +44,8 @@ test('subscriptions use BBO streams, bounded batches, heartbeat and correct mark
   const entropy = await discoverAdditionalMarkets('entropy', { fetchImpl: response(entropyData) });
   const first = createAdditionalSubscriptions('rh-lighter', [...rh, ...entropy])[0];
   assert.equal(first.url, 'wss://api.rh.lighter.xyz/stream?readonly=true');
-  assert.deepEqual(first.subscribe.slice(0, 2), [{ type: 'subscribe', channel: 'market_stats/all' }, { type: 'subscribe', channel: 'ticker/0' }]);
+  assert.deepEqual(first.subscribe, [{ type: 'subscribe', channel: 'market_stats/all' }]);
+  assert.deepEqual(first.poll.messages, [{ type: 'unsubscribe', channel: 'market_stats/all' }, { type: 'subscribe', channel: 'market_stats/all' }]);
   assert.deepEqual(getAdditionalControlResponse('rh-lighter', { type: 'ping' }), { type: 'pong' });
   const second = createAdditionalSubscriptions('entropy', [...rh, ...entropy])[0];
   assert.equal(second.url, 'wss://api.hyperliquid.xyz/ws');
@@ -70,7 +71,8 @@ test('rh-Lighter BBO timestamps, zero-sized removal and funding percentage stay 
   const [current] = parseAdditionalMessage('rh-lighter', stats, markets);
   assert.ok(Math.abs(current.fundingRate - 0.000012) < 1e-15);
   assert.equal(current.fundingIntervalHours, 1);
-  assert.equal(Object.hasOwn(current, 'bid'), false);
+  assert.equal(current.bid, 2600);
+  assert.equal(Object.hasOwn(current, 'ask'), false);
   stats.market_stats[0].current_funding_rate = '0';
   assert.equal(parseAdditionalMessage('rh-lighter', stats, markets)[0].fundingRate, 0);
   assert.deepEqual(parseAdditionalMessage('rh-lighter', { ...bbo, ticker: { ...bbo.ticker, s: 'BTC' } }, markets), []);
@@ -97,4 +99,21 @@ test('Entropy accepts only its own BBO and context without inventing quote or ev
   assert.equal(ctx.sourceTime, null);
   assert.equal(Object.hasOwn(ctx, 'bid'), false);
   assert.equal(Object.hasOwn(ctx, 'last'), false);
+});
+
+test('additional cached lookups, partial stats and exact WS snapshot confirmations retain semantics', async () => {
+  const rh = await discoverAdditionalMarkets('rh-lighter', { fetchImpl: response(rhData) });
+  const context = {};
+  const stats = { channel: 'market_stats:all', type: 'update/market_stats', timestamp: 1789825430000, market_stats: { 0: { symbol: 'ETH', market_id: 0, mark_price: '100' } } };
+  const [mark] = parseAdditionalMessage('rh-lighter', stats, rh, 1789825430000, context);
+  assert.equal(Object.hasOwn(mark, 'bid'), false);
+  const index = context.marketIdIndex;
+  parseAdditionalMessage('rh-lighter', stats, rh, 1789825430000, context);
+  assert.equal(context.marketIdIndex, index);
+  const entropy = await discoverAdditionalMarkets('entropy', { fetchImpl: response(entropyData) });
+  const snapshot = { channel: 'post', data: { response: { type: 'info', payload: { type: 'l2Book', data: { coin: 'io:SNDK', time: 1789825430000, levels: [[{ px: '100.01', sz: '1' }], []] } } } } };
+  const [book] = parseAdditionalMessage('entropy', snapshot, entropy);
+  assert.equal(book.bid, 100.01); assert.equal(book.ask, null); assert.equal(book.sourceTime, 1789825430000);
+  assert.throws(() => parseAdditionalMessage('entropy', { channel: 'post', data: { response: { type: 'error', payload: '429' } } }, entropy), /429/);
+  assert.throws(() => parseAdditionalMessage('rh-lighter', { error: { code: 30003, message: 'Already Subscribed' } }, rh), /Already Subscribed/);
 });

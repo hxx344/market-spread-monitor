@@ -23,9 +23,10 @@ const STABLE_QUOTES = new Set(['USDT', 'USDC', 'USD1']);
 const SCALED_BASES = new Set(['PEPE', 'SHIB', 'BONK', 'FLOKI', 'LUNC', 'XEC', 'SATS', 'RATS', 'CAT', 'CHEEMS', 'BABYDOGE', 'WHY', 'MOG', 'TOSHI', 'NOT', 'BTT', 'DOGS', 'TURBO', 'MUMU', 'NEIRO', 'APU']);
 const HL_SCALED = new Set(['kPEPE', 'kSHIB', 'kBONK', 'kFLOKI', 'kLUNC', 'kDOGS']);
 const VERIFIED_US_SHARES = new Set(['SNDK', 'NBIS', 'GPRO', 'IONQ']);
+const ADDITIONAL_IDS = new Set(ADDITIONAL_EXCHANGES.map(exchange => exchange.id));
 
 function number(value, positive = false) {
-  if ((typeof value !== 'number' && typeof value !== 'string') || String(value).trim() === '') return null;
+  if (typeof value !== 'number' && (typeof value !== 'string' || value.trim() === '')) return null;
   const result = Number(value);
   return Number.isFinite(result) && (!positive || result > 0) ? result : null;
 }
@@ -122,7 +123,7 @@ async function request(url, { fetchImpl, signal }, body) {
 /** Dynamic discovery includes active, stablecoin quoted perpetual contracts only. */
 export async function discoverMarkets(exchangeId, { fetchImpl = fetch, signal } = {}) {
   const options = { fetchImpl, signal };
-  if (ADDITIONAL_EXCHANGES.some(exchange => exchange.id === exchangeId)) return discoverAdditionalMarkets(exchangeId, options);
+  if (ADDITIONAL_IDS.has(exchangeId)) return discoverAdditionalMarkets(exchangeId, options);
   let rows;
   if (exchangeId === 'binance' || exchangeId === 'aster') {
     const host = exchangeId === 'binance' ? 'https://fapi.binance.com' : 'https://fapi.asterdex.com';
@@ -199,25 +200,36 @@ function connection(url, markets, subscribe, extra = {}) {
 
 /** Each spec is independent; reconnect with a fresh context. sendIntervalMs applies
  * to subscription messages. startDelayMs also staggers IP-wide subscription limits.
- * Node's native WebSocket answers protocol ping frames automatically.
+ * poll.messages is a paced, non-overlapping WS request cycle. snapshot(options)
+ * returns optional REST BBO updates; snapshotIntervalMs is the refresh interval.
+ * A venue-wide snapshot is attached to just one spec and may include other shards.
+ * The WebSocket transport must answer protocol ping frames automatically.
  */
 export function createSubscriptions(exchangeId, inputMarkets) {
-  if (ADDITIONAL_EXCHANGES.some(exchange => exchange.id === exchangeId)) return createAdditionalSubscriptions(exchangeId, inputMarkets);
+  if (ADDITIONAL_IDS.has(exchangeId)) return createAdditionalSubscriptions(exchangeId, inputMarkets);
   const markets = inputMarkets.filter(row => row.exchange === exchangeId);
   if (!markets.length) return [];
   if (exchangeId === 'binance') {
     return [
-      ...chunks(markets, 180).map((group, index) => connection('wss://fstream.binance.com/public/ws', group, [{ method: 'SUBSCRIBE', params: group.map(row => `${row.symbol.toLowerCase()}@bookTicker`), id: `bbo-${index}` }], { startDelayMs: index * 350 })),
-      connection('wss://fstream.binance.com/market/ws', markets, [{ method: 'SUBSCRIBE', params: ['!markPrice@arr@1s'], id: 'funding' }]),
+      // Official all-symbol BBO is sampled every 5s instead of streaming every
+      // change of every contract to a small monitoring host.
+      connection('wss://fstream.binance.com/public/ws', markets, [{ method: 'SUBSCRIBE', params: ['!bookTicker'], id: 'bbo' }]),
+      connection('wss://fstream.binance.com/market/ws', markets, [{ method: 'SUBSCRIBE', params: ['!markPrice@arr'], id: 'funding' }]),
     ];
   }
   if (exchangeId === 'aster') {
-    return chunks(markets, 90).map((group, index) => connection('wss://fstream.asterdex.com/ws', group,
-      [{ method: 'SUBSCRIBE', params: group.flatMap(row => [`${row.symbol.toLowerCase()}@bookTicker`, `${row.symbol.toLowerCase()}@markPrice`]), id: index + 1 }], { startDelayMs: index * 350 }));
+    // Unlike Binance, Aster's all-BBO stream is still real-time. Its bulk REST
+    // book is the resource-bounded fallback; funding remains a 3s WS stream.
+    return [connection('wss://fstream.asterdex.com/ws', markets,
+      [{ method: 'SUBSCRIBE', params: ['!markPrice@arr'], id: 1 }],
+      { snapshot: options => fetchBookSnapshots(exchangeId, markets, options), snapshotIntervalMs: 5_000 })];
   }
   if (exchangeId === 'bybit') {
     return chunks(markets, 150).map((group, index) => connection('wss://stream.bybit.com/v5/public/linear', group,
-      chunks(group, 30).map(batch => ({ op: 'subscribe', args: batch.flatMap(row => [`tickers.${row.symbol}`, `orderbook.1.${row.symbol}`]) })), { heartbeat: { op: 'ping' }, heartbeatMs: 20_000, startDelayMs: index * 350 }));
+      chunks(group, 30).map(batch => ({ op: 'subscribe', args: batch.map(row => `tickers.${row.symbol}`) })), { heartbeat: { op: 'ping' }, heartbeatMs: 20_000, startDelayMs: index * 350,
+        // One snapshot for the entire venue confirms unchanged ticker fields,
+        // avoiding the duplicate 10ms level-1 subscription for every symbol.
+        ...(index === 0 ? { snapshot: options => fetchBookSnapshots(exchangeId, markets, options), snapshotIntervalMs: 5_000 } : {}) }));
   }
   if (exchangeId === 'okx') {
     return chunks(markets, 60).map((group, index) => connection('wss://ws.okx.com:8443/ws/v5/public', group,
@@ -225,26 +237,38 @@ export function createSubscriptions(exchangeId, inputMarkets) {
       { heartbeat: 'ping', heartbeatMs: 20_000, startDelayMs: index * 400 }));
   }
   if (exchangeId === 'bitget') {
-    return chunks(markets, 45).map((group, index) => connection('wss://ws.bitget.com/v2/ws/public', group,
-      chunks(group, 20).map(batch => ({ op: 'subscribe', args: batch.map(row => ({ instType: row.productType || `${row.quoteCurrency}-FUTURES`, channel: 'ticker', instId: row.symbol })) })),
-      { heartbeat: 'ping', heartbeatMs: 25_000, startDelayMs: index * 400 }));
+    // Bitget ticker has no documented slower WS interval. Keep major contracts
+    // streaming, and refresh every discovered contract via a 5s bulk snapshot.
+    const priority = new Set(['BTCUSDT', 'ETHUSDT', 'SOLUSDT']);
+    const streaming = markets.filter(row => priority.has(row.symbol));
+    if (!streaming.length) streaming.push(markets[0]);
+    return [connection('wss://ws.bitget.com/v2/ws/public', markets,
+      [{ op: 'subscribe', args: streaming.map(row => ({ instType: row.productType || `${row.quoteCurrency}-FUTURES`, channel: 'ticker', instId: row.symbol })) }],
+      { heartbeat: 'ping', heartbeatMs: 25_000, snapshot: options => fetchBookSnapshots(exchangeId, markets, options), snapshotIntervalMs: 5_000 })];
   }
   if (exchangeId === 'gate') {
     return chunks(markets, 150).map((group, index) => connection('wss://fx-ws.gateio.ws/v4/ws/usdt', group,
       ['futures.book_ticker', 'futures.tickers'].map(channel => ({ time: Math.floor(Date.now() / 1000), channel, event: 'subscribe', payload: group.map(row => row.symbol) })),
-      { heartbeat: { channel: 'futures.ping' }, heartbeatMs: 20_000, startDelayMs: index * 400 }));
+      { headers: { 'X-Gate-Size-Decimal': '1' }, heartbeat: { channel: 'futures.ping' }, heartbeatMs: 20_000, startDelayMs: index * 400 }));
   }
   if (exchangeId === 'hyperliquid') {
     // Native crypto universe only; <= 1000 combined subscriptions per IP.
     return chunks(markets, 150).map((group, index) => connection('wss://api.hyperliquid.xyz/ws', group,
       group.flatMap(row => ['bbo', 'activeAssetCtx'].map(type => ({ method: 'subscribe', subscription: { type, coin: row.symbol } }))),
-      { heartbeat: { method: 'ping' }, heartbeatMs: 25_000, sendIntervalMs: 120, startDelayMs: index * 150 * 2 * 120 }));
+      { heartbeat: { method: 'ping' }, heartbeatMs: 25_000, sendIntervalMs: 120, startDelayMs: index * 150 * 2 * 120,
+        // Only confirm missing or inactive books; full-universe auxiliary
+        // polling produced real 429s. The service shares this 60/min budget
+        // with Entropy by host and backs off polling without dropping BBO.
+        // Preserve exact ticks by omitting nSigFigs/mantissa aggregation.
+        poll: { messages: group.map((row, id) => ({ method: 'post', id, request: { type: 'info', payload: { type: 'l2Book', coin: row.symbol } } })), intervalMs: 20_000, sendIntervalMs: 100, staleBookAfterMs: 15_000, maxPerMinute: 60 } }));
   }
   if (exchangeId === 'lighter') {
-    // 200 client messages/minute/IP; single stream for stats, paced BBO subscriptions.
-    return chunks(markets, 450).map((group, index) => connection('wss://mainnet.zklighter.elliot.ai/stream', group,
-      [{ type: 'subscribe', channel: 'market_stats/all' }, ...group.map(row => ({ type: 'subscribe', channel: `ticker/${row.marketId}` }))],
-      { heartbeat: { type: 'ping' }, heartbeatMs: 30_000, sendIntervalMs: 400, startDelayMs: index * 451 * 400 }));
+    // Stats contains real BBO prices. A fresh snapshot of unchanged markets
+    // uses only two client messages every 10s, below the 200/minute IP cap.
+    return [connection('wss://mainnet.zklighter.elliot.ai/stream', markets,
+      [{ type: 'subscribe', channel: 'market_stats/all' }],
+      { heartbeat: { type: 'ping' }, heartbeatMs: 30_000, sendIntervalMs: 400,
+        poll: { messages: [{ type: 'unsubscribe', channel: 'market_stats/all' }, { type: 'subscribe', channel: 'market_stats/all' }], intervalMs: 10_000, sendIntervalMs: 400 } })];
   }
   throw new Error(`Unsupported exchange: ${exchangeId}`);
 }
@@ -256,8 +280,10 @@ function decode(payload) {
 
 export function getControlResponse(exchangeId, payload) {
   if (payload === 'ping' && ['okx', 'bitget'].includes(exchangeId)) return 'pong';
+  // Do not JSON-parse every data frame a second time just to look for pings.
+  if (exchangeId !== 'lighter' && exchangeId !== 'rh-lighter') return null;
   const data = decode(payload);
-  if (ADDITIONAL_EXCHANGES.some(exchange => exchange.id === exchangeId)) return getAdditionalControlResponse(exchangeId, data);
+  if (exchangeId === 'rh-lighter') return getAdditionalControlResponse(exchangeId, data);
   if (exchangeId === 'lighter' && data?.type === 'ping') return { type: 'pong' };
   return null;
 }
@@ -267,8 +293,9 @@ function bestPrice(value, size) {
 }
 
 function checkProtocolError(exchangeId, message) {
-  if (message.error || message.success === false || message.event === 'error' || message.type === 'error' || message.channel === 'error' || (message.code !== undefined && !['0', '00000', '200'].includes(String(message.code)))) {
-    const detail = message.msg || message.ret_msg || message.retMsg || message.message || message.error?.message || message.error || message.data || message.code;
+  const postError = message.channel === 'post' && message.data?.response?.type === 'error';
+  if (message.error || postError || message.success === false || message.result?.status === 'fail' || message.data?.failTopics?.length || message.event === 'error' || message.type === 'error' || message.channel === 'error' || ((exchangeId === 'binance' || exchangeId === 'aster') && message.code !== undefined) || (message.retCode !== undefined && Number(message.retCode) !== 0) || (message.code !== undefined && !['0', '00000', '200'].includes(String(message.code)))) {
+    const detail = message.msg || message.ret_msg || message.retMsg || message.message || message.error?.message || message.error || message.data?.response?.payload || message.data || message.code || message.result;
     throw new Error(`${exchangeId} WebSocket: ${String(typeof detail === 'object' ? JSON.stringify(detail) : detail).slice(0, 300)}`);
   }
 }
@@ -277,16 +304,74 @@ function quote(row, receivedAt, sourceTime, fields) {
   if (!row) return null;
   const result = { id: row.id || `${row.exchange}:${row.symbol}`, exchange: row.exchange, symbol: row.symbol, base: row.base, quoteCurrency: row.quoteCurrency, multiplier: row.multiplier || 1, receivedAt, sourceTime: timestamp(sourceTime), transport: 'ws' };
   for (const key of ['displayBase', 'assetClass', 'comparable', 'contractUnit', 'identitySource']) if (row[key] !== undefined) result[key] = row[key];
-  const metadataFields = Object.keys(result).length;
+  let hasFields = false;
   for (const [key, raw] of Object.entries(fields)) {
     if (raw === undefined) continue;
+    hasFields = true;
     if (['bid', 'ask', 'mark', 'last'].includes(key)) {
       const value = number(raw, true);
       result[key] = value === null ? null : value / result.multiplier;
     } else result[key] = raw === null ? null : number(raw);
   }
-  if (Object.keys(result).length === metadataFields) return null;
+  if (!hasFields) return null;
   return result;
+}
+
+/** Low-frequency confirmation of actual best bid/ask, never mark or last.
+ * Bybit includes response-generation time. Aster's per-row time is explicitly
+ * transaction time: retain it even if old; do not re-stamp with local now.
+ * https://bybit-exchange.github.io/docs/v5/market/tickers
+ * https://asterdex.github.io/aster-api-website/futures/market-data/#symbol-order-book-ticker
+ * Bitget's per-row ts is the current data timestamp, requestTime the server
+ * response timestamp. Keep an older row ts; never replace it with local now.
+ * https://www.bitget.com/docs/catalog/classic-contract-market
+ */
+export async function fetchBookSnapshots(exchangeId, markets, { fetchImpl = fetch, signal, now = Date.now() } = {}) {
+  const bySymbol = new Map();
+  for (const row of markets) if (row.exchange === exchangeId) bySymbol.set(row.symbol, row);
+  const options = { fetchImpl, signal };
+  if (exchangeId === 'bitget') {
+    const products = [...new Set([...bySymbol.values()].map(row => row.productType || `${row.quoteCurrency}-FUTURES`))];
+    const results = await Promise.allSettled(products.map(async product => {
+      const data = await request(`https://api.bitget.com/api/v2/mix/market/tickers?productType=${encodeURIComponent(product)}`, options);
+      return { rows: assertArray(data.data, exchangeId), responseTime: timestamp(data.requestTime) };
+    }));
+    if (results.every(result => result.status === 'rejected')) throw results[0].reason;
+    const updates = [];
+    for (const result of results) {
+      if (result.status !== 'fulfilled') continue;
+      for (const row of result.value.rows) {
+        const market = bySymbol.get(row.symbol);
+        if (!market) continue;
+        const update = quote(market, now, timestamp(row.ts) ?? result.value.responseTime, {
+          bid: bestPrice(row.bidPr, row.bidSz), ask: bestPrice(row.askPr, row.askSz),
+          mark: row.markPrice, last: row.lastPr, fundingRate: row.fundingRate,
+          fundingIntervalHours: row.fundingRate === undefined ? undefined : market.fundingIntervalHours,
+          nextFundingAt: row.nextFundingTime,
+        });
+        if (update) { update.transport = 'rest'; updates.push(update); }
+      }
+    }
+    return updates;
+  }
+  let rows, responseTime = null;
+  if (exchangeId === 'bybit') {
+    const data = await request('https://api.bybit.com/v5/market/tickers?category=linear', options);
+    rows = assertArray(data.result?.list, exchangeId); responseTime = timestamp(data.time);
+  } else if (exchangeId === 'aster') {
+    rows = assertArray(await request('https://fapi.asterdex.com/fapi/v1/ticker/bookTicker', options), exchangeId);
+  } else throw new Error(`Unsupported book snapshot: ${exchangeId}`);
+  const updates = [];
+  for (const row of rows) {
+    const market = bySymbol.get(row.symbol);
+    if (!market) continue;
+    const fields = exchangeId === 'bybit'
+      ? { bid: bestPrice(row.bid1Price, row.bid1Size), ask: bestPrice(row.ask1Price, row.ask1Size) }
+      : { bid: bestPrice(row.bidPrice, row.bidQty), ask: bestPrice(row.askPrice, row.askQty) };
+    const update = quote(market, now, exchangeId === 'bybit' ? responseTime : row.time, fields);
+    if (update) { update.transport = 'rest'; updates.push(update); }
+  }
+  return updates;
 }
 
 /** Source timestamps retain exchange semantics. null means the channel does not
@@ -296,8 +381,13 @@ export function parseMessage(exchangeId, payload, markets, receivedAt = Date.now
   const decoded = decode(payload);
   if (!decoded) return [];
   checkProtocolError(exchangeId, decoded);
-  if (ADDITIONAL_EXCHANGES.some(exchange => exchange.id === exchangeId)) return parseAdditionalMessage(exchangeId, decoded, markets, receivedAt, context);
-  const bySymbol = context.marketIndex ||= new Map(markets.filter(row => row.exchange === exchangeId).map(row => [row.symbol, row]));
+  if (ADDITIONAL_IDS.has(exchangeId)) return parseAdditionalMessage(exchangeId, decoded, markets, receivedAt, context);
+  if (context.indexMarkets !== markets || context.indexExchange !== exchangeId) {
+    context.indexMarkets = markets; context.indexExchange = exchangeId;
+    context.marketIndex = new Map(); context.marketIdIndex = new Map();
+    for (const row of markets) if (row.exchange === exchangeId) { context.marketIndex.set(row.symbol, row); if (row.marketId !== undefined) context.marketIdIndex.set(String(row.marketId), row); }
+  }
+  const bySymbol = context.marketIndex;
   const out = [];
   const add = (symbol, time, fields) => { const item = quote(bySymbol.get(symbol), receivedAt, time, fields); if (item) out.push(item); };
   if (exchangeId === 'binance' || exchangeId === 'aster') {
@@ -349,9 +439,13 @@ export function parseMessage(exchangeId, payload, markets, receivedAt = Date.now
   } else if (exchangeId === 'hyperliquid') {
     const row = decoded.data;
     if (decoded.channel === 'bbo' && row && Array.isArray(row.bbo)) add(row.coin, row.time, { bid: bestPrice(row.bbo[0]?.px ?? null, row.bbo[0]?.sz), ask: bestPrice(row.bbo[1]?.px ?? null, row.bbo[1]?.sz) });
+    else if (decoded.channel === 'post' && row?.response?.type === 'info' && row.response.payload?.type === 'l2Book') {
+      const book = row.response.payload.data;
+      if (Array.isArray(book?.levels) && book.levels.length === 2) add(book.coin, book.time, { bid: bestPrice(book.levels[0]?.[0]?.px ?? null, book.levels[0]?.[0]?.sz), ask: bestPrice(book.levels[1]?.[0]?.px ?? null, book.levels[1]?.[0]?.sz) });
+    }
     else if (decoded.channel === 'activeAssetCtx' && row?.ctx) add(row.coin, null, { mark: row.ctx.markPx, fundingRate: row.ctx.funding, fundingIntervalHours: 1, nextFundingAt: Math.floor(receivedAt / HOUR + 1) * HOUR });
   } else if (exchangeId === 'lighter') {
-    const byMarket = context.marketIdIndex ||= new Map(markets.filter(row => row.exchange === exchangeId).map(row => [String(row.marketId), row]));
+    const byMarket = context.marketIdIndex;
     if (decoded.channel?.startsWith('ticker:') && decoded.ticker) {
       const row = decoded.ticker, m = byMarket.get(decoded.channel.split(':')[1]);
       if (m && (row.s === undefined || row.s === m.symbol)) add(m.symbol, decoded.timestamp ?? timestamp(row.last_updated_at ?? decoded.last_updated_at, 'us'), { bid: bestPrice(row.b?.price ?? null, row.b?.size), ask: bestPrice(row.a?.price ?? null, row.a?.size) });
@@ -361,11 +455,11 @@ export function parseMessage(exchangeId, payload, markets, receivedAt = Date.now
       for (const row of entries) {
         if (!row || typeof row !== 'object') continue;
         const m = byMarket.get(String(row.market_id));
-        if (!m) continue;
+        if (!m || (row.symbol !== undefined && row.symbol !== m.symbol)) continue;
         // Stats rates are percentage points, hourly. Last paid funding_rate is
         // intentionally not substituted for estimated current_funding_rate.
         const rate = number(row.current_funding_rate);
-        add(m.symbol, decoded.timestamp, { mark: row.mark_price, last: row.last_trade_price, fundingRate: row.current_funding_rate === undefined ? undefined : rate === null ? null : rate / 100,
+        add(m.symbol, decoded.timestamp, { bid: row.best_bid_price, ask: row.best_ask_price, mark: row.mark_price, last: row.last_trade_price, fundingRate: row.current_funding_rate === undefined ? undefined : rate === null ? null : rate / 100,
           fundingIntervalHours: 1, nextFundingAt: Math.floor((timestamp(decoded.timestamp) || receivedAt) / HOUR + 1) * HOUR });
       }
     }

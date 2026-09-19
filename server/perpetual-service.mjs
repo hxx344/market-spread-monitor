@@ -1,11 +1,45 @@
 import { EXCHANGES, discoverMarkets, createSubscriptions, parseMessage, getControlResponse } from '../modules/perpetual/exchanges.mjs';
 import { createGzip, constants as zlibConstants } from 'node:zlib';
+import { randomUUID } from 'node:crypto';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
+import { PerpetualWebSocket } from './perpetual-socket.mjs';
 
 export const PERPETUAL_STALE_MS = 30_000;
 const MAX_FUTURE_MS = 5_000;
 const fields = ['bid', 'ask', 'mark', 'last', 'fundingRate', 'fundingIntervalHours', 'nextFundingAt'];
 const priceFields = new Set(['bid', 'ask', 'mark', 'last']);
-const streamValueFields = [...fields, 'base', 'quoteCurrency', 'multiplier', 'displayBase', 'contractUnit', 'collateralCurrency', 'comparable'];
+const streamValueFields = [...fields, 'base', 'quoteCurrency', 'multiplier', 'displayBase', 'contractUnit', 'collateralCurrency', 'comparable', 'transport'];
+const streamTimeFields = ['bidAt', 'askAt', 'bidAskAt', 'markAt', 'lastAt', 'fundingAt', 'fundingIntervalHoursUpdatedAt', 'nextFundingAtUpdatedAt', 'receivedAt', 'sourceTime'];
+
+/** Only changed fields cross the wire. The retained baseline is exactly what readers received. */
+export function createPerpetualPatch(snapshot, previous, freshnessMs = 5_000) {
+  const patches = [], seen = new Set();
+  for (const quote of snapshot.quotes) {
+    const key = `${quote.exchange}:${quote.symbol}`, old = previous.get(key);
+    seen.add(key);
+    if (old === quote) continue;
+    if (!old) { patches.push([key, quote]); previous.set(key, quote); continue; }
+    const changes = {};
+    for (const field of streamValueFields) if (old[field] !== quote[field]) changes[field] = quote[field] ?? null;
+    const confirmed = Math.floor(quote.receivedAt / freshnessMs) > Math.floor(old.receivedAt / freshnessMs);
+    // A price change includes its own original timestamp. Unchanged book/mark/rate
+    // confirmations stay paced even when an unrelated last-trade price changes.
+    for (const field of streamTimeFields) {
+      const valueField = field === 'fundingAt' ? 'fundingRate' : field.endsWith('UpdatedAt') ? field.slice(0, -9) : field.slice(0, -2);
+      const changed = Object.hasOwn(changes, valueField) || (field === 'bidAskAt' && (Object.hasOwn(changes, 'bid') || Object.hasOwn(changes, 'ask')));
+      if ((confirmed || changed) && old[field] !== quote[field]) changes[field] = quote[field] ?? null;
+    }
+    if (!Object.keys(changes).length) continue;
+    // Receipt time is transport metadata, never a substitute for field timestamps.
+    changes.receivedAt = quote.receivedAt;
+    if (old.sourceTime !== quote.sourceTime) changes.sourceTime = quote.sourceTime;
+    patches.push([key, changes]); previous.set(key, { ...old, ...changes });
+  }
+  const removed = [];
+  for (const key of previous.keys()) if (!seen.has(key)) { removed.push(key); previous.delete(key); }
+  const metadata = { ...snapshot }; delete metadata.quotes;
+  return { ...metadata, type: 'patch', patches, removed };
+}
 
 /** Shared incremental frame, preserving actual field times while pacing unchanged price confirmations. */
 export function createPerpetualDelta(snapshot, previous, freshnessMs = 5_000) {
@@ -54,15 +88,17 @@ export function mergePerpetualQuote(previous, update, now = Date.now()) {
   next.bidAskAt = Number.isFinite(next.bidAt) && Number.isFinite(next.askAt) ? Math.min(next.bidAt, next.askAt) : undefined;
   next.receivedAt = now;
   next.sourceTime = sourceTime;
+  next.transport = update.transport === 'rest' ? 'rest' : 'ws';
   return next;
 }
 
-export function createPerpetualService({ store, exchanges = EXCHANGES, discover = discoverMarkets, subscriptions = createSubscriptions, parse = parseMessage, control = getControlResponse, WebSocketImpl = globalThis.WebSocket, clock = Date.now, staleAfterMs = PERPETUAL_STALE_MS, retryMs = 5_000, discoveryIntervalMs = 30 * 60_000, saveIntervalMs = 5_000, broadcastIntervalMs = 1_000 } = {}) {
-  const quotes = new Map(), dirty = new Map(), pendingPrunes = new Map(), connections = new Set(), clients = new Map(), timers = new Set(), discoveries = new Map(), publishedQuotes = new Map();
-  const states = new Map(exchanges.map(exchange => [exchange.id, { ...exchange, kind: exchange.kind ?? exchange.type, marketCount: 0, lastMessageAt: null, error: null, discovering: false }]));
-  let running = false, storageError = null, broadcastTimer, saveTimer, refreshTimer;
-  let lastFullFrameAt = 0;
-  const metrics = { lastWriteMs: 0, lastPublishMs: 0, frames: 0, fullFrames: 0, frameBytes: 0, lastFrameUpdates: 0 };
+export function createPerpetualService({ store, exchanges = EXCHANGES, discover = discoverMarkets, subscriptions = createSubscriptions, parse = parseMessage, control = getControlResponse, WebSocketImpl = PerpetualWebSocket, clock = Date.now, staleAfterMs = PERPETUAL_STALE_MS, retryMs = 5_000, discoveryIntervalMs = 30 * 60_000, saveIntervalMs = 15_000, broadcastIntervalMs = 1_000, watchdogIntervalMs = 10_000, quoteTimeoutMs = 45_000 } = {}) {
+  const quotes = new Map(), dirty = new Map(), pendingPrunes = new Map(), connections = new Set(), clients = new Map(), timers = new Set(), discoveries = new Map(), publishedQuotes = new Map(), pollBudgets = new Map();
+  const states = new Map(exchanges.map(exchange => [exchange.id, { ...exchange, kind: exchange.kind ?? exchange.type, marketCount: 0, lastMessageAt: null, lastSourceLagMs: null, rejectedFuture: 0, error: null, discovering: false }]));
+  let running = false, storageError = null, broadcastTimer, saveTimer, refreshTimer, metricsTimer, sequence = 0;
+  const streamId = randomUUID(), eventLoop = monitorEventLoopDelay({ resolution: 20 });
+  const metrics = { lastWriteMs: 0, lastPublishMs: 0, frames: 0, fullFrames: 0, frameBytes: 0, lastFrameUpdates: 0, messages: 0, updates: 0, messagesPerSecond: 0, cpuPercent: 0, eventLoopP99Ms: 0, eventLoopMaxMs: 0 };
+  let cpuBaseline = process.cpuUsage(), sampledAt = performance.now(), sampledMessages = 0;
   for (const quote of store?.load() ?? []) if (states.has(quote.exchange)) quotes.set(`${quote.exchange}:${quote.symbol}`, quote);
   const later = (fn, ms) => {
     const timer = setTimeout(() => { timers.delete(timer); if (running) fn(); }, ms);
@@ -81,67 +117,137 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
   }
   function snapshot() {
     const now = clock();
+    const fresh = time => Number.isFinite(time) && time >= now - staleAfterMs && time <= now + MAX_FUTURE_MS;
     const values = [...quotes.values()], counts = new Map();
     for (const quote of values) {
-      const own = counts.get(quote.exchange) ?? { all: 0, fresh: 0 }; own.all++;
-      if ((quote.bid > 0 && quote.ask >= quote.bid && (quote.bidAskAt ?? 0) >= now - staleAfterMs) || (quote.mark > 0 && (quote.markAt ?? 0) >= now - staleAfterMs)) own.fresh++;
+      const own = counts.get(quote.exchange) ?? { all: 0, fresh: 0, freshBook: 0, staleBook: 0, missingBook: 0 }; own.all++;
+      if (quote.bid > 0 && quote.ask >= quote.bid && Number.isFinite(quote.bidAskAt) && quote.bidAskAt <= now + MAX_FUTURE_MS) {
+        if (fresh(quote.bidAskAt)) own.freshBook++; else own.staleBook++;
+      } else own.missingBook++;
+      if ((quote.bid > 0 && quote.ask >= quote.bid && fresh(quote.bidAskAt)) || (quote.mark > 0 && fresh(quote.markAt))) own.fresh++;
       counts.set(quote.exchange, own);
     }
     const connectedExchanges = new Set([...connections].filter(connection => connection.socket?.readyState === 1).map(connection => connection.exchange));
     const exchangeViews = [...states.values()].map(state => {
-      const own = counts.get(state.id) ?? { all: 0, fresh: 0 };
+      const own = counts.get(state.id) ?? { all: 0, fresh: 0, freshBook: 0, staleBook: 0, missingBook: 0 };
       const status = connectedExchanges.has(state.id) && own.fresh ? 'live' : own.all ? 'stale' : state.error ? 'error' : 'connecting';
-      return { id: state.id, name: state.name, kind: state.kind, status, marketCount: state.marketCount, quoteCount: own.fresh, lastMessageAt: state.lastMessageAt, error: state.error };
+      return { id: state.id, name: state.name, kind: state.kind, status, marketCount: state.marketCount, quoteCount: own.fresh, freshBookCount: own.freshBook, staleBookCount: own.staleBook, missingBookCount: own.missingBook, lastMessageAt: state.lastMessageAt, error: state.error || state.snapshotError || null };
     });
     const live = exchangeViews.filter(exchange => exchange.status === 'live').length;
-    return { schemaVersion: 1, monitorId: 'perpetual', status: live === states.size && live > 0 ? 'live' : live ? 'partial' : quotes.size ? 'snapshot' : 'connecting', generatedAt: now, staleAfterMs, exchanges: exchangeViews, quotes: values, storageError };
+    return { schemaVersion: 1, monitorId: 'perpetual', streamId, sequence, status: live === states.size && live > 0 ? 'live' : live ? 'partial' : quotes.size ? 'snapshot' : 'connecting', generatedAt: now, staleAfterMs, exchanges: exchangeViews, quotes: values, storageError };
   }
   function send(connection, value) {
     if (connection.socket.readyState === 1) connection.socket.send(typeof value === 'string' ? value : JSON.stringify(value));
   }
   function connect(exchange, spec, attempt = 0) {
     if (!running || (spec.generation != null && spec.generation !== states.get(exchange).generation)) return;
-    const state = states.get(exchange), connection = { exchange, socket: null, timers: [], closed: false, lastMessageAt: clock() };
+    const state = states.get(exchange), connection = { exchange, socket: null, timers: new Set(), closed: false, lastMessageAt: clock(), lastQuoteAt: clock() };
     const context = structuredClone(spec.context ?? {});
+    const pollHost = new URL(spec.url).host;
+    let pollCursor = 0;
+    if (spec.poll && !pollBudgets.has(pollHost)) pollBudgets.set(pollHost, { startedAt: clock(), sent: 0, nextAt: 0, blockedUntil: 0, failures: 0 });
     const clear = () => { for (const timer of connection.timers) { clearTimeout(timer); clearInterval(timer); timers.delete(timer); } connections.delete(connection); };
-    connection.dispose = () => { connection.closed = true; clear(); try { connection.socket?.close(); } catch {} };
+    const scheduleTask = (fn, ms) => { const timer = later(() => { connection.timers.delete(timer); if (!connection.closed) fn(); }, ms); connection.timers.add(timer); return timer; };
+    connection.dispose = () => { connection.closed = true; clear(); connection.snapshotController?.abort(); try { if (connection.socket?.terminate) connection.socket.terminate(); else connection.socket?.close(); } catch {} };
     const fail = message => {
       if (connection.closed) return;
       state.error = message; connection.dispose();
       if (running) later(() => connect(exchange, spec, attempt + 1), Math.min(60_000, retryMs * 2 ** Math.min(attempt, 4)) + Math.floor(Math.random() * retryMs / 4));
     };
+    const acceptUpdates = (updates, now, transport = 'ws') => {
+      for (const update of updates) {
+        if (update.exchange !== exchange) continue;
+        if (Number.isFinite(update.sourceTime)) {
+          state.lastSourceLagMs = now - update.sourceTime;
+          if (state.lastSourceLagMs < -MAX_FUTURE_MS) { state.rejectedFuture++; state.error = '行情时间领先服务器，请检查服务器时钟。'; }
+        }
+        const key = `${exchange}:${update.symbol}`, previous = quotes.get(key), next = mergePerpetualQuote(previous, transport === 'rest' ? { ...update, transport } : update, now);
+        if (next && next !== previous) {
+          metrics.updates++; quotes.set(key, next); dirty.set(key, next);
+          if (transport === 'ws') connection.lastQuoteAt = now;
+          state.lastMessageAt = now; state.error = null; attempt = 0;
+        }
+      }
+    };
+    const requestSnapshot = async () => {
+      const controller = new AbortController(); connection.snapshotController = controller;
+      try {
+        const updates = await spec.snapshot({ signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8_000)]), now: clock() });
+        if (running && !connection.closed) { acceptUpdates(updates, clock(), 'rest'); state.snapshotError = null; }
+      } catch { if (running && !connection.closed) state.snapshotError = '盘口补充快照暂不可用，正在重试。'; }
+      finally { if (running && !connection.closed) scheduleTask(() => { void requestSnapshot(); }, spec.snapshotIntervalMs ?? 10_000); }
+    };
+    const poll = () => {
+      const started = clock(), messages = spec.poll.messages;
+      const budget = pollBudgets.get(pollHost);
+      if (budget.blockedUntil > started) { scheduleTask(poll, budget.blockedUntil - started); return; }
+      let remaining = messages.length;
+      const next = () => {
+        const now = clock();
+        if (budget.blockedUntil > now) { scheduleTask(poll, budget.blockedUntil - now); return; }
+        if (spec.poll.maxPerMinute && budget.nextAt > now) { scheduleTask(next, budget.nextAt - now); return; }
+        if (now < budget.startedAt || now - budget.startedAt >= 60_000) { budget.startedAt = now; budget.sent = 0; }
+        if (spec.poll.maxPerMinute && budget.sent >= spec.poll.maxPerMinute) { scheduleTask(poll, Math.max(100, budget.startedAt + 60_000 - now)); return; }
+        while (remaining > 0) {
+          const message = messages[pollCursor++ % messages.length]; remaining--;
+          const symbol = message.request?.payload?.coin, quote = quotes.get(`${exchange}:${symbol}`);
+          if (spec.poll.staleBookAfterMs && quote?.bid > 0 && quote.ask >= quote.bid && Number.isFinite(quote.bidAskAt)
+            && quote.bidAskAt >= now - spec.poll.staleBookAfterMs && quote.bidAskAt <= now + MAX_FUTURE_MS) continue;
+          try {
+            send(connection, message); budget.sent++;
+            if (spec.poll.maxPerMinute) budget.nextAt = now + Math.ceil(60_000 / spec.poll.maxPerMinute);
+          } catch { fail('WebSocket 快照请求失败，正在重连。'); return; }
+          break;
+        }
+        if (remaining > 0) scheduleTask(next, spec.poll.sendIntervalMs ?? 100);
+        else scheduleTask(poll, Math.max(spec.poll.sendIntervalMs ?? 100, (spec.poll.intervalMs ?? 10_000) - (clock() - started)));
+      };
+      if (messages.length) next();
+    };
     try {
-      connection.socket = new WebSocketImpl(spec.url);
+      connection.socket = new WebSocketImpl(spec.url, { headers: spec.headers });
       connections.add(connection);
-      connection.timers.push(later(() => { if (connection.socket.readyState !== 1) fail('WebSocket 连接超时，正在重连。'); }, 20_000));
+      scheduleTask(() => { if (connection.socket.readyState !== 1) fail('WebSocket 连接超时，正在重连。'); }, 20_000);
       connection.socket.addEventListener('open', () => {
         if (connection.closed || !running) return connection.dispose();
-        (spec.subscribe ?? []).forEach((message, index) => connection.timers.push(later(() => {
+        (spec.subscribe ?? []).forEach((message, index) => scheduleTask(() => {
           try { send(connection, message); } catch { fail('WebSocket 订阅失败，正在重连。'); }
-        }, index * (spec.sendIntervalMs ?? 100))));
+        }, index * (spec.sendIntervalMs ?? 100)));
+        if (spec.poll) scheduleTask(poll, ((spec.subscribe?.length ?? 0) + 1) * (spec.sendIntervalMs ?? 100));
+        if (spec.snapshot) scheduleTask(() => { void requestSnapshot(); }, 500);
         if (spec.heartbeat) {
           const heartbeat = setInterval(() => { try { send(connection, spec.heartbeat); } catch { fail('WebSocket 心跳失败，正在重连。'); } }, spec.heartbeatMs ?? 20_000);
-          heartbeat.unref?.(); connection.timers.push(heartbeat);
+          heartbeat.unref?.(); connection.timers.add(heartbeat);
         }
-        const watchdog = setInterval(() => { if (clock() - connection.lastMessageAt > 90_000) fail('WebSocket 未收到数据，正在重连。'); }, 15_000);
-        watchdog.unref?.(); connection.timers.push(watchdog);
+        const watchdog = setInterval(() => {
+          if (clock() - connection.lastMessageAt > quoteTimeoutMs) fail('WebSocket 未收到数据，正在重连。');
+          else if (clock() - connection.lastQuoteAt > quoteTimeoutMs) fail('WebSocket 只有心跳，未收到有效行情，正在重订阅。');
+        }, watchdogIntervalMs);
+        watchdog.unref?.(); connection.timers.add(watchdog);
       });
       connection.socket.addEventListener('message', event => {
         if (connection.closed || !running) return;
         const now = clock(); connection.lastMessageAt = now;
+        metrics.messages++;
         let payload;
         try { payload = typeof event.data === 'string' ? JSON.parse(event.data) : JSON.parse(Buffer.from(event.data).toString()); }
         catch { payload = event.data; }
         try {
+          // Auxiliary info requests must not tear down a healthy BBO stream.
+          // In particular, an exchange 429 backs off only the shared-host poller.
+          if (spec.poll && payload?.channel === 'post' && payload.data?.response?.type === 'error') {
+            const budget = pollBudgets.get(pollHost);
+            budget.failures++;
+            budget.blockedUntil = now + Math.min(300_000, 60_000 * 2 ** Math.min(budget.failures - 1, 3));
+            state.lastProtocolError = `${exchange} auxiliary snapshot: ${String(payload.data.response.payload).slice(0, 230)}`;
+            return;
+          }
+          if (spec.poll && payload?.channel === 'post' && payload.data?.response?.type === 'info') pollBudgets.get(pollHost).failures = 0;
           const reply = control(exchange, payload);
           if (reply != null) send(connection, reply);
           const updates = parse(exchange, payload, spec.markets ?? [], now, context);
-          for (const update of updates) {
-            if (update.exchange !== exchange) continue;
-            const key = `${exchange}:${update.symbol}`, previous = quotes.get(key), next = mergePerpetualQuote(previous, update, now);
-            if (next && next !== previous) { quotes.set(key, next); dirty.set(key, next); state.lastMessageAt = now; state.error = null; attempt = 0; }
-          }
-        } catch { fail('行情消息无效，正在重新订阅。'); }
+          acceptUpdates(updates, now);
+        } catch (error) { state.lastProtocolError = String(error?.message ?? 'Invalid public feed message').slice(0, 300); fail('行情消息无效，正在重新订阅。'); }
       });
       connection.socket.addEventListener('error', () => fail('WebSocket 暂不可用，正在重连。'));
       connection.socket.addEventListener('close', () => fail('WebSocket 已断开，正在重连。'));
@@ -194,34 +300,42 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
   return {
     start() {
       if (running) return; running = true;
+      eventLoop.enable(); cpuBaseline = process.cpuUsage(); sampledAt = performance.now();
+      metricsTimer = setInterval(() => {
+        const now = performance.now(), elapsed = now - sampledAt, cpu = process.cpuUsage(cpuBaseline);
+        metrics.cpuPercent = Number(((cpu.user + cpu.system) / (elapsed * 10)).toFixed(1));
+        metrics.messagesPerSecond = Math.round((metrics.messages - sampledMessages) * 1000 / elapsed);
+        metrics.eventLoopP99Ms = Number((eventLoop.percentile(99) / 1e6).toFixed(2));
+        metrics.eventLoopMaxMs = Number((eventLoop.max / 1e6).toFixed(2));
+        cpuBaseline = process.cpuUsage(); sampledAt = now; sampledMessages = metrics.messages; eventLoop.reset();
+      }, 10_000);
       for (const exchange of states.keys()) void refresh(exchange);
       refreshTimer = setInterval(() => { for (const exchange of states.keys()) void refresh(exchange); }, discoveryIntervalMs);
       saveTimer = setInterval(flush, saveIntervalMs);
       broadcastTimer = setInterval(() => {
         if (!clients.size) return;
-        const started = performance.now(), current = snapshot();
-        const delta = createPerpetualDelta(current, publishedQuotes);
-        const full = current.generatedAt - lastFullFrameAt >= 30_000;
-        if (full) { lastFullFrameAt = current.generatedAt; metrics.fullFrames++; }
-        const message = `data: ${JSON.stringify(full ? current : delta)}\n\n`;
-        let fullMessage = full ? message : null;
+        const started = performance.now(), baseSequence = sequence++;
+        const current = snapshot(), delta = createPerpetualPatch(current, publishedQuotes);
+        const message = `data: ${JSON.stringify({ ...delta, baseSequence })}\n\n`;
+        let fullMessage = null;
         for (const [response, client] of clients) {
           const { output } = client;
           if (response.destroyed || response.writableEnded) { clients.delete(response); continue; }
           if (response.writableLength + output.writableLength > 4_000_000) { response.destroy(); clients.delete(response); continue; }
           if (response.writableNeedDrain || output.writableNeedDrain) { client.needsSnapshot = true; continue; }
           // A slow reader cannot skip a delta and continue with a broken baseline.
-          if (client.needsSnapshot) { fullMessage ??= `data: ${JSON.stringify(current)}\n\n`; output.write(fullMessage); client.needsSnapshot = false; }
+          if (client.needsSnapshot) { fullMessage ??= `data: ${JSON.stringify(current)}\n\n`; output.write(fullMessage); client.needsSnapshot = false; metrics.fullFrames++; }
           else output.write(message);
         }
-        metrics.frames++; metrics.frameBytes = Buffer.byteLength(message); metrics.lastFrameUpdates = full ? current.quotes.length : delta.updates.length;
+        metrics.frames++; metrics.frameBytes = Buffer.byteLength(message); metrics.lastFrameUpdates = delta.patches.length;
         metrics.lastPublishMs = Number((performance.now() - started).toFixed(2));
       }, broadcastIntervalMs);
-      for (const timer of [refreshTimer, saveTimer, broadcastTimer]) timer.unref?.();
+      for (const timer of [refreshTimer, saveTimer, broadcastTimer, metricsTimer]) timer.unref?.();
     },
     async stop() {
       running = false; closeStreams();
-      for (const timer of [refreshTimer, saveTimer, broadcastTimer, ...timers]) clearTimeout(timer);
+      for (const timer of [refreshTimer, saveTimer, broadcastTimer, metricsTimer, ...timers]) clearTimeout(timer);
+      eventLoop.disable();
       timers.clear();
       const pending = [...discoveries.values()];
       for (const item of pending) item.controller.abort();
@@ -230,7 +344,7 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
       flush(); store?.close();
     },
     closeStreams, snapshot, healthy: () => !storageError,
-    metrics: () => ({ ...metrics, quotes: quotes.size, pendingWrites: dirty.size, connections: connections.size, clients: clients.size }),
+    metrics: () => ({ ...metrics, quotes: quotes.size, pendingWrites: dirty.size, connections: connections.size, clients: clients.size, rssMb: Number((process.memoryUsage.rss() / 1048576).toFixed(1)), auxiliary: [...pollBudgets].map(([host, budget]) => ({ host, sentInWindow: budget.sent, retryAt: budget.blockedUntil })), venues: snapshot().exchanges.map(exchange => ({ ...exchange, sourceLagMs: states.get(exchange.id).lastSourceLagMs, rejectedFuture: states.get(exchange.id).rejectedFuture, lastProtocolError: states.get(exchange.id).lastProtocolError ?? null })) }),
     actions: { quote: ['GET'], stream: ['GET'], diagnostics: ['GET'] },
     handle(action) { if (action === 'quote') return snapshot(); if (action === 'diagnostics') return this.metrics(); },
     stream(request, response) {
@@ -240,7 +354,13 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
       const output = gzip ? createGzip({ level: 1, flush: zlibConstants.Z_SYNC_FLUSH }) : response;
       if (gzip) { output.pipe(response); output.on('error', () => response.destroy()); }
       const initial = snapshot();
-      if (!clients.size) { publishedQuotes.clear(); for (const quote of initial.quotes) publishedQuotes.set(`${quote.exchange}:${quote.symbol}`, quote); lastFullFrameAt = initial.generatedAt; }
+      if (!clients.size) { publishedQuotes.clear(); for (const quote of initial.quotes) publishedQuotes.set(`${quote.exchange}:${quote.symbol}`, quote); }
+      // Join the exact shared patch baseline. An immediate newer quote can
+      // reverse before the next broadcast, which then omits that price field;
+      // sending it here would leave the new reader with a wrong price despite
+      // a continuous sequence. This also avoids a second full snapshot.
+      else initial.quotes = [...publishedQuotes.values()];
+      metrics.fullFrames++;
       output.write(`retry: 5000\ndata: ${JSON.stringify(initial)}\n\n`);
       clients.set(response, { output, needsSnapshot: false });
       response.once('close', () => { clients.delete(response); if (!clients.size) publishedQuotes.clear(); if (gzip) output.destroy(); });

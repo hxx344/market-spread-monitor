@@ -3,11 +3,12 @@
 import { memo, useEffect, useRef, useState, type FormEvent } from "react";
 import { Bell, ChevronDown, Plus, Save, Trash2 } from "lucide-react";
 import type { MonitorAlertAdapter, MonitorAlertDraft, MonitorAlertRule, MonitorAlertView } from "../lib/monitor-alerts";
+import { startActivityPolling } from "../lib/polling";
 
 const time = (value: string | null) => value == null ? "尚无记录" : `${new Date(value).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false })} 北京时间`;
 const numberValue = (value: number) => Number.isFinite(value) ? value : "";
 
-function AlertSettings({ monitorId, title, adapter }: { monitorId: string; title: string; adapter: MonitorAlertAdapter }) {
+function AlertSettings({ monitorId, title, adapter, active = true }: { monitorId: string; title: string; adapter: MonitorAlertAdapter; active?: boolean }) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<MonitorAlertView | null>(null);
   const [draft, setDraft] = useState<MonitorAlertDraft>({ enabled: false, rules: [] });
@@ -20,6 +21,8 @@ function AlertSettings({ monitorId, title, adapter }: { monitorId: string; title
   const dirtyRef = useRef(false), busyRef = useRef(false), latestRevision = useRef(0), generation = useRef(0);
   const refresh = useRef<() => Promise<void>>(async () => {});
   const mutation = useRef<AbortController | null>(null);
+  const activity = useRef<ReturnType<typeof startActivityPolling> | null>(null);
+  const activeRef = useRef(active);
   const edit = (next: MonitorAlertDraft) => { dirtyRef.current = true; setDirty(true); setMessage(""); setError(""); setDraft(next); };
   const editRule = (id: string, values: Partial<MonitorAlertRule>) => edit({ ...draft, rules: draft.rules.map(rule => rule.id === id ? { ...rule, ...values } : rule) });
   const apply = (next: { draft: MonitorAlertDraft; revision: number }) => {
@@ -27,30 +30,32 @@ function AlertSettings({ monitorId, title, adapter }: { monitorId: string; title
     dirtyRef.current = false; setDirty(false);
   };
   useEffect(() => {
-    const controller = new AbortController(); let pending = false;
-    const load = async () => {
-      if (pending || busyRef.current || document.hidden) return;
-      pending = true; const requestGeneration = generation.current;
+    const controller = new AbortController();
+    const load = async (signal: AbortSignal) => {
+      if (busyRef.current || document.hidden) return;
+      const requestGeneration = generation.current;
       try {
-        const next = await adapter.load(AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]));
-        if (controller.signal.aborted || generation.current !== requestGeneration || (next.available && next.revision < latestRevision.current)) return;
+        const next = await adapter.load(AbortSignal.any([controller.signal, signal, AbortSignal.timeout(15_000)]));
+        if (controller.signal.aborted || signal.aborted || generation.current !== requestGeneration || (next.available && next.revision < latestRevision.current)) return;
         setLoadError(""); setView(next);
         if (next.available) {
           latestRevision.current = next.revision;
           if (!dirtyRef.current) { setDraft(next.draft); setRevision(next.revision); }
         }
       } catch {
-        if (!controller.signal.aborted && generation.current === requestGeneration) setLoadError("无法刷新告警后台状态，现有配置与草稿已保留。请检查后台服务。");
-      } finally { pending = false; }
+        if (!controller.signal.aborted && !signal.aborted && generation.current === requestGeneration) setLoadError("无法刷新告警后台状态，现有配置与草稿已保留。请检查后台服务。");
+      }
     };
-    refresh.current = load;
+    const polling = startActivityPolling({ intervalMs: 10_000, active: activeRef.current, load, onData: () => {}, onError: () => {} });
+    activity.current = polling;
+    refresh.current = () => polling.refresh();
+    const reload = () => { void polling.refresh(); };
     const unload = (event: BeforeUnloadEvent) => { if (dirtyRef.current) { event.preventDefault(); event.returnValue = ""; } };
-    void load(); const interval = setInterval(() => { void load(); }, 10_000);
-    window.addEventListener("feishu-settings-changed", load);
+    window.addEventListener("feishu-settings-changed", reload);
     window.addEventListener("beforeunload", unload);
-    document.addEventListener("visibilitychange", load);
-    return () => { controller.abort(); mutation.current?.abort(); clearInterval(interval); window.removeEventListener("feishu-settings-changed", load); window.removeEventListener("beforeunload", unload); document.removeEventListener("visibilitychange", load); };
+    return () => { controller.abort(); mutation.current?.abort(); polling.stop(); activity.current = null; window.removeEventListener("feishu-settings-changed", reload); window.removeEventListener("beforeunload", unload); };
   }, [adapter]);
+  useEffect(() => { activeRef.current = active; activity.current?.setActive(active); }, [active]);
 
   async function mutate(discard: boolean) {
     if (busyRef.current) return;

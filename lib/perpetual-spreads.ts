@@ -66,7 +66,7 @@ export function rankPerpetualSpreads(snapshot: PerpetualSnapshot, filters: Perpe
   const selected = filters.exchanges === null ? null : new Set(filters.exchanges);
   const favorites = new Set(filters.favorites);
   const search = filters.search.trim().toUpperCase();
-  const groups = new Map<string, PerpetualQuote[]>();
+  const groups = new Map<string, { quote: PerpetualQuote; venue: PerpetualExchange; time: number; buy: number | null; sell: number | null; funding: number | null }[]>();
   for (const quote of snapshot.quotes) {
     const venue = venues.get(quote.exchange);
     if (!venue || venue.status !== "live" || quote.comparable === false) continue;
@@ -74,32 +74,88 @@ export function rankPerpetualSpreads(snapshot: PerpetualSnapshot, filters: Perpe
     if (search && !quote.base.includes(search)) continue;
     if (filters.favoritesOnly && !favorites.has(quote.base)) continue;
     if (!quoteIsFresh(quote, filters.priceMode, now, snapshot.staleAfterMs)) continue;
+    const ready = { quote, venue, time: quotePriceTime(quote, filters.priceMode), buy: quotePrice(quote, filters.priceMode, "buy"), sell: quotePrice(quote, filters.priceMode, "sell"), funding: normalizedFunding8h(quote, now) };
     const group = groups.get(quote.base);
-    if (group) group.push(quote); else groups.set(quote.base, [quote]);
+    if (group) group.push(ready); else groups.set(quote.base, [ready]);
   }
   const rows: PerpetualSpread[] = [];
   for (const [base, quotes] of groups) {
     let best: PerpetualSpread | null = null;
-    for (const long of quotes) {
-      const buyPrice = quotePrice(long, filters.priceMode, "buy");
+    for (const longLeg of quotes) {
+      const long = longLeg.quote;
+      const buyPrice = longLeg.buy;
       if (buyPrice === null) continue;
-      for (const short of quotes) {
-        if (!compatiblePair(venues.get(long.exchange)!, venues.get(short.exchange)!, filters.pairMode)) continue;
-        if (Math.abs(quotePriceTime(long, filters.priceMode) - quotePriceTime(short, filters.priceMode)) > 5_000) continue;
+      for (const shortLeg of quotes) {
+        const short = shortLeg.quote;
+        if (!compatiblePair(longLeg.venue, shortLeg.venue, filters.pairMode)) continue;
+        if (Math.abs(longLeg.time - shortLeg.time) > 5_000) continue;
         const crossCurrency = long.quoteCurrency !== short.quoteCurrency;
         if (crossCurrency && (!filters.crossCurrency || !stableQuotes.has(long.quoteCurrency) || !stableQuotes.has(short.quoteCurrency))) continue;
-        const sellPrice = quotePrice(short, filters.priceMode, "sell");
+        const sellPrice = shortLeg.sell;
         if (sellPrice === null) continue;
         const spreadPercent = (sellPrice / buyPrice - 1) * 100;
         if (!Number.isFinite(spreadPercent) || spreadPercent < filters.minSpreadPercent || (best && spreadPercent <= best.spreadPercent)) continue;
-        const longFunding = normalizedFunding8h(long, now), shortFunding = normalizedFunding8h(short, now);
+        const longFunding = longLeg.funding, shortFunding = shortLeg.funding;
         best = { base, long, short, buyPrice, sellPrice, spreadPercent, fundingSpread8h: longFunding === null || shortFunding === null ? null : shortFunding - longFunding,
-          updatedAt: Math.min(quotePriceTime(long, filters.priceMode), quotePriceTime(short, filters.priceMode)), crossCurrency };
+          updatedAt: Math.min(longLeg.time, shortLeg.time), crossCurrency };
       }
     }
     if (best) rows.push(best);
   }
   return rows.sort((a, b) => b.spreadPercent - a.spreadPercent || a.base.localeCompare(b.base));
+}
+
+export interface PerpetualQuoteSelection {
+  byKey: Map<string, PerpetualQuote>;
+  keys: string[];
+  baseCount: number;
+}
+
+/** Price updates replace values, not the alphabetical market ordering or filter membership. */
+export function createPerpetualQuoteSelector() {
+  let previousQuotes: PerpetualQuote[] | null = null;
+  let byKey = new Map<string, PerpetualQuote>();
+  let order: string[] = [];
+  let baseCount = 0;
+  let search = "", exchanges: string[] | null | undefined, favorites: string[] | undefined, favoritesOnly = false;
+  let keys: string[] = [];
+  return (quotes: PerpetualQuote[], filters: PerpetualFilters): PerpetualQuoteSelection => {
+    let catalogChanged = previousQuotes === null;
+    if (quotes !== previousQuotes) {
+      const next = new Map<string, PerpetualQuote>();
+      for (const quote of quotes) {
+        const key = `${quote.exchange}:${quote.symbol}`, previous = byKey.get(key);
+        if (!previous || previous.base !== quote.base || previous.displayBase !== quote.displayBase) catalogChanged = true;
+        next.set(key, quote);
+      }
+      if (next.size !== byKey.size) catalogChanged = true;
+      byKey = next;
+      previousQuotes = quotes;
+      if (catalogChanged) {
+        order = [...next.keys()].sort((a, b) => { const left = next.get(a)!, right = next.get(b)!; return left.base.localeCompare(right.base) || left.exchange.localeCompare(right.exchange) || left.symbol.localeCompare(right.symbol); });
+        baseCount = new Set(quotes.map(quote => quote.base)).size;
+      }
+    }
+    const nextSearch = filters.search.trim().toUpperCase();
+    if (catalogChanged || search !== nextSearch || exchanges !== filters.exchanges || favorites !== filters.favorites || favoritesOnly !== filters.favoritesOnly) {
+      search = nextSearch; exchanges = filters.exchanges; favorites = filters.favorites; favoritesOnly = filters.favoritesOnly;
+      const selected = exchanges === null ? null : new Set(exchanges);
+      const starred = new Set(favorites);
+      keys = order.filter(key => {
+        const quote = byKey.get(key)!;
+        return (!selected || selected.has(quote.exchange)) && (!favoritesOnly || starred.has(quote.base))
+          && (!search || `${quote.base} ${quote.displayBase ?? ""} ${quote.symbol}`.toUpperCase().includes(search));
+      });
+    }
+    return { byKey, keys, baseCount };
+  };
+}
+
+/** Missing prices are unavailable, not stale; both stay out of executable rankings. */
+export function classifyPerpetualQuote(quote: PerpetualQuote, mode: PerpetualPriceMode, now: number, staleAfterMs: number): "fresh" | "stale" | "unavailable" {
+  const time = quotePriceTime(quote, mode);
+  if (!Number.isFinite(time) || time <= 0 || time > now + 5_000 || (quotePrice(quote, mode, "buy") === null && quotePrice(quote, mode, "sell") === null)) return "unavailable";
+  return now - time > staleAfterMs ? "stale" : "fresh";
 }
 
 /** Metadata-only frames reuse the ranking until a price or funding validity boundary is crossed. */

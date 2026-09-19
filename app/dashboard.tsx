@@ -30,7 +30,7 @@ export default function Dashboard({ onSummary, active = true, initial = null }: 
   const [hasOpened, setHasOpened] = useState(active);
   // Mount the heavy chart only on its first visit, then preserve its controls.
   if (active && !hasOpened) setHasOpened(true);
-  const { data, quote, loading, error, quoteError, refresh } = useMarketFeed(initial?.hynix, initial?.renderedAt);
+  const { data, quote, loading, error, quoteError, refresh } = useMarketFeed(initial?.hynix, initial?.renderedAt, active);
   const trend = useMemo(() => createTrend(data ? { points: data.points.map(point => ({ time: point.time, value: point.premium })), status: data.status, fetchedAt: data.fetchedAt } : undefined, { days: 7, intervalMs: 3_600_000, label: "7 天小时线", shortLabel: "7天", unit: "%" }, Boolean(error)), [data, error]);
   useEffect(() => { onSummary?.(hynixSummary(quote, quoteError, trend)); }, [onSummary, quote, quoteError, trend]);
   const [range,setRange] = useState<number | null>(null);

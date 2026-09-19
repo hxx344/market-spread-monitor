@@ -7,7 +7,10 @@ export async function openPerpetualStore(filename) {
   await mkdir(dirname(filename), { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(filename);
   try {
-    db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;');
+    // This is a recoverable public-quote cache, separate from alert/user data.
+    // WAL NORMAL avoids a disk fsync on every batch. A busy writer fails quickly
+    // and the collector retries its bounded dirty map, instead of blocking WS for 5s.
+    db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=100; PRAGMA cache_size=-2048; PRAGMA wal_autocheckpoint=1000; PRAGMA journal_size_limit=4194304;');
     const version = db.prepare('PRAGMA user_version').get().user_version;
     if (version > 1) throw new Error('Unsupported perpetual database version');
     db.exec('CREATE TABLE IF NOT EXISTS quotes (id TEXT PRIMARY KEY, payload TEXT NOT NULL); PRAGMA user_version=1;');
@@ -24,9 +27,9 @@ export async function openPerpetualStore(filename) {
         const remove = db.prepare('DELETE FROM quotes WHERE id=?');
         db.exec('BEGIN IMMEDIATE');
         try {
-          for (const row of db.prepare('SELECT id,payload FROM quotes').all()) {
-            const quote = JSON.parse(row.payload);
-            if (quote.exchange === exchange && !symbols.has(quote.symbol)) remove.run(row.id);
+          const prefix = `${exchange}:`;
+          for (const row of db.prepare('SELECT id FROM quotes WHERE id >= ? AND id < ?').all(prefix, `${exchange};`)) {
+            if (!symbols.has(row.id.slice(prefix.length))) remove.run(row.id);
           }
           db.exec('COMMIT');
         } catch (error) { db.exec('ROLLBACK'); throw error; }

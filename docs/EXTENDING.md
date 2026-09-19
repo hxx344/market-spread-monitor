@@ -74,6 +74,10 @@ interface DataAdapter {
 
 合约行情适配器位于 `modules/perpetual/`，每个平台实现合约发现、WS 订阅和消息解析；`server/perpetual-service.mjs` 负责连接分片、心跳、退避重连、逐字段时间及合并广播。稀疏 ticker 更新必须只提供本次实际出现的字段，不能把缓存盘口作为本次新价格返回。计价币与抵押币独立，不能凭相同简称或强行剥离前缀认定两个合约等价。
 
+优先选择低频汇总频道，避免为全市场同时订阅逐笔/深度流。订阅规格可提供 `poll: { messages, intervalMs, sendIntervalMs }` 定时请求 WS 快照，或 `snapshot({signal,now})` 与 `snapshotIntervalMs` 补充批量 REST 盘口；同一连接不重叠请求、断开必须取消。快照也必须保留字段的源时间，不能拿心跳或资金费事件更新盘口有效期。使用 `PerpetualWebSocket` 以便重连时彻底释放 socket；代理通过明确的 CONNECT agent 实现，遵循环境中的代理与绕过配置。
+
+浏览器先接收带 `streamId` / `sequence` 的完整基线，再接收 `type: "patch"`、`baseSequence` 和 `patches: [["exchange:symbol", changedFields]]`。新合约必须带完整报价，字段清空使用 `null`，删除使用 `removed`。时间确认仍传真实字段时间和 `receivedAt`。缺帧、服务实例变化及慢读者恢复必须重新同步完整基线，不能继续拼接缺失的变化；不需要定时全量广播。
+
 `perpetual` 使用专属最新报价库 `ALERT_DATA_DIR/perpetual/market.sqlite`，不积累每秒全市场历史。新建只读流接口需要显式声明 `actions.stream` 和 `stream(request,response)`，公共层先完成登录和方法验证；服务须提供 `closeStreams()`，停机时在等待 HTTP 排空前关闭长连接，并清理慢客户端缓冲。
 
 每个模块使用 `ALERT_DATA_DIR/{id}` 保存告警状态，维护独立数据版本、revision 和原子写入；行情由共享的 `services.market` 管理 SQLite 与独立采集调度。报价落盘后触发告警检查，告警也继续定时检查，均只使用库中未过期报价。持久化失败不得继续无限重发通知；不要读写其他模块状态。初始化失败释放已取得资源，关闭时先排空 HTTP，再停止告警、采集并关闭数据库和通知服务。

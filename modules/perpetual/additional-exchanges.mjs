@@ -58,18 +58,19 @@ export function createAdditionalSubscriptions(exchangeId, markets) {
   const selected = markets.filter(market => market.exchange === exchangeId);
   if (!selected.length) return [];
   if (exchangeId === 'rh-lighter') {
-    const chunks = [];
-    for (let index = 0; index < selected.length; index += 75) {
-      const batch = selected.slice(index, index + 75);
-      chunks.push({ url: `${RH_API.replace('https:', 'wss:')}/stream?readonly=true`, markets: batch, context: {}, subscribe: [{ type: 'subscribe', channel: 'market_stats/all' }, ...batch.map(market => ({ type: 'subscribe', channel: `ticker/${market.marketId}` }))], sendIntervalMs: 400, startDelayMs: chunks.length * 76 * 400, heartbeat: { type: 'ping' }, heartbeatMs: 30000 });
-    }
-    return chunks;
+    // The official market_stats stream carries current best_bid/ask_price.
+    // Refresh its snapshot for unchanged markets without per-market tickers.
+    return [{ url: `${RH_API.replace('https:', 'wss:')}/stream?readonly=true`, markets: selected, context: {}, subscribe: [{ type: 'subscribe', channel: 'market_stats/all' }], sendIntervalMs: 400, heartbeat: { type: 'ping' }, heartbeatMs: 30000,
+      poll: { messages: [{ type: 'unsubscribe', channel: 'market_stats/all' }, { type: 'subscribe', channel: 'market_stats/all' }], intervalMs: 10000, sendIntervalMs: 400 } }];
   }
   if (exchangeId === 'entropy') {
     const chunks = [];
     for (let index = 0; index < selected.length; index += 80) {
       const batch = selected.slice(index, index + 80);
-      chunks.push({ url: 'wss://api.hyperliquid.xyz/ws', markets: batch, context: {}, subscribe: batch.flatMap(market => ['bbo', 'activeAssetCtx'].map(type => ({ method: 'subscribe', subscription: { type, coin: market.symbol } }))), sendIntervalMs: 50, startDelayMs: chunks.length * 1500, heartbeat: { method: 'ping' }, heartbeatMs: 30000 });
+      chunks.push({ url: 'wss://api.hyperliquid.xyz/ws', markets: batch, context: {}, subscribe: batch.flatMap(market => ['bbo', 'activeAssetCtx'].map(type => ({ method: 'subscribe', subscription: { type, coin: market.symbol } }))), sendIntervalMs: 50, startDelayMs: chunks.length * 1500, heartbeat: { method: 'ping' }, heartbeatMs: 30000,
+        // Share Hyperliquid's host-wide auxiliary budget; active BBO needs no
+        // extra request. Rate-limit backoff must not drop its live subscription.
+        poll: { messages: batch.map((market, id) => ({ method: 'post', id, request: { type: 'info', payload: { type: 'l2Book', coin: market.symbol } } })), intervalMs: 20000, sendIntervalMs: 100, staleBookAfterMs: 15000, maxPerMinute: 60 } });
     }
     return chunks;
   }
@@ -78,11 +79,16 @@ export function createAdditionalSubscriptions(exchangeId, markets) {
 
 export function parseAdditionalMessage(exchangeId, payload, markets, receivedAt = Date.now(), context = {}) {
   if (!payload || typeof payload !== 'object') return [];
-  const selected = markets.filter(market => market.exchange === exchangeId);
+  if (payload.error || payload.channel === 'error' || (payload.channel === 'post' && payload.data?.response?.type === 'error')) throw new Error(`${exchangeId} WebSocket: ${String(payload.error?.message || payload.error || payload.data?.response?.payload || payload.data).slice(0, 300)}`);
+  if (context.indexMarkets !== markets || context.indexExchange !== exchangeId) {
+    context.indexMarkets = markets; context.indexExchange = exchangeId;
+    context.marketIndex = new Map(); context.marketIdIndex = new Map();
+    for (const market of markets) if (market.exchange === exchangeId) { context.marketIndex.set(market.symbol, market); if (market.marketId !== undefined) context.marketIdIndex.set(market.marketId, market); }
+  }
   if (exchangeId === 'rh-lighter') {
     const match = /^ticker:(\d+)$/.exec(payload.channel ?? '');
     if (match && payload.ticker && ['subscribed/ticker', 'update/ticker'].includes(payload.type)) {
-      const market = selected.find(item => item.marketId === Number(match[1]));
+      const market = context.marketIdIndex.get(Number(match[1]));
       if (!market || payload.ticker.s !== market.symbol) return [];
       const sourceTime = timestamp(payload.ticker.last_updated_at ?? payload.last_updated_at ?? payload.timestamp);
       context.bboTimes ??= new Map();
@@ -94,9 +100,11 @@ export function parseAdditionalMessage(exchangeId, payload, markets, receivedAt 
     if (!/^market_stats:(?:all|\d+)$/.test(payload.channel ?? '') || !['subscribed/market_stats', 'update/market_stats'].includes(payload.type) || !payload.market_stats) return [];
     const stats = payload.channel === 'market_stats:all' ? Object.values(payload.market_stats) : [payload.market_stats];
     return stats.flatMap(item => {
-      const market = selected.find(market => market.marketId === item?.market_id && market.symbol === item?.symbol);
-      if (!market) return [];
+      const market = context.marketIdIndex.get(item?.market_id);
+      if (!market || market.symbol !== item?.symbol) return [];
       const fields = {};
+      if (present(item.best_bid_price)) fields.bid = price(item.best_bid_price);
+      if (present(item.best_ask_price)) fields.ask = price(item.best_ask_price);
       if (present(item.mark_price)) fields.mark = price(item.mark_price);
       if (present(item.last_trade_price)) fields.last = price(item.last_trade_price);
       if (present(item.current_funding_rate)) {
@@ -104,22 +112,25 @@ export function parseAdditionalMessage(exchangeId, payload, markets, receivedAt 
         fields.fundingRate = rate === null ? null : rate / 100;
         fields.fundingIntervalHours = 1;
       }
-      // The ticker feed owns bid/ask. Stats updates must not refresh an old BBO.
+      // Only present price fields confirm a book. Mark/funding-only frames
+      // remain partial and cannot refresh a cached price.
       return Object.keys(fields).length ? [quote(market, receivedAt, timestamp(payload.timestamp), fields)] : [];
     });
   }
   if (exchangeId === 'entropy') {
-    const data = payload.data;
+    const bookResponse = payload.channel === 'post' && payload.data?.response?.type === 'info' && payload.data.response.payload?.type === 'l2Book';
+    const data = bookResponse ? payload.data.response.payload.data : payload.data;
     if (!data || typeof data.coin !== 'string') return [];
-    const market = selected.find(item => item.symbol === data.coin);
+    const market = context.marketIndex.get(data.coin);
     if (!market) return [];
-    if (payload.channel === 'bbo' && Array.isArray(data.bbo) && data.bbo.length === 2) {
+    const levels = bookResponse && Array.isArray(data.levels) && data.levels.length === 2 ? [data.levels[0]?.[0] ?? null, data.levels[1]?.[0] ?? null] : data.bbo;
+    if ((bookResponse || payload.channel === 'bbo') && Array.isArray(levels) && levels.length === 2) {
       const sourceTime = timestamp(data.time);
       context.bboTimes ??= new Map();
       if (sourceTime !== null && sourceTime < (context.bboTimes.get(market.id) ?? 0)) return [];
       if (sourceTime !== null) context.bboTimes.set(market.id, sourceTime);
       const side = value => price(value?.sz) === null ? null : price(value?.px);
-      return [quote(market, receivedAt, sourceTime, { bid: side(data.bbo[0]), ask: side(data.bbo[1]) })];
+      return [quote(market, receivedAt, sourceTime, { bid: side(levels[0]), ask: side(levels[1]) })];
     }
     if (payload.channel === 'activeAssetCtx' && data.ctx) {
       const fields = {};

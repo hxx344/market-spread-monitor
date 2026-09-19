@@ -64,3 +64,21 @@ test('disposing a panel removes its timers and restoration listeners, including 
   target.view.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true })); await flush();
   assert.equal(calls, 0);
 });
+
+test('inactive oil panels pause all reads and resume immediately without replacing their mounted state', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const target = targets(); let prices = 0, funding = 0;
+  const stop = startOilAutoRefresh({ ...target, active: false, prices: async () => prices++, funding: async () => funding++ });
+  t.after(stop);
+  t.mock.timers.tick(600000); target.view.dispatchEvent(new Event('online')); await flush(); assert.deepEqual([prices, funding], [0, 0]);
+  stop.setActive(true); await flush(); assert.deepEqual([prices, funding], [1, 1]);
+  stop.setActive(false); t.mock.timers.tick(600000); await flush(); assert.deepEqual([prices, funding], [1, 1]);
+  stop.setActive(true); await flush(); assert.deepEqual([prices, funding], [2, 2]);
+});
+
+test('pausing oil refresh aborts in-flight requests and does not report cancellation as market failure', async t => {
+  const target = targets(); let signal, failures = 0;
+  const stop = startOilAutoRefresh({ ...target, prices: input => { signal = input; return new Promise((_resolve, reject) => input.addEventListener('abort', () => reject(input.reason), { once: true })); }, funding: async () => {}, onError: () => failures++ });
+  t.after(stop); target.view.dispatchEvent(new Event('online')); await flush();
+  stop.setActive(false); assert.equal(signal.aborted, true); await flush(); assert.equal(failures, 0);
+});

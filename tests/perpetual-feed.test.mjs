@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createPerpetualSnapshotAccumulator, parsePerpetualSnapshot, startPerpetualFeed } from "../lib/perpetual-feed.ts";
+import { createPerpetualClock, createPerpetualSnapshotAccumulator, parsePerpetualSnapshot, startPerpetualFeed } from "../lib/perpetual-feed.ts";
 
 const snapshot = generatedAt => ({ schemaVersion: 1, monitorId: "perpetual", generatedAt, staleAfterMs: 30000, status: "live", exchanges: [], quotes: [] });
 const tick = () => new Promise(resolve => setImmediate(resolve));
-function fixture(fetchSnapshot = async () => snapshot(1)) {
+function fixture(fetchSnapshot = async () => snapshot(1), options = {}) {
   const streams = [], timers = new Map(), data = [], statuses = [], errors = [];
   let id = 0;
   const feed = startPerpetualFeed({
@@ -12,6 +12,7 @@ function fixture(fetchSnapshot = async () => snapshot(1)) {
     createStream: () => { const stream = { onmessage: null, onerror: null, closed: false, close() { this.closed = true; } }; streams.push(stream); return stream; },
     onData: value => data.push(value), onConnection: value => statuses.push(value), onError: value => errors.push(value),
     schedule: (callback, delay) => { const timer = ++id; timers.set(timer, { callback, delay }); return timer; }, cancel: timer => timers.delete(timer),
+    ...options,
   });
   function run(delay) { const timer = [...timers].find(([, timer]) => timer.delay === delay); assert.ok(timer, `missing ${delay}ms timer`); timers.delete(timer[0]); timer[1].callback(); }
   return { feed, streams, timers, data, statuses, errors, run };
@@ -92,4 +93,91 @@ test("invalid schema fails visibly instead of entering the data model", () => {
   assert.throws(() => parsePerpetualSnapshot({ ...snapshot(1), staleAfterMs: 0 }));
   const f = fixture(); f.streams[0].onmessage({ data: "bad json" });
   assert.equal(f.statuses.at(-1), "polling"); f.feed.stop();
+});
+
+const sequenced = (sequence = 0, streamId = "service-a", generatedAt = 1000 + sequence) => ({ ...snapshot(generatedAt), streamId, sequence });
+const patch = (sequence, patches = [], extra = {}) => ({ ...sequenced(sequence), type: "patch", baseSequence: sequence - 1, patches, removed: [], ...extra });
+const btc = { exchange: "a", symbol: "BTCUSDT", base: "BTC", quoteCurrency: "USDT", bid: 100, ask: 101, receivedAt: 1000, bidAskAt: 1000, markAt: 1000, fundingAt: 1000 };
+
+test("compact patches apply changed fields, null removals and complete new identities", () => {
+  const merge = createPerpetualSnapshotAccumulator();
+  const first = merge({ ...sequenced(), quotes: [btc] });
+  const second = merge(patch(1, [["a:BTCUSDT", { bid: 102, bidAskAt: 2000, receivedAt: 2000 }]]));
+  assert.equal(second.quotes[0].ask, 101); assert.equal(second.quotes[0].bid, 102);
+  assert.equal(first.quotes[0].bid, 100);
+  const third = merge(patch(2, [["a:BTCUSDT", { bidAskAt: null }], ["b:BTCUSDT", { ...btc, exchange: "b" }]]));
+  assert.equal(third.quotes.length, 2); assert.equal(third.quotes[0].bidAskAt, null);
+  const unchanged = merge(patch(3)); assert.equal(unchanged.quotes, third.quotes);
+  const removed = merge(patch(4, [], { removed: ["a:BTCUSDT"] })); assert.equal(removed.quotes.length, 1);
+});
+
+test("sequence ordering survives server clock rollback and restart while rejecting old HTTP baselines", () => {
+  const merge = createPerpetualSnapshotAccumulator();
+  merge({ ...sequenced(10, "service-a", 10000), quotes: [btc] });
+  const rollback = merge(patch(11, [["a:BTCUSDT", { bid: 105 }]], { generatedAt: 9000 }));
+  assert.equal(rollback.quotes[0].bid, 105);
+  assert.equal(merge({ ...sequenced(9, "service-a", 11000), quotes: [btc] }), null);
+  assert.throws(() => merge(patch(12, [], { streamId: "service-b" })), /基线/);
+  const restarted = merge({ ...sequenced(0, "service-b", 8000), quotes: [btc] });
+  assert.equal(restarted.generatedAt, 8000); assert.equal(restarted.sequence, 0);
+  assert.equal(merge(patch(1, [["a:BTCUSDT", { bid: 106 }]], { streamId: "service-b", generatedAt: 8001 })).quotes[0].bid, 106);
+});
+
+test("a missing compact patch reconnects immediately and a fresh full frame restores the baseline", () => {
+  const f = fixture();
+  f.streams[0].onmessage({ data: JSON.stringify({ ...sequenced(), quotes: [btc] }) });
+  f.streams[0].onmessage({ data: JSON.stringify(patch(2)) });
+  assert.equal(f.streams.length, 2); assert.equal(f.streams[0].closed, true); assert.equal(f.statuses.at(-1), "connecting");
+  f.streams[1].onmessage({ data: JSON.stringify({ ...sequenced(2), quotes: [btc] }) });
+  f.streams[1].onmessage({ data: JSON.stringify(patch(3, [["a:BTCUSDT", { bid: 110 }]])) });
+  assert.equal(f.data.at(-1).quotes[0].bid, 110); assert.equal(f.statuses.at(-1), "stream"); f.feed.stop();
+});
+
+test("repeated resync failures fall back to HTTP without opening unbounded streams", async () => {
+  let requests = 0;
+  const f = fixture(async () => { requests++; return { ...sequenced(3), quotes: [btc] }; });
+  f.streams[0].onmessage({ data: JSON.stringify(patch(1)) });
+  assert.equal(f.streams.length, 2);
+  f.streams[1].onmessage({ data: JSON.stringify(patch(2)) }); await tick();
+  assert.equal(f.streams.length, 2); assert.equal(requests, 1); assert.equal(f.data.at(-1).sequence, 3); f.feed.stop();
+});
+
+test("viewer clock advances offline but reanchors to a recovered server frame regardless of local clock skew", () => {
+  let elapsed = 100;
+  const clock = createPerpetualClock(() => elapsed);
+  assert.equal(clock.read(), 0); clock.accept(1800000000000);
+  elapsed += 31000; assert.equal(clock.read(), 1800000031000); assert.equal(clock.quietFor(), 31000);
+  clock.accept(1800000010000, undefined, true); assert.equal(clock.read(), 1800000010000);
+  elapsed += 500; assert.equal(clock.read(), 1800000010500);
+});
+
+test("continuous delayed frames cannot turn a thirty-second-old observation into fresh data", () => {
+  let elapsed = 0;
+  const clock = createPerpetualClock(() => elapsed);
+  clock.accept(1800000000000, "a", true);
+  elapsed = 15000; assert.equal(clock.accept(1800000001000, "a"), 1800000015000);
+  elapsed = 31000; assert.equal(clock.accept(1800000002000, "a"), 1800000031000);
+  clock.accept(1799999900000, "a"); assert.equal(clock.read(), 1799999900000, "explicit server clock rollback starts a new time anchor");
+  clock.accept(1799999800000, "b"); assert.equal(clock.read(), 1799999800000, "a restarted server uses its own clock");
+});
+
+test("more than twelve seconds of accumulating stream delay triggers an immediate resynchronization", () => {
+  let elapsed = 0;
+  const f = fixture(undefined, { monotonic: () => elapsed });
+  f.streams[0].onmessage({ data: JSON.stringify({ ...sequenced(0, "service-a", 100000), quotes: [btc] }) });
+  elapsed = 15000;
+  f.streams[0].onmessage({ data: JSON.stringify(patch(1, [], { generatedAt: 101000 })) });
+  assert.equal(f.streams.length, 2); assert.equal(f.statuses.at(-1), "connecting");
+  f.streams[1].onmessage({ data: JSON.stringify({ ...sequenced(5, "service-a", 115000), quotes: [btc] }) });
+  assert.equal(f.data.at(-1).generatedAt, 115000); f.feed.stop();
+});
+
+test("late HTTP data from a retired service cannot overwrite an already recovered SSE baseline", async () => {
+  let finish;
+  const f = fixture(() => new Promise(resolve => { finish = resolve; }));
+  f.streams[0].onmessage({ data: JSON.stringify({ ...sequenced(5), quotes: [btc] }) });
+  f.feed.refresh();
+  f.streams[0].onmessage({ data: JSON.stringify({ ...sequenced(0, "service-b"), quotes: [{ ...btc, bid: 200 }] }) });
+  finish({ ...sequenced(6, "service-a"), quotes: [btc] }); await tick();
+  assert.equal(f.data.at(-1).streamId, "service-b"); assert.equal(f.data.at(-1).quotes[0].bid, 200); f.feed.stop();
 });

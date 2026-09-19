@@ -4,11 +4,14 @@ import { useEffect, useRef, useState } from "react";
 import { mount as mountChart } from "../modules/oil/app.mjs";
 import { createOilSummaryReader, type SummaryProps } from "../lib/monitor-summary";
 import { initialSummaries, type InitialMarketData } from "../lib/initial-market";
-type Mounted = { dispose: () => void };
+type Mounted = { dispose: () => void; setActive: (active: boolean) => void };
 
-export default function OilPanel({ onSummary, initial = null }: SummaryProps & { initial?: InitialMarketData | null }) {
+export default function OilPanel({ onSummary, initial = null, active = true }: SummaryProps & { initial?: InitialMarketData | null; active?: boolean }) {
   const host = useRef<HTMLDivElement>(null);
   const [error, setError] = useState("");
+  const mountedPanel = useRef<Mounted | null>(null);
+  const activeRef = useRef(active);
+  useEffect(() => { activeRef.current = active; mountedPanel.current?.setActive(active); }, [active]);
   useEffect(() => {
     const controller = new AbortController();
     const node = host.current!;
@@ -23,7 +26,8 @@ export default function OilPanel({ onSummary, initial = null }: SummaryProps & {
         controller.signal.throwIfAborted();
         // This markup is a checked-in first-party asset, never user/API HTML.
         root.innerHTML = `<style>${css}</style>${html}`;
-        mounted.push(mountChart(root, { initial: initial?.oil, initialReadAt: initial?.renderedAt, onSummary: update => onSummary?.(summarize(update)) }));
+        const panel = mountChart(root, { initial: initial?.oil, initialReadAt: initial?.renderedAt, active: activeRef.current, onSummary: update => onSummary?.(summarize(update)) });
+        mounted.push(panel); mountedPanel.current = panel;
         root.querySelectorAll<HTMLAnchorElement>("[data-local-anchor]").forEach(anchor => anchor.addEventListener("click", event => { event.preventDefault(); root.getElementById(anchor.hash.slice(1))?.scrollIntoView({ behavior: "smooth" }); }, { signal: controller.signal }));
       } catch (cause) {
         if (!controller.signal.aborted) {
@@ -33,7 +37,7 @@ export default function OilPanel({ onSummary, initial = null }: SummaryProps & {
       }
     }
     void load();
-    return () => { controller.abort(); mounted.forEach(panel => panel.dispose()); root.replaceChildren(); };
+    return () => { controller.abort(); mountedPanel.current = null; mounted.forEach(panel => panel.dispose()); root.replaceChildren(); };
   }, [onSummary, initial]);
   return <>{error && <p role="alert" className="notice error">{error}</p>}<div ref={host} data-monitor="oil" /></>;
 }

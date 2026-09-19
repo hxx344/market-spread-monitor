@@ -6,6 +6,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { calculateExchangeSpread, exchangeContracts, exchangeNames, externalExchanges, externalQuoteStale, type Exchange, type ExchangeQuote, type ExternalQuoteSet, type SpreadMarket } from "../lib/exchange-quotes";
 import { useExchangeQuotes } from "../hooks/use-exchange-quotes";
 import { summaryTimestamp } from "../lib/monitor-summary";
+import { startActivityPolling } from "../lib/polling";
 
 const exchanges: Exchange[] = ["hyperliquid", ...externalExchanges];
 const signed = (value: number | null | undefined, digits = 2, suffix = "") => { if (value == null) return "—"; const rounded = Number(value.toFixed(digits)); return `${rounded > 0 ? "+" : rounded < 0 ? "−" : ""}${Math.abs(rounded).toFixed(digits)}${suffix}`; };
@@ -13,15 +14,15 @@ const tone = (value: number | null | undefined) => value == null || value === 0 
 const price = (value: number | undefined, digits: number) => value === undefined ? "—" : value.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 const rate = (value: number | null) => signed(value === null ? null : value * 100, 5, "%");
 
-function ExchangeComparison({ monitorId, primary, initial, renderedAt }: { monitorId: SpreadMarket; primary?: ExchangeQuote; initial?: ExternalQuoteSet; renderedAt?: number }) {
-  const { quotes, errors, loading, refresh } = useExchangeQuotes(monitorId, initial);
+function ExchangeComparison({ monitorId, primary, initial, renderedAt, active = true }: { monitorId: SpreadMarket; primary?: ExchangeQuote; initial?: ExternalQuoteSet; renderedAt?: number; active?: boolean }) {
+  const { quotes, errors, loading, refresh } = useExchangeQuotes(monitorId, initial, active);
   const [now, setNow] = useState(() => renderedAt ?? Date.now());
   const contracts = exchangeContracts[monitorId], oil = monitorId === "oil";
   useEffect(() => {
-    const update = () => setNow(Date.now());
-    const timer = setInterval(update, 5000); document.addEventListener("visibilitychange", update);
-    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", update); };
-  }, []);
+    if (!active) return;
+    const clock = startActivityPolling({ intervalMs: 5000, load: async () => Date.now(), onData: setNow, onError: () => {} });
+    return () => clock.stop();
+  }, [active]);
   const rows = exchanges.map(exchange => {
     const secondary = quotes[exchange];
     const quote = primary?.exchange === exchange && (!secondary || Date.parse(primary.fetchedAt) >= Date.parse(secondary.fetchedAt)) ? primary : secondary;

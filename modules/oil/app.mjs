@@ -7,9 +7,12 @@ import { createLifecycle } from './lifecycle.mjs';
 import { binanceOilExchangeQuote } from '../../lib/exchange-quotes.ts';
 import { nearestTimeIndex, tablePage, samePriceRows } from './chart-performance.mjs';
 import { startOilAutoRefresh } from './auto-refresh.mjs';
-/** @param {ShadowRoot} root @param {{ initial?: import('../../lib/initial-market').InitialMarketData['oil'], initialReadAt?: number, onSummary?: (summary: import('../../lib/monitor-summary').OilSummaryUpdate) => void }} options */
-export function mount(root, { onSummary, initial, initialReadAt = 0 } = {}) {
+/** @param {ShadowRoot} root @param {{ initial?: import('../../lib/initial-market').InitialMarketData['oil'], initialReadAt?: number, active?: boolean, onSummary?: (summary: import('../../lib/monitor-summary').OilSummaryUpdate) => void }} options */
+export function mount(root, { onSummary, initial, initialReadAt = 0, active = true } = {}) {
 const life = createLifecycle();
+let activityActive = active;
+let activityController = new AbortController();
+if (!active) activityController.abort();
 const $ = id => root.getElementById(id);
 const state = { rows: [], range: '1w', view: 'spread', visible: [], chart: null, selectedDate: null, market: null, metadata: null, basis: 'quantity', marketMode: 'snapshot', historyMode: 'snapshot', refreshing: false, fundingSnapshot: null, fundingByTime: new Map(), fundingChart: null, fundingHistoryMode: 'loading', fundingRefreshing: false, tablePage: 0 };
 const labels = { '1d': '近 1 天', '1w': '近 1 周', '1m': '近 1 月', all: '全部历史' };
@@ -445,28 +448,29 @@ function applyLiveMarket(market) {
   fillMetrics(); renderFunding(); renderStatus();
 }
 
-async function readMarketData(action) {
-  const response = await life.fetch(`/api/monitors/oil/${action}`, { cache: 'no-store', signal: AbortSignal.timeout(15_000) });
+async function readMarketData(action, signal) {
+  const response = await life.fetch(`/api/monitors/oil/${action}`, { cache: 'no-store', signal: AbortSignal.any([AbortSignal.timeout(15_000), ...(signal ? [signal] : [])]) });
   if (!response.ok) throw new Error(`Market data HTTP ${response.status}`);
   return response.json();
 }
 
-async function refreshData(full = true) {
-  if (life.signal.aborted || state.refreshing) return;
+async function refreshData(full = true, signal) {
+  if (life.signal.aborted || !activityActive || state.refreshing) return;
+  signal ??= stopAutoRefresh.signal();
   const generation = ++refreshGeneration;
   let receivedLiveMarket = false;
   state.refreshing = true; $('refresh-data').disabled = true;
   $('connection-status').textContent = '正在更新';
   if (!state.rows.length) { $('loading').hidden = false; $('error').hidden = true; }
   try {
-    const reads = [readMarketData('quote').then(market => {
+    const reads = [readMarketData('quote', signal).then(market => {
       if (generation === refreshGeneration) { applyLiveMarket(market); receivedLiveMarket = market.status !== 'snapshot'; }
     })];
-    if (full || !state.rows.length) reads.push(readMarketData(OIL_CANDLE_ACTION).then(snapshot => applySnapshot(snapshot, snapshot.status === 'snapshot' ? 'snapshot' : 'live')));
+    if (full || !state.rows.length) reads.push(readMarketData(OIL_CANDLE_ACTION, signal).then(snapshot => applySnapshot(snapshot, snapshot.status === 'snapshot' ? 'snapshot' : 'live')));
     const results = await Promise.allSettled(reads);
     const failed = results.find(result => result.status === 'rejected');
     if (failed) throw failed.reason;
-  } catch (error) { if (life.signal.aborted) return;
+  } catch (error) { if (life.signal.aborted || signal?.aborted) return;
     console.warn('Unable to refresh Binance observations:', error);
     if (full && state.rows.length) state.historyMode = 'stale';
     if (state.market) {
@@ -495,11 +499,12 @@ function applyFundingSnapshot(snapshot, mode) {
   if (state.visible.length) { if (changed) { renderFundingHistoryChart(); renderTable(); } else renderFundingHistoryStatus(); }
 }
 
-async function refreshHistoricalFunding() {
-  if (life.signal.aborted || state.fundingRefreshing) return;
+async function refreshHistoricalFunding(signal) {
+  if (life.signal.aborted || !activityActive || state.fundingRefreshing) return;
+  signal ??= stopAutoRefresh.signal();
   state.fundingRefreshing = true;
-  try { const snapshot = await readMarketData('funding'); applyFundingSnapshot(snapshot, snapshot.status === 'snapshot' ? 'snapshot' : 'live'); }
-  catch (error) { if (life.signal.aborted) return;
+  try { const snapshot = await readMarketData('funding', signal); applyFundingSnapshot(snapshot, snapshot.status === 'snapshot' ? 'snapshot' : 'live'); }
+  catch (error) { if (life.signal.aborted || signal?.aborted) return;
     console.warn('Unable to update settled funding history:', error);
     state.fundingHistoryMode = state.fundingSnapshot ? 'stale' : 'error';
     if (state.fundingSnapshot) renderFundingHistoryStatus(); else renderFundingHistoryChart();
@@ -563,7 +568,7 @@ $('chart-cursor').addEventListener('keydown', event => { if (event.key === 'Esca
 $('retry').addEventListener('click', () => refreshData(true));
 $('refresh-data').addEventListener('click', () => { refreshData(true); refreshHistoricalFunding(); });
 root.querySelectorAll('[data-basis]').forEach(button => button.addEventListener('click', () => { state.basis = button.dataset.basis; renderFunding(); }));
-const stopAutoRefresh = startOilAutoRefresh({ prices: () => refreshData(true), funding: refreshHistoricalFunding });
+const stopAutoRefresh = startOilAutoRefresh({ prices: signal => refreshData(true, signal), funding: refreshHistoricalFunding, active });
 let resizeFrame;
 const resizeObserver = new ResizeObserver(() => { if (life.signal.aborted) return; cancelAnimationFrame(resizeFrame); resizeFrame = requestAnimationFrame(() => {
   const svg = $('main-chart');
@@ -577,6 +582,6 @@ if (initial?.candles) applySnapshot(initial.candles, initial.candles.status === 
 if (!state.market) publishSummary('loading');
 loadData();
 loadHistoricalFunding();
-return { setView(input) { if (!['1d','1w','1m','all'].includes(input.range) || !['spread','prices'].includes(input.view)) throw new Error('Invalid chart view'); if (!state.rows.length) throw new Error('行情尚未加载'); if (state.range !== input.range) state.tablePage=0; state.range=input.range; state.view=input.view; render(); return summarize(state.visible); }, dispose() { life.dispose(); stopAutoRefresh(); resizeObserver.disconnect(); cancelAnimationFrame(resizeFrame); cancelAnimationFrame(pointerFrame); } };
+return { setActive(value) { activityActive = value; if (!value) activityController.abort(); else if (activityController.signal.aborted) activityController = new AbortController(); stopAutoRefresh.setActive(value); }, setView(input) { if (!['1d','1w','1m','all'].includes(input.range) || !['spread','prices'].includes(input.view)) throw new Error('Invalid chart view'); if (!state.rows.length) throw new Error('行情尚未加载'); if (state.range !== input.range) state.tablePage=0; state.range=input.range; state.view=input.view; render(); return summarize(state.visible); }, dispose() { life.dispose(); activityController.abort(); stopAutoRefresh(); resizeObserver.disconnect(); cancelAnimationFrame(resizeFrame); cancelAnimationFrame(pointerFrame); } };
 
 }

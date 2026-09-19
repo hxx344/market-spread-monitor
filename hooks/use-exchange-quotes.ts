@@ -2,16 +2,17 @@
 
 import { useEffect, useRef, useState } from "react";
 import { comparisonExchanges, exchangeAction, validateComparisonQuote, EXCHANGE_REFRESH_MS, type Exchange, type ExternalQuoteSet, type SpreadMarket } from "../lib/exchange-quotes";
-import { startPolling } from "../lib/polling";
+import { startActivityPolling } from "../lib/polling";
 
-export function useExchangeQuotes(monitorId: SpreadMarket, initial?: ExternalQuoteSet) {
+export function useExchangeQuotes(monitorId: SpreadMarket, initial?: ExternalQuoteSet, active = true) {
   const [quotes, setQuotes] = useState<ExternalQuoteSet>(initial ?? {});
   const [errors, setErrors] = useState<Partial<Record<Exchange, string>>>({});
   const [loading, setLoading] = useState(false);
-  const polls = useRef<ReturnType<typeof startPolling>[]>([]);
+  const polls = useRef<ReturnType<typeof startActivityPolling>[]>([]);
   const latest = useRef<ExternalQuoteSet>(initial ?? {});
   useEffect(() => {
-    const controls = comparisonExchanges(monitorId).map(exchange => startPolling({
+    if (!active) return;
+    const controls = comparisonExchanges(monitorId).map(exchange => startActivityPolling({
       intervalMs: EXCHANGE_REFRESH_MS,
       async load(signal) {
         if (document.hidden) return null;
@@ -31,10 +32,8 @@ export function useExchangeQuotes(monitorId: SpreadMarket, initial?: ExternalQuo
       onError(error) { setErrors(previous => ({ ...previous, [exchange]: error instanceof Error ? error.message : "行情暂不可用" })); },
     }));
     polls.current = controls;
-    const visible = () => { if (!document.hidden) controls.forEach(control => { void control.refresh(); }); };
-    document.addEventListener("visibilitychange", visible);
-    return () => { controls.forEach(control => control.stop()); polls.current = []; document.removeEventListener("visibilitychange", visible); };
-  }, [monitorId]);
+    return () => { controls.forEach(control => control.stop()); polls.current = []; };
+  }, [monitorId, active]);
   async function refresh() {
     setLoading(true);
     try { await Promise.all(polls.current.map(poll => poll.refresh())); }

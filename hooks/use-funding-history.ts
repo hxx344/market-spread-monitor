@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { startPolling } from "../lib/polling";
+import { startActivityPolling } from "../lib/polling";
 import { createHynixFundingSnapshot, type FundingHistoryData } from "../lib/hynix-funding-history";
 import { retainFundingRows } from "../lib/hynix-funding-analysis";
 
@@ -11,7 +11,7 @@ export function useFundingHistory() {
   const [loading, setLoading] = useState(true);
   const controls = useRef<{ refresh: () => Promise<void> } | null>(null);
   useEffect(() => {
-    const polling = startPolling({
+    const polling = startActivityPolling({
       intervalMs: 300_000,
       async load(signal) {
         const response = await fetch("/api/monitors/hynix/funding", { cache: "no-store", signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]) });

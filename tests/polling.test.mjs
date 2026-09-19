@@ -1,9 +1,36 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { startPolling, QUOTE_REFRESH_MS } from "../lib/polling.ts";
+import { startActivityPolling, startPolling, QUOTE_REFRESH_MS } from "../lib/polling.ts";
 import { loadQuote } from "../lib/quote-service.ts";
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
+
+test("inactive panels create no reads; restoring activity immediately resumes without clearing retained data", async t => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const page = Object.assign(new EventTarget(), { hidden: false });
+  let calls = 0, retained = "initial";
+  const poll = startActivityPolling({ active: false, page, intervalMs: 10000, load: async () => ++calls, onData: value => { retained = value; }, onError: assert.fail });
+  t.after(() => poll.stop());
+  t.mock.timers.tick(60000); await flush(); assert.equal(calls, 0);
+  poll.setActive(true); await flush(); assert.equal(retained, 1);
+  poll.setActive(false); t.mock.timers.tick(60000); await flush(); assert.equal(calls, 1); assert.equal(retained, 1);
+  poll.setActive(true); await flush(); assert.equal(calls, 2);
+  page.hidden = true; page.dispatchEvent(new Event("visibilitychange"));
+  t.mock.timers.tick(60000); await flush(); assert.equal(calls, 2);
+  page.hidden = false; page.dispatchEvent(new Event("visibilitychange")); await flush(); assert.equal(calls, 3);
+});
+
+test("pausing aborts the panel read, suppresses late results and leaves unrelated save operations alive", async t => {
+  const page = Object.assign(new EventTarget(), { hidden: false });
+  const mutation = new AbortController();
+  let requestSignal, finish;
+  const values = [];
+  const poll = startActivityPolling({ page, intervalMs: 10000, load: signal => { requestSignal = signal; return new Promise(resolve => { finish = resolve; }); }, onData: value => values.push(value), onError: assert.fail });
+  t.after(() => poll.stop()); await flush();
+  poll.setActive(false); assert.equal(requestSignal.aborted, true); assert.equal(mutation.signal.aborted, false);
+  finish("old read"); await flush(); assert.deepEqual(values, []);
+  poll.setActive(true); await flush(); finish("new read"); await flush(); assert.deepEqual(values, ["new read"]);
+});
 
 test('hydrated history skips the duplicate first request but polls at its existing cadence and supports immediate manual refresh', async t => {
   t.mock.timers.enable({apis:['setInterval']});

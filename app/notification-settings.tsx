@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Bell, ChevronDown, Save, Send } from "lucide-react";
 import type { NotificationView } from "../lib/notification-types";
+import { startActivityPolling } from "../lib/polling";
 
 const endpoint = "/api/notifications/feishu";
 export default function NotificationSettings() {
@@ -20,6 +21,7 @@ export default function NotificationSettings() {
   const [loadError, setLoadError] = useState("");
   const [message, setMessage] = useState("");
   const dirtyRef = useRef(false), busyRef = useRef(false), latestRevision = useRef(0), generation = useRef(0);
+  const activity = useRef<ReturnType<typeof startActivityPolling> | null>(null);
   const edit = () => { dirtyRef.current = true; setDirty(true); setMessage(""); };
   const apply = (next: NotificationView) => {
     latestRevision.current = next.revision; setView(next); setRevision(next.revision);
@@ -27,29 +29,30 @@ export default function NotificationSettings() {
     dirtyRef.current = false; setDirty(false);
   };
   useEffect(() => {
-    const controller = new AbortController(); let pending = false;
-    const load = async () => {
-      if (pending || busyRef.current || document.hidden) return;
-      pending = true; const requestGeneration = generation.current;
+    const controller = new AbortController();
+    const load = async (signal: AbortSignal) => {
+      if (busyRef.current || document.hidden) return;
+      const requestGeneration = generation.current;
       try {
-        const response = await fetch(endpoint, { cache: "no-store", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]) });
+        const response = await fetch(endpoint, { cache: "no-store", signal: AbortSignal.any([controller.signal, signal, AbortSignal.timeout(15_000)]) });
         if (!response.ok) throw new Error();
         const next: NotificationView = await response.json();
-        if (controller.signal.aborted || generation.current !== requestGeneration || (next.available && next.revision < latestRevision.current)) return;
+        if (controller.signal.aborted || signal.aborted || generation.current !== requestGeneration || (next.available && next.revision < latestRevision.current)) return;
         setLoadError(""); setView(next);
         if (next.available) { latestRevision.current = next.revision; if (!dirtyRef.current) setRevision(next.revision); }
-      } catch { if (!controller.signal.aborted) setLoadError("无法连接统一告警设置，请检查后台服务。"); }
-      finally { pending = false; }
+      } catch { if (!controller.signal.aborted && !signal.aborted) setLoadError("无法连接统一告警设置，请检查后台服务。"); }
     };
     const show = () => { setOpen(true); document.getElementById("shared-feishu")?.scrollIntoView({ block: "start", behavior: "instant" }); };
     const unload = (event: BeforeUnloadEvent) => { if (dirtyRef.current) { event.preventDefault(); event.returnValue = ""; } };
-    void load(); const timer = setInterval(() => { void load(); }, 10_000);
+    const polling = startActivityPolling({ intervalMs: 10_000, active: false, load, onData: () => {}, onError: () => {} });
+    activity.current = polling;
+    const reload = () => { void polling.refresh(); };
     window.addEventListener("open-feishu-settings", show);
-    window.addEventListener("feishu-settings-changed", load);
+    window.addEventListener("feishu-settings-changed", reload);
     window.addEventListener("beforeunload", unload);
-    document.addEventListener("visibilitychange", load);
-    return () => { controller.abort(); clearInterval(timer); window.removeEventListener("open-feishu-settings", show); window.removeEventListener("feishu-settings-changed", load); window.removeEventListener("beforeunload", unload); document.removeEventListener("visibilitychange", load); };
+    return () => { controller.abort(); polling.stop(); activity.current = null; window.removeEventListener("open-feishu-settings", show); window.removeEventListener("feishu-settings-changed", reload); window.removeEventListener("beforeunload", unload); };
   }, []);
+  useEffect(() => { activity.current?.setActive(open); }, [open]);
   async function mutate(testing: boolean) {
     if (busyRef.current) return;
     busyRef.current = true; generation.current++; setBusy(true); setError(""); setMessage("");
@@ -63,7 +66,7 @@ export default function NotificationSettings() {
     finally { generation.current++; busyRef.current = false; setBusy(false); window.dispatchEvent(new Event("feishu-settings-changed")); }
   }
   const connected = view?.available === true;
-  const summary = loadError ? "连接异常" : !view ? "连接后台中…" : !connected ? "Linux 后台未连接" : view.error ? "发送已暂停" : view.candidates.length ? "已有配置待选择" : view.webhookConfigured ? "所有模块共用 · 已配置" : "所有模块共用 · 待配置";
+  const summary = loadError ? "连接异常" : !view ? open ? "连接后台中…" : "展开查看配置" : !connected ? "Linux 后台未连接" : view.error ? "发送已暂停" : view.candidates.length ? "已有配置待选择" : view.webhookConfigured ? "所有模块共用 · 已配置" : "所有模块共用 · 待配置";
   return <div className="hub-notifications"><section id="shared-feishu" className="alert-panel shared-feishu" aria-label="统一飞书告警">
     <button className="alert-heading" aria-expanded={open} aria-controls="shared-feishu-body" onClick={() => setOpen(!open)}><span><Bell size={18}/><strong>统一飞书告警</strong><span className="alert-summary">{summary}{dirty ? " · 未保存" : ""}</span></span><span>设置<ChevronDown size={16} className={open ? "rotated" : ""}/></span></button>
     {open && <div className="alert-body" id="shared-feishu-body">

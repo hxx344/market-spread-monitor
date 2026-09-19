@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EXCHANGES, normalizeUnderlying, classifyMarketIdentity, discoverMarkets, createSubscriptions, parseMessage, getControlResponse } from '../modules/perpetual/exchanges.mjs';
+import { EXCHANGES, normalizeUnderlying, classifyMarketIdentity, discoverMarkets, createSubscriptions, parseMessage, getControlResponse, fetchBookSnapshots } from '../modules/perpetual/exchanges.mjs';
 
 const NOW = 1_789_820_000_000;
 function market(exchange, symbol = 'BTCUSDT', extra = {}) {
@@ -105,20 +105,26 @@ test('Lighter BBO uses market ID, handles microseconds, and funding uses current
   const [book] = parseMessage('lighter', { channel: 'ticker:4', type: 'update/ticker', ticker: { a: { price: '.0101' }, b: { price: '.01' }, last_updated_at: NOW * 1000 } }, markets, NOW);
   assert.equal(book.bid, .00001); assert.equal(book.sourceTime, NOW);
   const [stats] = parseMessage('lighter', { channel: 'market_stats:all', timestamp: NOW, market_stats: { 4: { market_id: 4, current_funding_rate: '0.0012', funding_rate: '0.08', mark_price: '.01', best_bid_price: '5', best_ask_price: '6' } } }, markets, NOW);
-  assert.ok(Math.abs(stats.fundingRate - 0.000012) < 1e-12); assert.equal(stats.fundingIntervalHours, 1); assert.equal(Object.hasOwn(stats, 'bid'), false);
+  assert.ok(Math.abs(stats.fundingRate - 0.000012) < 1e-12); assert.equal(stats.fundingIntervalHours, 1); assert.equal(stats.bid, .005); assert.equal(stats.ask, .006); assert.equal(stats.sourceTime, NOW);
   const [missing] = parseMessage('lighter', { channel: 'market_stats:4', timestamp: NOW, market_stats: { market_id: 4, funding_rate: '0.08', mark_price: '.01' } }, markets, NOW);
   assert.equal(Object.hasOwn(missing, 'fundingRate'), false);
+  assert.equal(Object.hasOwn(missing, 'bid'), false);
+  assert.equal(Object.hasOwn(missing, 'ask'), false);
 });
 
 test('subscription shards fit connection caps and keep Binance public/market endpoints separate', () => {
   assert.equal(EXCHANGES.length, 10);
   const markets = Array.from({ length: 451 }, (_, i) => market('lighter', `COIN${i}`, { marketId: i }));
   const lighter = createSubscriptions('lighter', markets);
-  assert.equal(lighter.length, 2); assert.equal(lighter[0].subscribe.length, 451); assert.equal(lighter[0].sendIntervalMs, 400); assert.ok(lighter[1].startDelayMs >= 180000);
+  assert.equal(lighter.length, 1); assert.equal(lighter[0].subscribe.length, 1); assert.equal(lighter[0].markets.length, 451);
+  assert.deepEqual(lighter[0].poll.messages.map(message => message.type), ['unsubscribe', 'subscribe']);
+  assert.equal(lighter[0].poll.intervalMs, 10000);
   const aster = createSubscriptions('aster', markets.map(row => ({ ...row, exchange: 'aster' })));
   assert.ok(aster.every(spec => spec.subscribe[0].params.length <= 200));
   const binance = createSubscriptions('binance', [market('binance')]);
   assert.ok(binance[0].url.includes('/public/')); assert.ok(binance[1].url.includes('/market/'));
+  assert.deepEqual(binance[0].subscribe[0].params, ['!bookTicker']);
+  assert.deepEqual(binance[1].subscribe[0].params, ['!markPrice@arr']);
   assert.deepEqual(createSubscriptions('okx', []), []);
 });
 
@@ -133,7 +139,8 @@ test('Bybit orderbook level 1 snapshots confirm unchanged current prices indepen
   const [book] = parseMessage('bybit', { topic: 'orderbook.1.BTCUSDT', type: 'snapshot', ts: NOW, cts: NOW - 60000, data: { s: 'BTCUSDT', b: [['100', '2']], a: [['101', '0']], u: 44 } }, [market('bybit')], NOW);
   assert.equal(book.bid, 100); assert.equal(book.ask, null); assert.equal(book.sourceTime, NOW);
   const specs = createSubscriptions('bybit', [market('bybit')]);
-  assert.ok(specs[0].subscribe[0].args.includes('orderbook.1.BTCUSDT'));
+  assert.deepEqual(specs[0].subscribe[0].args, ['tickers.BTCUSDT']);
+  assert.equal(typeof specs[0].snapshot, 'function');
 });
 
 test('subscription errors surface for reconnection; OKX mark-price specifies instrument type', () => {
@@ -191,4 +198,103 @@ test('verified US share contracts match Entropy while crypto or unknown units ne
     assert.notEqual(classifyMarketIdentity('bybit', base, { ...metadata, underlyingTicker: 'OTHER' }).base, identity.base);
     assert.notEqual(classifyMarketIdentity('bybit', base, { ...metadata, symbolType: '' }).base, identity.base);
   }
+});
+
+test('bulk BBO snapshots retain source times, clear empty sides and filter markets', async () => {
+  const bybit = [market('bybit')];
+  const [snapshot] = await fetchBookSnapshots('bybit', bybit, { now: NOW, fetchImpl: reader(() => ({ retCode: 0, time: NOW - 10, result: { list: [{ symbol: 'BTCUSDT', bid1Price: '100', ask1Price: '101', bid1Size: '2', ask1Size: '0' }, { symbol: 'UNKNOWN', bid1Price: '1', ask1Price: '2' }] } })) });
+  assert.equal(snapshot.bid, 100); assert.equal(snapshot.ask, null);
+  assert.equal(snapshot.sourceTime, NOW - 10); assert.equal(snapshot.transport, 'rest');
+  assert.equal(Object.hasOwn(snapshot, 'mark'), false);
+  const [aster] = await fetchBookSnapshots('aster', [market('aster')], { now: NOW, fetchImpl: reader(() => [{ symbol: 'BTCUSDT', bidPrice: '100', askPrice: '101', time: NOW - 60000 }]) });
+  assert.equal(aster.sourceTime, NOW - 60000);
+  await assert.rejects(fetchBookSnapshots('bybit', bybit, { fetchImpl: reader(() => ({ retCode: 10006, retMsg: 'Too many visits' })) }), /Too many visits/);
+  const specs = createSubscriptions('bybit', Array.from({ length: 400 }, (_, i) => market('bybit', `COIN${i}`)));
+  assert.equal(specs.filter(spec => spec.snapshot).length, 1);
+  const rows = await specs[0].snapshot({ now: NOW, fetchImpl: reader(() => ({ retCode: 0, time: NOW, result: { list: [{ symbol: 'COIN399', bid1Price: '100', ask1Price: '101' }] } })) });
+  assert.equal(rows[0].symbol, 'COIN399');
+});
+
+test('Hyperliquid WS info snapshots confirm exact BBO and expose post or partial subscription errors', () => {
+  const markets = [market('hyperliquid', 'BTC')];
+  const payload = { channel: 'post', data: { id: 0, response: { type: 'info', payload: { type: 'l2Book', data: { coin: 'BTC', time: NOW, levels: [[{ px: '100.01', sz: '1' }, { px: '99', sz: '2' }], []] } } } } };
+  const [book] = parseMessage('hyperliquid', payload, markets, NOW);
+  assert.equal(book.bid, 100.01); assert.equal(book.ask, null); assert.equal(book.sourceTime, NOW);
+  const spec = createSubscriptions('hyperliquid', markets)[0];
+  assert.equal(spec.poll.intervalMs, 20000);
+  assert.deepEqual(spec.poll.messages[0].request.payload, { type: 'l2Book', coin: 'BTC' });
+  assert.ok(spec.subscribe.some(message => message.subscription.type === 'bbo'));
+  assert.throws(() => parseMessage('hyperliquid', { channel: 'post', data: { response: { type: 'error', payload: '429 Too Many Requests' } } }, markets), /429/);
+  assert.throws(() => parseMessage('bybit', { op: 'COMMAND_RESP', success: true, data: { failTopics: ['tickers.BTCUSDT'] } }, []), /failTopics/);
+  assert.throws(() => parseMessage('binance', { code: 0, msg: 'Unknown property' }, []), /Unknown property/);
+  assert.throws(() => parseMessage('gate', { event: 'subscribe', result: { status: 'fail' } }, []), /WebSocket/);
+});
+
+test('market lookup cache is reused and refreshed when discovery replaces identities', () => {
+  const markets = [market('binance')], context = {};
+  const payload = { e: 'bookTicker', s: 'BTCUSDT', b: '100', a: '101', E: NOW };
+  parseMessage('binance', payload, markets, NOW, context);
+  const index = context.marketIndex;
+  parseMessage('binance', payload, markets, NOW, context);
+  assert.equal(context.marketIndex, index);
+  const [next] = parseMessage('binance', payload, [{ ...markets[0], base: 'VERIFIED:BTC' }], NOW, context);
+  assert.equal(next.base, 'VERIFIED:BTC');
+  assert.notEqual(context.marketIndex, index);
+});
+
+test('Gate requests decimal quantities and retains executable fractional-contract BBOs', () => {
+  const markets = [market('gate', 'BTC_USDT')];
+  const spec = createSubscriptions('gate', markets)[0];
+  assert.deepEqual(spec.headers, { 'X-Gate-Size-Decimal': '1' });
+  const payload = { channel: 'futures.book_ticker', event: 'update', time_ms: NOW, result: { s: 'BTC_USDT', b: '100', B: '0.1', a: '101', A: '0.25', t: NOW } };
+  const [book] = parseMessage('gate', payload, markets, NOW);
+  assert.equal(book.bid, 100); assert.equal(book.ask, 101);
+  const [removed] = parseMessage('gate', { ...payload, result: { ...payload.result, B: '0' } }, markets, NOW);
+  assert.equal(removed.bid, null);
+});
+
+test('Bitget keeps bounded major-coin WS subscriptions and discovers all snapshot products', async () => {
+  const markets = [market('bitget'), market('bitget', 'ETHUSDT', { base: 'ETH' }), market('bitget', 'SOLUSDT', { base: 'SOL' }), market('bitget', 'OTHERUSDT', { base: 'OTHER' }), market('bitget', 'BTCPERP', { quoteCurrency: 'USDC', productType: 'USDC-FUTURES' })];
+  const [spec] = createSubscriptions('bitget', markets);
+  assert.equal(spec.markets.length, markets.length);
+  assert.deepEqual(spec.subscribe[0].args.map(row => row.instId), ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']);
+  assert.equal(spec.snapshotIntervalMs, 5000);
+  const calls = [];
+  const rows = await spec.snapshot({ now: NOW, fetchImpl: reader(url => {
+    calls.push(url);
+    return { code: '00000', requestTime: NOW, data: [{ symbol: url.includes('USDC') ? 'BTCPERP' : 'OTHERUSDT', ts: String(NOW - 100), bidPr: '100', bidSz: '1', askPr: '101', askSz: '2', markPrice: '100.5', fundingRate: '0.0001' }] };
+  }) });
+  assert.equal(calls.length, 2);
+  assert.ok(calls.some(url => url.endsWith('productType=USDT-FUTURES')));
+  assert.ok(calls.some(url => url.endsWith('productType=USDC-FUTURES')));
+  assert.deepEqual(rows.map(row => row.symbol).sort(), ['BTCPERP', 'OTHERUSDT']);
+  assert.ok(rows.every(row => row.transport === 'rest' && row.sourceTime === NOW - 100 && row.fundingRate === .0001));
+  assert.equal(rows[0].mark, 100.5);
+  assert.equal(Object.hasOwn(rows[0], 'nextFundingAt'), false);
+});
+
+test('Bitget snapshots preserve old row times, normalize baskets and tolerate one unavailable product', async () => {
+  const markets = [market('bitget', '1000PEPEUSDT', { base: 'PEPE', multiplier: 1000 }), market('bitget', 'BTCPERP', { quoteCurrency: 'USDC' })];
+  const rows = await fetchBookSnapshots('bitget', markets, { now: NOW, fetchImpl: reader(url => {
+    if (url.includes('USDC')) return { code: '429', msg: 'Rate limit' };
+    return { code: '00000', requestTime: NOW, data: [{ symbol: '1000PEPEUSDT', ts: NOW - 60000, bidPr: '.01', bidSz: '.1', askPr: '.02', askSz: '0', fundingRate: '0' }, { symbol: 'UNLISTED', bidPr: '1', askPr: '2' }] };
+  }) });
+  assert.equal(rows.length, 1); assert.equal(rows[0].bid, .00001); assert.equal(rows[0].ask, null);
+  assert.equal(rows[0].sourceTime, NOW - 60000); assert.equal(rows[0].fundingRate, 0);
+  const [fallback] = await fetchBookSnapshots('bitget', markets.slice(0, 1), { now: NOW, fetchImpl: reader(() => ({ code: '00000', requestTime: NOW - 20, data: [{ symbol: '1000PEPEUSDT', bidPr: '.01', askPr: '.02' }] })) });
+  assert.equal(fallback.sourceTime, NOW - 20);
+});
+
+test('Hyperliquid and Entropy auxiliary snapshots share a capped budget and only target inactive books', () => {
+  const hl = Array.from({ length: 178 }, (_, index) => market('hyperliquid', `COIN${index}`));
+  const entropy = Array.from({ length: 8 }, (_, index) => market('entropy', `io:COIN${index}`));
+  const specs = [...createSubscriptions('hyperliquid', hl), ...createSubscriptions('entropy', entropy)];
+  // The service enforces this per host, not independently per connection.
+  // This is our conservative cap, not a claim about the official WS limiter.
+  assert.equal(new Set(specs.map(spec => new URL(spec.url).host)).size, 1);
+  assert.ok(specs.every(spec => spec.poll.maxPerMinute === 60));
+  assert.ok(specs.every(spec => spec.poll.staleBookAfterMs === 15000));
+  assert.ok(specs[0].poll.maxPerMinute * 2 < 1200);
+  assert.ok(specs.every(spec => spec.subscribe.some(row => row.subscription.type === 'bbo')));
+  assert.ok(specs.every(spec => spec.poll.sendIntervalMs * spec.poll.messages.length < spec.poll.intervalMs));
 });
