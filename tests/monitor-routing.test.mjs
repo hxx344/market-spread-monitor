@@ -20,6 +20,15 @@ test("registered modules isolate cached requests and retry failed live quotes", 
   assert.equal(new Set(monitors.map(m => m.id)).size, monitors.length);
 });
 
+test('perpetual preview exposes only its own quote adapter and cannot borrow fixed-market exchange routes', async () => {
+  let externalCalls = 0;
+  const read = createDataReader({ perpetual: { quote: async () => ({ status: 'unavailable', quotes: [] }) } }, Date.now, async () => { externalCalls++; });
+  assert.equal((await read('perpetual', 'quote')).status, 'unavailable');
+  await assert.rejects(read('perpetual', 'exchanges/binance/quote'), /Unsupported/);
+  await assert.rejects(read('perpetual', 'history'), /Unsupported/);
+  assert.equal(externalCalls, 0);
+});
+
 test("15-minute candles have an independent one-minute cache, shorter retained-data retry and explicit module capability", async () => {
   let now = 0, calls = 0, status = 'live';
   const read = createDataReader({ oil: { quote: async () => ({}), history: async () => ({ kind: 'daily' }), 'candles/15m': async () => ({ kind: '15m', status, call: ++calls }) }, hynix: { quote: async () => ({}), history: async () => ({}) } }, () => now);

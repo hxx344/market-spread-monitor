@@ -34,6 +34,7 @@ interface DataAdapter {
 | `oil/quote` | `brent, wti, fetchedAt`，每腿含 `markPx, oraclePx, funding` |
 | `oil/history` | `data, market, metadata, status` |
 | `oil/funding` | `data, metadata, status`，UTC 小时资金费 |
+| `perpetual/quote` | `schemaVersion, generatedAt, staleAfterMs, exchanges, quotes`；价格逐字段保留原更新时间，前端按模式过滤过期报价 |
 
 网页预览的实时失败抛错并返回 503。Linux 可返回已保存报价，必须附带 `status: "snapshot"` 和 `collection.stale: true`，没有记录才返回 503。采集时间永不因读取而更新，过期报价不能用于告警。历史回退保留原来源与采集时间，前端明确提示。不能补零、用今日价格生成旧历史，或将采集时间当作交易所未提供的行情时间。
 
@@ -70,6 +71,10 @@ interface DataAdapter {
 ```
 
 公共 `server/http.mjs` 负责统一登录、同源保护、请求体大小、JSON 检查、方法校验和错误状态码。只分发显式声明的 action，未知 ID 不可访问；配置版本冲突使用 `error.status = 409`。
+
+合约行情适配器位于 `modules/perpetual/`，每个平台实现合约发现、WS 订阅和消息解析；`server/perpetual-service.mjs` 负责连接分片、心跳、退避重连、逐字段时间及合并广播。稀疏 ticker 更新必须只提供本次实际出现的字段，不能把缓存盘口作为本次新价格返回。计价币与抵押币独立，不能凭相同简称或强行剥离前缀认定两个合约等价。
+
+`perpetual` 使用专属最新报价库 `ALERT_DATA_DIR/perpetual/market.sqlite`，不积累每秒全市场历史。新建只读流接口需要显式声明 `actions.stream` 和 `stream(request,response)`，公共层先完成登录和方法验证；服务须提供 `closeStreams()`，停机时在等待 HTTP 排空前关闭长连接，并清理慢客户端缓冲。
 
 每个模块使用 `ALERT_DATA_DIR/{id}` 保存告警状态，维护独立数据版本、revision 和原子写入；行情由共享的 `services.market` 管理 SQLite 与独立采集调度。报价落盘后触发告警检查，告警也继续定时检查，均只使用库中未过期报价。持久化失败不得继续无限重发通知；不要读写其他模块状态。初始化失败释放已取得资源，关闭时先排空 HTTP，再停止告警、采集并关闭数据库和通知服务。
 

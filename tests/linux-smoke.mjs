@@ -61,7 +61,10 @@ try {
   assert.equal((await state()).config.webhookConfigured, true);
   assert.equal((await fetch(`${base}/api/monitors/oil/status`, { headers }).then(response => response.json())).webhookConfigured, true);
   const health = await fetch(`${base}/healthz`).then(r=>r.json());
-  assert.deepEqual(health.monitors.sort(), ["hynix", "oil"]);
+  assert.deepEqual(health.monitors.sort(), ["hynix", "oil", "perpetual"]);
+  const perpetualQuote = await fetch(`${base}/api/monitors/perpetual/quote`, { headers }).then(response => response.json());
+  assert.equal(perpetualQuote.monitorId, 'perpetual');
+  assert.ok(Array.isArray(perpetualQuote.exchanges) && Array.isArray(perpetualQuote.quotes));
   let firstCheck = (await state()).status.checkedAt, secondCheck;
   for (let i = 0; i < 70; i++) {
     const current = (await state()).status.checkedAt;
@@ -90,7 +93,17 @@ try {
   assert.ok(collected.datasets.every(dataset => dataset.attempt_ms), "All twelve datasets collect in the background");
   const oilStatus = await fetch(`${base}/api/monitors/oil/status`, { headers }).then(r=>r.json());
   assert.ok(oilStatus.lastAttemptAt, "Oil monitor runs independently of page visits");
-  await stop(); start(); await ready();
+  // A live SSE response must not trap server.close() during shutdown.
+  const stream = await fetch(`${base}/api/monitors/perpetual/stream`, { headers });
+  assert.equal(stream.status, 200);
+  const streamReader = stream.body.getReader();
+  assert.ok((await streamReader.read()).value.length > 0);
+  const shutdownStarted = performance.now();
+  await stop();
+  assert.equal(child.exitCode, 0, 'Graceful shutdown must finish without the forced-exit timer');
+  assert.ok(performance.now() - shutdownStarted < 20_000, 'SSE readers must not block shutdown');
+  await streamReader.cancel();
+  start(); await ready();
   assert.ok(inspect().funding >= collected.funding, "Database observations survive server restart");
   const restarted = await state();
   assert.equal(restarted.config.rules.length, 2); assert.equal(restarted.revision, 1);

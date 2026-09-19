@@ -30,7 +30,7 @@ test('first render reads persisted history immediately with collection stopped a
     assert.equal(summaries.oil.trend.intervalMs, 900_000);
     assert.equal(data.oil.candles.metadata.interval, '15m');
     assert.equal(data.oil.candles.collection.source, 'database');
-  } finally { if (services) { await services.market.stop(); await services.notifications.stop(); } await rm(directory, { recursive: true, force: true }); }
+  } finally { if (services) { await Promise.all([...services.values()].map(service => service.stop())); await services.market.stop(); await services.notifications.stop(); } await rm(directory, { recursive: true, force: true }); }
 });
 
 test('a missing dataset cannot block other first-render data; the server provider is current on every request and releases cleanly', async () => {

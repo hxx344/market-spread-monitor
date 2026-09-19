@@ -24,7 +24,7 @@ server.requestTimeout = 30_000;
 await new Promise((accept, reject) => { server.once("error", reject); server.listen(port, host, accept); });
 services.market.start();
 for (const service of services.values()) service.start();
-console.log(`Market Monitor is listening on http://${host}:${port}; oil and Hynix monitors are running.`);
+console.log(`Market Monitor is listening on http://${host}:${port}; ${[...services.keys()].join(', ')} monitors are running.`);
 } catch (error) { releaseInitialMarket(); await Promise.allSettled([...services.values()].map(service => service.stop())); await services.market.stop(); await services.notifications.stop(); throw error; }
 let closing = false;
 async function shutdown() {
@@ -32,6 +32,7 @@ async function shutdown() {
   closing = true;
   const timeout = setTimeout(() => process.exit(1), 28_000).unref();
   const closed = new Promise(accept => server.close(accept));
+  for (const service of services.values()) service.closeStreams?.();
   await closed;
   releaseInitialMarket();
   // Drain active configuration requests before stopping persistence or releasing locks.

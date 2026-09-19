@@ -53,6 +53,7 @@ export function createHandler({ service, services, username, password, nextHandl
         if (!backend) return json(response, 404, { error: "监控模块不存在" });
         if (Object.hasOwn(backend.actions, action)) {
           if (!backend.actions[action].includes(request.method)) return json(response, 405, { error: "不支持此请求方法" });
+          if (action === 'stream' && typeof backend.stream === 'function') return backend.stream(request, response);
           const writing = request.method !== "GET";
           if (writing) {
             const origin = request.headers.origin;

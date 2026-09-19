@@ -9,14 +9,16 @@ import { openMarketStore } from "./market-store.mjs";
 import { createMarketCollector, marketJobs, seedMarketDatabase } from "./market-collector.mjs";
 import { externalExchanges, exchangeAction, exchangeFromAction, EXCHANGE_REFRESH_MS } from "../lib/exchange-quotes.ts";
 import { OIL_CANDLE_ACTION, OIL_CANDLE_REFRESH_MS } from "../modules/oil/intraday.mjs";
+import { openPerpetualStore } from './perpetual-store.mjs';
+import { createPerpetualService } from './perpetual-service.mjs';
 
 const exchangeActions = Object.fromEntries(externalExchanges.map(exchange => [exchangeAction(exchange), ["GET"]]));
 
 /** Runtime adapters own their schedule, storage and API. They share one HTTP server. */
-export async function createMonitorServices(directory, { externallyLocked = false, env = process.env, notificationOptions, hynixOptions, oilOptions, marketOptions } = {}) {
+export async function createMonitorServices(directory, { externallyLocked = false, env = process.env, notificationOptions, hynixOptions, oilOptions, marketOptions, perpetualOptions } = {}) {
   const oilStore = new FileStore(join(directory, "oil"), externallyLocked);
   await oilStore.acquire();
-  let marketStore;
+  let marketStore, perpetualStore;
   try {
     const pollSeconds = Number(env.OIL_POLL_INTERVAL_SECONDS || 30);
     if (!Number.isInteger(pollSeconds) || pollSeconds < 10 || pollSeconds > 3600) throw new Error("OIL_POLL_INTERVAL_SECONDS 必须为 10–3600 的整数");
@@ -42,7 +44,10 @@ export async function createMonitorServices(directory, { externallyLocked = fals
     const previousOil = await oilStore.read(), oilData = activateBinanceSource(previousOil);
     if (oilData !== previousOil) await oilStore.write(oilData);
     const oil = new Monitor({ store: oilStore, data: oilData, fetchMarket: async () => read("oil", "quote", true), pollSeconds, ...oilOptions, notify: notifications.send, webhookConfigured: notifications.configured });
+    perpetualStore = await openPerpetualStore(join(directory, 'perpetual', 'market.sqlite'));
+    const perpetual = createPerpetualService({ store: perpetualStore, ...perpetualOptions });
     const services = new Map([
+      ['perpetual', perpetual],
       ["hynix", {
         start() { hynixRunning = true; hynix.start(); }, stop() { hynixRunning = false; return hynix.stop(); }, healthy: () => hynix.healthy(),
         async handle(action, method, input) {
@@ -73,5 +78,5 @@ export async function createMonitorServices(directory, { externallyLocked = fals
     services.notifications = notifications;
     services.market = { start: () => collector.start(), healthy: () => collector.healthy(), status: () => marketStore.status(), async stop() { await collector.stop(); marketStore.close(); await oilStore.release(); } };
     return services;
-  } catch (error) { marketStore?.close(); await oilStore.release(); throw error; }
+  } catch (error) { perpetualStore?.close(); marketStore?.close(); await oilStore.release(); throw error; }
 }

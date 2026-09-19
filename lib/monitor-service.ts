@@ -7,15 +7,17 @@ import { exchangeFromAction, type SpreadMarket } from "./exchange-quotes.ts";
 import { readExchangeQuote } from "./exchange-service.ts";
 import { loadOilIntraday } from "./oil-intraday-service.ts";
 import { OIL_CANDLE_ACTION } from "../modules/oil/intraday.mjs";
+import { loadPerpetualSnapshot } from './perpetual-service.ts';
 
 export interface DataAdapter {
   quote: () => Promise<unknown>;
-  history: () => Promise<unknown>;
+  history?: () => Promise<unknown>;
   funding?: () => Promise<unknown>;
   "candles/15m"?: () => Promise<unknown>;
 }
 /** Add a data adapter here and a descriptor in monitors.ts to expose a new module. */
 export const dataAdapters: Record<string, DataAdapter> = {
+  perpetual: { quote: loadPerpetualSnapshot },
   hynix: { quote: loadQuote, history: loadMarket, funding: loadHynixFunding },
   oil: {
     [OIL_CANDLE_ACTION]: loadOilIntraday,
@@ -30,6 +32,7 @@ export function createDataReader(adapters = dataAdapters, clock = Date.now, exch
   const pending = new Map<string, Promise<unknown>>();
   return async function read(id: string, action: string) {
     const exchange = exchangeFromAction(action);
+    if (exchange && id !== 'oil' && id !== 'hynix') throw new Error('Unsupported monitor capability');
     if (!getMonitor(id) || !Object.hasOwn(adapters, id) || (!["quote", "history", "funding", OIL_CANDLE_ACTION].includes(action) && !exchange)) throw new Error("Unknown monitor action");
     const loader = exchange ? () => exchangeReader(exchange, id as SpreadMarket) : adapters[id][action as keyof DataAdapter];
     if (!loader) throw new Error("Unsupported monitor capability");
