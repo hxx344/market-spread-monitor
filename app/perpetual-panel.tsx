@@ -3,12 +3,15 @@
 import { Fragment, memo, useDeferredValue, useEffect, useMemo, useState } from "react";
 import { ArrowDown, ChevronDown, ChevronLeft, ChevronRight, RefreshCw, Search, SlidersHorizontal, Star } from "lucide-react";
 import { usePerpetualFeed } from "../hooks/use-perpetual-feed";
+import { usePerpetualQuality } from "../hooks/use-perpetual-quality";
+import { defaultQualityBudget, evaluateOpportunityQuality, parseQualityBudget, qualityPairKey, type OpportunityQuality, type PerpetualQualityReport } from "../lib/perpetual-quality";
 import { classifyPerpetualQuote, createPerpetualQuoteSelector, createPerpetualRankingSelector, defaultPerpetualFilters, normalizedFunding8h, parsePerpetualPreferences, quotePriceTime, type PerpetualFilters, type PerpetualSpread } from "../lib/perpetual-spreads";
 import type { PerpetualExchange, PerpetualPairMode, PerpetualPriceMode, PerpetualQuote } from "../lib/perpetual-types";
 import type { SummaryProps } from "../lib/monitor-summary";
 import "./perpetual.css";
 
 const preferencesKey = "market-monitor:perpetual:v1";
+const qualityBudgetKey = "market-monitor:perpetual-quality-budget:v1";
 const pageSize = 30;
 const emptyQuotes: PerpetualQuote[] = [];
 const emptyExchanges: PerpetualExchange[] = [];
@@ -20,6 +23,11 @@ const stamp = (value: number | null | undefined) => value && Number.isFinite(val
 const percent = (value: number | null, digits = 3) => value === null || !Number.isFinite(value) ? "—" : `${value > 0 ? "+" : value < 0 ? "−" : ""}${Math.abs(value).toFixed(digits)}%`;
 const age = (time: number, now: number) => `${Math.max(0, Math.floor((now - time) / 1000))} 秒前`;
 const priceFormats = [2, 4, 6, 12].map(maximumFractionDigits => new Intl.NumberFormat("en-US", { maximumFractionDigits }));
+const usdFormat = new Intl.NumberFormat("zh-CN", { style: "currency", currency: "USD", notation: "compact", maximumFractionDigits: 2 });
+const finite = (value: number | null | undefined): value is number => typeof value === "number" && Number.isFinite(value);
+const share = (value: number | null | undefined, digits = 1) => finite(value) ? `${(value * 100).toFixed(digits)}%` : "—";
+const usd = (value: number | null | undefined) => finite(value) && value > 0 ? usdFormat.format(value) : "—";
+const deviation = (value: number | null | undefined) => finite(value) ? `${value.toFixed(4)} 百分点` : "—";
 function price(value: number | null) {
   if (value === null || !Number.isFinite(value) || value <= 0) return "—";
   if (value < 0.00000001) return value.toExponential(4);
@@ -33,6 +41,36 @@ function DelistingNotice({ quote, now }: { quote: PerpetualQuote; now: number })
   return <div className={`perp-delisting${due ? " is-due" : ""}`}>
     <span className="perp-delisting-label">{due ? "已到下架时间" : "即将下架"}</span>
     <span className="perp-delisting-time">{at === null ? "下架时间待公布" : <><time dateTime={new Date(at).toISOString()}>{delistingFormat.format(at)}</time> <span className="perp-delisting-zone">北京时间</span></>}</span>
+  </div>;
+}
+
+function QualityCell({ quality, base, onInspect }: { quality: OpportunityQuality; base: string; onInspect: () => void }) {
+  return <button type="button" className={`perp-quality-grade ${quality.grade}`} aria-label={`查看 ${base} 聚合质量依据：${quality.label}${quality.score === null ? "" : `，${quality.score} 分`}，数据覆盖 ${quality.coverage}%`} onClick={onInspect}>
+    <strong>{quality.label}<b>{quality.score === null ? "—" : quality.score}<small>{quality.score === null ? "" : "/100"}</small></b></strong>
+    <span>数据覆盖 {quality.coverage}%</span>
+  </button>;
+}
+
+function QualityEvidence({ row, report, quality, venues, now }: { row: PerpetualSpread; report: PerpetualQualityReport | null; quality: OpportunityQuality; venues: Map<string, PerpetualExchange>; now: number }) {
+  const asset = report?.assets[row.base];
+  const history = report?.pairs[qualityPairKey(row)];
+  const spread = history?.spread, funding = history?.funding;
+  const dilution = asset && finite(asset.marketCapUsd) && asset.marketCapUsd > 0 && finite(asset.fdvUsd) && asset.fdvUsd > 0 ? asset.marketCapUsd / asset.fdvUsd : null;
+  const reportStale = Boolean(report && now - report.generatedAt > 180_000);
+  const legs = [{ label: "做多腿", quote: row.long }, { label: "做空腿", quote: row.short }];
+  return <div className="perp-quality-evidence">
+    <div className="perp-quality-evidence-heading"><strong>聚合质量依据 <span>{quality.label}{quality.score === null ? "" : ` · ${quality.score} / 100`}</span></strong><span>{report ? `${reportStale ? "上次资料 · 已过期" : "资料更新"} ${stamp(report.generatedAt)} 北京时间` : "资料采集中"}</span></div>
+    <div className="perp-quality-grid">
+      <section><h4>市值与 FDV <small>USD</small></h4><dl><div><dt>市值</dt><dd>{usd(asset?.marketCapUsd)}</dd></div><div><dt>完全稀释估值 / FDV</dt><dd>{usd(asset?.fdvUsd)}</dd></div><div><dt>市值 / FDV</dt><dd>{share(dilution)}</dd></div></dl><p>{asset ? <><a href={`https://www.coingecko.com/en/coins/${encodeURIComponent(asset.coinId)}`} target="_blank" rel="noopener noreferrer">{asset.name}</a> · CoinGecko · {stamp(asset.updatedAt)}</> : report?.assetErrors[row.base] || "市值资料采集中"}</p>{asset && (!asset.updatedAt || now - asset.updatedAt > 3_600_000) ? <p className="perp-quality-warning">市值资料已过期，未计入评分</p> : null}</section>
+      <section><h4>交易所官方多空比例</h4>{legs.map(({ label, quote }) => {
+        const key = `${quote.exchange}:${quote.symbol}`, ratio = report?.positioning[key];
+        return <div className="perp-positioning-leg" key={key}><strong>{label} · {venues.get(quote.exchange)?.name ?? quote.exchange}</strong><small>{quote.symbol}</small>{ratio ? <><p className="perp-positioning-values">多 {share(ratio.longRatio)} <span>/</span> 空 {share(ratio.shortRatio)}</p><small>{ratio.kind === "accounts" ? "账户人数占比" : "持仓量占比"} · 范围：{ratio.scope}</small><small>{ratio.source.startsWith("https://") ? <a href={ratio.source} target="_blank" rel="noopener noreferrer">官方数据</a> : "官方数据"} · {stamp(ratio.observedAt)}{now - ratio.observedAt > 900_000 ? " · 已过期" : ""}</small></> : <p>{report?.positioningErrors[key] || "官方多空资料采集中"}</p>}</div>;
+      })}<p>账户人数与持仓量口径不混算。</p></section>
+      <section><h4>盘口价差稳定度 <small>近 1h</small></h4><p className="perp-quality-samples">{spread?.samples ? `${spread.samples} / ${spread.expectedSamples} 个样本 · 覆盖 ${share(spread.coverage)}` : "采集中 · 暂无有效样本"}</p><dl><div><dt>价差均值</dt><dd>{percent(spread?.mean ?? null, 4)}</dd></div><div><dt>标准差</dt><dd>{deviation(spread?.stddev)}</dd></div><div><dt>正价差占比</dt><dd>{share(spread?.positiveRatio)}</dd></div></dl><p>{spread?.lastAt ? `最近有效样本 ${stamp(spread.lastAt)}${now - spread.lastAt > 180_000 ? " · 已过期" : ""}` : "等待同一平台组合的有效盘口"}{spread?.samples && spread.samples < 30 ? " · 尚未满 30 个有效点" : ""}</p></section>
+      <section><h4>资金费稳定度 <small>近 24h · 折算 / 8h</small></h4><p className="perp-quality-samples">{funding?.samples ? `${funding.samples} / ${funding.expectedSamples} 个样本 · 覆盖 ${share(funding.coverage)}` : "采集中 · 暂无有效样本"}</p><dl><div><dt>做多腿标准差</dt><dd>{deviation(funding?.longStddev)}</dd></div><div><dt>做空腿标准差</dt><dd>{deviation(funding?.shortStddev)}</dd></div><div><dt>两腿费差均值</dt><dd>{percent(funding?.mean ?? null, 4)}</dd></div></dl><p>{funding?.lastAt ? `最近有效样本 ${stamp(funding.lastAt)}${now - funding.lastAt > 600_000 ? " · 已过期" : ""} · ` : ""}采样为实时预估费率，非已结算资金费。</p></section>
+    </div>
+    <div className="perp-quality-rubric">{quality.dimensions.map(dimension => <details key={dimension.id}><summary>{dimension.label}<span>{dimension.score === null ? "缺失 / 未评分" : `${dimension.score} / 100`} · 权重 {dimension.weight}%</span></summary><p>{dimension.detail}</p></details>)}</div>
+    <div className="perp-quality-conclusion"><p>扣辅助预算后价差 <strong>{percent(quality.netSpreadPercent)}</strong>；未计持有期资金费与实际成交差异。</p>{quality.reasons.length ? <ul>{quality.reasons.map(reason => <li key={reason}>{reason}</li>)}</ul> : null}<p>分数是筛选参考，不代表盈利概率；数据覆盖按可评分维度权重计算，缺失项未补零。</p></div>
   </div>;
 }
 
@@ -62,6 +100,8 @@ function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: 
   const { data, connection, error, now, refresh } = usePerpetualFeed(active);
   const [filters, setFilters] = useState<PerpetualFilters>(defaultPerpetualFilters);
   const [preferencesReady, setPreferencesReady] = useState(false);
+  const [qualityBudget, setQualityBudget] = useState(defaultQualityBudget);
+  const [qualityBudgetReady, setQualityBudgetReady] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [page, setPage] = useState(1);
@@ -92,7 +132,10 @@ function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: 
   const totalItems = view === "rank" ? ranking.length : quoteSelection.keys.length;
   const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
   const visiblePage = Math.min(page, totalPages);
-  const rows = ranking.slice((visiblePage - 1) * pageSize, visiblePage * pageSize);
+  const rows = useMemo(() => ranking.slice((visiblePage - 1) * pageSize, visiblePage * pageSize), [ranking, visiblePage]);
+  const qualityPairs = useMemo(() => rows.map(row => ({ base: row.base, longKey: `${row.long.exchange}:${row.long.symbol}`, shortKey: `${row.short.exchange}:${row.short.symbol}` })), [rows]);
+  const { report: qualityReport, loading: qualityLoading, error: qualityError } = usePerpetualQuality(qualityPairs, active && view === "rank");
+  const qualities = useMemo(() => new Map(rows.map(row => [qualityPairKey(row), evaluateOpportunityQuality(row, qualityReport, now, qualityBudget, filters.priceMode)])), [rows, qualityReport, now, qualityBudget, filters.priceMode]);
   const quoteRows = view === "quotes" ? quoteSelection.keys.slice((visiblePage - 1) * pageSize, visiblePage * pageSize).map(key => quoteSelection.byKey.get(key)!) : emptyQuotes;
   const detailQuotes = useMemo(() => expanded ? quotes.filter(quote => quote.base === expanded && (!selected || selected.has(quote.exchange))) : [], [quotes, expanded, selected]);
 
@@ -110,6 +153,20 @@ function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: 
     if (!preferencesReady) return;
     try { localStorage.setItem(preferencesKey, JSON.stringify({ version: 1, ...filters })); } catch { /* Filtering remains available with storage disabled. */ }
   }, [filters, preferencesReady]);
+  useEffect(() => {
+    function restoreBudget(event?: StorageEvent) {
+      if (event && event.key !== qualityBudgetKey) return;
+      try { setQualityBudget(parseQualityBudget(localStorage.getItem(qualityBudgetKey))); } catch { /* Budget editing remains available without storage. */ }
+      setQualityBudgetReady(true);
+    }
+    restoreBudget();
+    window.addEventListener("storage", restoreBudget);
+    return () => window.removeEventListener("storage", restoreBudget);
+  }, []);
+  useEffect(() => {
+    if (!qualityBudgetReady) return;
+    try { localStorage.setItem(qualityBudgetKey, JSON.stringify({ version: 1, ...qualityBudget })); } catch { /* Budget editing remains available without storage. */ }
+  }, [qualityBudget, qualityBudgetReady]);
   const summaryStatus = !data ? "loading" : data.status === "unavailable" ? "error" : expired || connection === "error" || data.status === "snapshot" ? "stale" : data.status === "connecting" ? "loading" : "live";
   const summaryTime = data ? Math.floor(data.generatedAt / 5_000) * 5_000 : null;
   useEffect(() => {
@@ -148,15 +205,36 @@ function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: 
     <div className="perp-toolbar"><label className="perp-search"><Search size={17} aria-hidden="true"/><input aria-label="搜索币种" placeholder="搜索币种，如 BTC、ETH" value={filters.search} maxLength={40} onChange={event => updateFilters({ search: event.target.value.toUpperCase() })}/></label><button type="button" className={`perp-tool-button ${filters.favoritesOnly ? "is-selected" : ""}`} aria-pressed={filters.favoritesOnly} onClick={() => updateFilters({ favoritesOnly: !filters.favoritesOnly })}><Star size={16}/>自选<span>{favorites.size}</span></button><button type="button" className={`perp-tool-button ${filtersOpen ? "is-selected" : ""}`} aria-expanded={filtersOpen} aria-controls="perpetual-filters" onClick={() => setFiltersOpen(value => !value)}><SlidersHorizontal size={16}/>筛选<span>{selected ? selected.size : exchanges.length} 平台</span></button></div>
     {filtersOpen ? <div className="perp-filters" id="perpetual-filters"><fieldset><legend>交易所 <button type="button" onClick={() => updateFilters({ exchanges: null })}>全选</button><button type="button" onClick={() => updateFilters({ exchanges: [] })}>清空</button></legend><div className="perp-exchange-options">{exchanges.map(exchange => <label key={exchange.id}><input type="checkbox" checked={!selected || selected.has(exchange.id)} onChange={() => toggleExchange(exchange.id)}/>{exchange.name}<small>{exchange.kind.toUpperCase()}</small><span className={`perp-exchange-state ${exchange.status}`}>{exchangeLabels[exchange.status]}</span></label>)}</div></fieldset><div className="perp-filter-fields"><label>平台组合<select value={filters.pairMode} onChange={event => updateFilters({ pairMode: event.target.value as PerpetualPairMode })}><option value="all">全部组合</option><option value="cex-dex">CEX ↔ DEX</option><option value="cex-cex">CEX ↔ CEX</option><option value="dex-dex">DEX ↔ DEX</option></select></label><label>最低毛价差 / %<input type="number" min={-100} max={1000} step="0.01" value={filters.minSpreadPercent} onChange={event => { const value = event.target.valueAsNumber; updateFilters({ minSpreadPercent: Number.isFinite(value) ? Math.max(-100, Math.min(1000, value)) : 0 }); }}/></label><label>计价币范围<select value={filters.crossCurrency ? "cross" : "same"} onChange={event => updateFilters({ crossCurrency: event.target.value === "cross" })}><option value="same">仅相同计价币</option><option value="cross">USD / USDT / USDC / USD1 / USDG 跨币比较</option></select></label></div><div className="perp-filter-footer"><span>筛选与自选保存在当前浏览器</span><button type="button" onClick={resetFilters}>重置筛选</button><button type="button" className="perp-filter-done" onClick={() => setFiltersOpen(false)}>完成</button></div></div> : null}
 
-    <div className="perp-ranking-heading"><div><div className="perp-view-tabs" role="group" aria-label="行情视图"><button type="button" aria-pressed={view === "rank"} onClick={() => { setView("rank"); setPage(1); }}>价差排名 {view === "rank" ? <span>{ranking.length}</span> : null}</button><button type="button" aria-pressed={view === "quotes"} onClick={() => { setView("quotes"); setPage(1); }}>全部报价 <span>{quoteSelection.keys.length}</span></button></div><p>{view === "rank" ? "每币种保留最佳组合，按毛价差降序" : "包含单平台、未配对及过期报价"}</p></div><div className="perp-price-mode" aria-label="报价口径"><button type="button" aria-pressed={filters.priceMode === "book"} className={filters.priceMode === "book" ? "active" : ""} onClick={() => updateFilters({ priceMode: "book" })}>买卖盘口</button><button type="button" aria-pressed={filters.priceMode === "mark"} className={filters.priceMode === "mark" ? "active" : ""} onClick={() => updateFilters({ priceMode: "mark" })}>标记价格</button></div></div>
+    <div className="perp-ranking-heading"><div><div className="perp-view-tabs" role="group" aria-label="行情视图"><button type="button" aria-pressed={view === "rank"} onClick={() => { setView("rank"); setPage(1); }}>价差排名 {view === "rank" ? <span>{ranking.length}</span> : null}</button><button type="button" aria-pressed={view === "quotes"} onClick={() => { setView("quotes"); setPage(1); }}>全部报价 <span>{quoteSelection.keys.length}</span></button></div><p>{view === "rank" ? "每币种当前最大毛价差组合，按毛价差降序" : "包含单平台、未配对及过期报价"}</p></div><div className="perp-price-mode" aria-label="报价口径"><button type="button" aria-pressed={filters.priceMode === "book"} className={filters.priceMode === "book" ? "active" : ""} onClick={() => updateFilters({ priceMode: "book" })}>买卖盘口</button><button type="button" aria-pressed={filters.priceMode === "mark"} className={filters.priceMode === "mark" ? "active" : ""} onClick={() => updateFilters({ priceMode: "mark" })}>标记价格</button></div></div>
     <div className="perp-basis"><span>WS 优先 · 快照补充</span><span>{filters.crossCurrency ? "跨计价币比较 · 未做汇率换算" : "仅比较相同计价币"}</span><span>{filters.priceMode === "book" ? "毛价差未扣手续费与滑点" : "标记价仅供估值参考，不代表可成交价格"}</span>{quoteQuality.stale ? <span className="perp-stale-count">当前筛选 {quoteQuality.stale} 条报价超过 30 秒未更新</span> : null}{quoteQuality.unavailable ? <span>{quoteQuality.unavailable} 条{filters.priceMode === "book" ? "暂无有效盘口" : "暂无标记价"}</span> : null}</div>
+    {view === "rank" ? <>
+      <details className="perp-quality-budget"><summary>辅助成本预算<span>手续费 {qualityBudget.feePercent.toFixed(2)}% · 滑点 {qualityBudget.slippagePercent.toFixed(2)}%</span><ChevronDown size={14}/></summary><div className="perp-quality-budget-fields">
+        <label>双腿往返手续费 / %<input type="number" min={0} max={10} step="0.01" value={qualityBudget.feePercent} onChange={event => { const value = event.target.valueAsNumber; if (Number.isFinite(value)) setQualityBudget(previous => ({ ...previous, feePercent: Math.max(0, Math.min(10, value)) })); }}/></label>
+        <label>双腿往返滑点 / %<input type="number" min={0} max={10} step="0.01" value={qualityBudget.slippagePercent} onChange={event => { const value = event.target.valueAsNumber; if (Number.isFinite(value)) setQualityBudget(previous => ({ ...previous, slippagePercent: Math.max(0, Math.min(10, value)) })); }}/></label>
+        <button type="button" onClick={() => setQualityBudget({ ...defaultQualityBudget })}>恢复默认</button>
+      </div><p>按本金百分比估算，默认手续费 0.24%、滑点 0.10%；仅辅助判断成本，不改变毛价差排序。预算单独保存在当前浏览器。</p></details>
+      <div className="perp-quality-caption"><span>聚合质量：市值 / FDV、官方多空比与历史稳定度</span><span>{qualityLoading ? "质量资料更新中" : qualityReport ? `资料 ${stamp(qualityReport.generatedAt)} · 每分钟更新` : "质量资料采集中"}</span></div>
+      {qualityError || qualityReport?.error ? <p className="perp-quality-notice" role="status">{qualityError || qualityReport?.error}</p> : null}
+    </> : null}
     {filters.crossCurrency ? <p className="perp-currency-warning">USD、USDT、USDC、USD1、USDG 按数值直接比较，未换汇；价差可能包含稳定币偏离。</p> : null}
-    {view === "quotes" ? <><p className="perp-quotes-caption">平台组合与价差阈值仅影响排名。此处保留原始合约单位，独立合约不参与跨所比较。</p><div className="perp-table-wrap"><QuoteDetails quotes={quoteRows} venues={venues} mode={filters.priceMode} now={now} staleAfterMs={data?.staleAfterMs ?? 30_000} standalone/>{!quoteRows.length ? <div className="perp-empty"><strong>暂无符合条件的报价</strong><p>{!data || !quotes.length ? emptyMessage : "可以调整币种搜索或交易所筛选。"}</p></div> : null}</div></> : <div className="perp-table-wrap"><table className="perp-table"><thead><tr><th scope="col">币种</th><th scope="col">做多 / {filters.priceMode === "book" ? "买入卖一" : "标记价"}</th><th scope="col">做空 / {filters.priceMode === "book" ? "卖出买一" : "标记价"}</th><th scope="col" aria-sort="descending">毛价差 <ArrowDown size={12}/></th><th scope="col">资金费差 / 8h</th><th scope="col">报价时间</th><th scope="col"><span className="perp-sr-only">展开报价</span></th></tr></thead>
-      <tbody>{rows.map(row => <Fragment key={row.base}><tr className={expanded === row.base ? "perp-row-expanded" : undefined}><th scope="row" className="perp-base-cell"><button type="button" className={`perp-star ${favorites.has(row.base) ? "is-favorite" : ""}`} aria-label={`${favorites.has(row.base) ? "移除" : "添加"} ${row.base} 自选`} aria-pressed={favorites.has(row.base)} onClick={() => toggleFavorite(row.base)}><Star size={17} fill={favorites.has(row.base) ? "currentColor" : "none"}/></button><div><strong>{row.base}</strong><small>{row.crossCurrency ? `${row.long.quoteCurrency} / ${row.short.quoteCurrency}` : row.long.quoteCurrency}<span>{row.crossCurrency ? "未换汇" : "永续"}</span></small></div></th><td className="perp-leg perp-long"><span className="perp-mobile-label">做多</span><strong>{venues.get(row.long.exchange)?.name ?? row.long.exchange}<small>{venues.get(row.long.exchange)?.kind.toUpperCase()}</small></strong><span title={String(row.buyPrice)}>{price(row.buyPrice)} <small>{row.long.quoteCurrency}</small></span><DelistingNotice quote={row.long} now={now}/></td><td className="perp-leg perp-short"><span className="perp-mobile-label">做空</span><strong>{venues.get(row.short.exchange)?.name ?? row.short.exchange}<small>{venues.get(row.short.exchange)?.kind.toUpperCase()}</small></strong><span title={String(row.sellPrice)}>{price(row.sellPrice)} <small>{row.short.quoteCurrency}</small></span><DelistingNotice quote={row.short} now={now}/></td><td className={`perp-spread ${row.spreadPercent > 0 ? "positive" : row.spreadPercent < 0 ? "negative" : ""}`}><strong>{percent(row.spreadPercent)}</strong><span className="perp-mobile-label">毛价差</span></td><td className={`perp-funding ${row.fundingSpread8h !== null && row.fundingSpread8h < 0 ? "negative" : ""}`}><span className="perp-mobile-label">费差 / 8h</span><strong>{row.fundingSpread8h === null ? "—" : percent(row.fundingSpread8h * 100, 4)}</strong></td><td className="perp-time"><time dateTime={new Date(row.updatedAt).toISOString()}>{stamp(row.updatedAt)}</time><small>{age(row.updatedAt, now)}</small></td><td className="perp-expand-cell"><button type="button" aria-label={`${expanded === row.base ? "收起" : "展开"} ${row.base} 各平台报价`} aria-expanded={expanded === row.base} aria-controls={`perp-detail-${row.base}`} onClick={() => setExpanded(value => value === row.base ? null : row.base)}><ChevronDown size={17}/></button></td></tr>{expanded === row.base ? <tr className="perp-detail-row" id={`perp-detail-${row.base}`}><td colSpan={7}><QuoteDetails quotes={detailQuotes} venues={venues} mode={filters.priceMode} now={now} staleAfterMs={data?.staleAfterMs ?? 30_000}/></td></tr> : null}</Fragment>)}</tbody></table>
+    {view === "quotes" ? <><p className="perp-quotes-caption">平台组合与价差阈值仅影响排名。此处保留原始合约单位，独立合约不参与跨所比较。</p><div className="perp-table-wrap"><QuoteDetails quotes={quoteRows} venues={venues} mode={filters.priceMode} now={now} staleAfterMs={data?.staleAfterMs ?? 30_000} standalone/>{!quoteRows.length ? <div className="perp-empty"><strong>暂无符合条件的报价</strong><p>{!data || !quotes.length ? emptyMessage : "可以调整币种搜索或交易所筛选。"}</p></div> : null}</div></> : <div className="perp-table-wrap"><table className="perp-table"><thead><tr><th scope="col">币种</th><th scope="col">做多 / {filters.priceMode === "book" ? "买入卖一" : "标记价"}</th><th scope="col">做空 / {filters.priceMode === "book" ? "卖出买一" : "标记价"}</th><th scope="col" aria-sort="descending">毛价差 <ArrowDown size={12}/></th><th scope="col">聚合质量</th><th scope="col">资金费差 / 8h</th><th scope="col">报价时间</th><th scope="col"><span className="perp-sr-only">展开报价</span></th></tr></thead>
+      <tbody>{rows.map(row => {
+        const quality = qualities.get(qualityPairKey(row))!;
+        return <Fragment key={row.base}><tr className={expanded === row.base ? "perp-row-expanded" : undefined}>
+          <th scope="row" className="perp-base-cell"><button type="button" className={`perp-star ${favorites.has(row.base) ? "is-favorite" : ""}`} aria-label={`${favorites.has(row.base) ? "移除" : "添加"} ${row.base} 自选`} aria-pressed={favorites.has(row.base)} onClick={() => toggleFavorite(row.base)}><Star size={17} fill={favorites.has(row.base) ? "currentColor" : "none"}/></button><div><strong>{row.base}</strong><small>{row.crossCurrency ? `${row.long.quoteCurrency} / ${row.short.quoteCurrency}` : row.long.quoteCurrency}<span>{row.crossCurrency ? "未换汇" : "永续"}</span></small></div></th>
+          <td className="perp-leg perp-long"><span className="perp-mobile-label">做多</span><strong>{venues.get(row.long.exchange)?.name ?? row.long.exchange}<small>{venues.get(row.long.exchange)?.kind.toUpperCase()}</small></strong><span title={String(row.buyPrice)}>{price(row.buyPrice)} <small>{row.long.quoteCurrency}</small></span><DelistingNotice quote={row.long} now={now}/></td>
+          <td className="perp-leg perp-short"><span className="perp-mobile-label">做空</span><strong>{venues.get(row.short.exchange)?.name ?? row.short.exchange}<small>{venues.get(row.short.exchange)?.kind.toUpperCase()}</small></strong><span title={String(row.sellPrice)}>{price(row.sellPrice)} <small>{row.short.quoteCurrency}</small></span><DelistingNotice quote={row.short} now={now}/></td>
+          <td className={`perp-spread ${row.spreadPercent > 0 ? "positive" : row.spreadPercent < 0 ? "negative" : ""}`}><strong>{percent(row.spreadPercent)}</strong><span className="perp-mobile-label">毛价差</span></td>
+          <td className="perp-quality-cell"><span className="perp-mobile-label">聚合质量</span><QualityCell quality={quality} base={row.base} onInspect={() => setExpanded(row.base)}/></td>
+          <td className={`perp-funding ${row.fundingSpread8h !== null && row.fundingSpread8h < 0 ? "negative" : ""}`}><span className="perp-mobile-label">费差 / 8h</span><strong>{row.fundingSpread8h === null ? "—" : percent(row.fundingSpread8h * 100, 4)}</strong></td>
+          <td className="perp-time"><time dateTime={new Date(row.updatedAt).toISOString()}>{stamp(row.updatedAt)}</time><small>{age(row.updatedAt, now)}</small></td>
+          <td className="perp-expand-cell"><button type="button" aria-label={`${expanded === row.base ? "收起" : "展开"} ${row.base} 质量依据与各平台报价`} aria-expanded={expanded === row.base} aria-controls={`perp-detail-${row.base}`} onClick={() => setExpanded(value => value === row.base ? null : row.base)}><ChevronDown size={17}/></button></td>
+        </tr>{expanded === row.base ? <tr className="perp-detail-row" id={`perp-detail-${row.base}`}><td colSpan={8}><QualityEvidence row={row} report={qualityReport} quality={quality} venues={venues} now={now}/><QuoteDetails quotes={detailQuotes} venues={venues} mode={filters.priceMode} now={now} staleAfterMs={data?.staleAfterMs ?? 30_000}/></td></tr> : null}</Fragment>;
+      })}</tbody></table>
       {!rows.length ? <div className="perp-empty"><span aria-hidden="true">—</span><strong>{!data || data.status === "connecting" ? "等待实时报价" : "暂无符合条件的价差"}</strong><p>{emptyMessage}</p>{quotes.length > 0 ? <button type="button" onClick={resetFilters}>重置筛选</button> : null}</div> : null}
     </div>}
     <div className="perp-pagination"><span>{totalItems ? `${(visiblePage - 1) * pageSize + 1}–${Math.min(visiblePage * pageSize, totalItems)} / ${totalItems} ${view === "rank" ? "币种" : "报价"}` : `0 ${view === "rank" ? "币种" : "报价"}`}<small>每页 {pageSize} 条</small></span><div><button type="button" aria-label="上一页" disabled={visiblePage <= 1} onClick={() => setPage(visiblePage - 1)}><ChevronLeft size={16}/></button><span>{visiblePage} / {totalPages}</span><button type="button" aria-label="下一页" disabled={visiblePage >= totalPages} onClick={() => setPage(visiblePage + 1)}><ChevronRight size={16}/></button></div></div>
-    <details className="perp-method"><summary>计算口径与数据时间</summary><p>毛价差 =（做空平台价格 ÷ 做多平台价格 − 1）× 100%。买卖盘口取买入卖一、卖出买一；标记价格取两平台标记价。做多与做空必须来自不同在线平台，两腿价格时间相差不超过 5 秒；每币种选择满足筛选条件的最高价差。</p><p>资金费差 = 做空腿费率 × 8 ÷ 该腿周期小时数 − 做多腿费率 × 8 ÷ 该腿周期小时数。正值表示按当前费率估算的净收入，负值为净支出；不是已结算收益。资金费或实际周期缺失、超过 5 分钟未更新时显示「—」。</p><p>价格超过 {(data?.staleAfterMs ?? 30_000) / 1000} 秒未更新会退出排名，成交价不会代替缺失盘口。报价时间取两腿较早的价格时间，所有时钟均为北京时间。毛价差未计手续费、滑点、深度和资金费；跨平台对冲仍存在成交差异。</p><p>每 5 分钟核对交易所公开合约目录；未标记不代表尚未公告，公开接口信息可能不完整。</p><p>最近快照 {stamp(data?.generatedAt)}。页面隐藏或切换监控后暂停接收，返回立即刷新；实时推送中断时自动切换为每 5 秒快照，并尝试恢复推送。</p></details>
+    <details className="perp-method"><summary>计算口径与数据时间</summary><p>毛价差 =（做空平台价格 ÷ 做多平台价格 − 1）× 100%。买卖盘口取买入卖一、卖出买一；标记价格取两平台标记价。做多与做空必须来自不同在线平台，两腿价格时间相差不超过 5 秒；每币种选择满足筛选条件的最高价差。</p><p>资金费差 = 做空腿费率 × 8 ÷ 该腿周期小时数 − 做多腿费率 × 8 ÷ 该腿周期小时数。正值表示按当前费率估算的净收入，负值为净支出；不是已结算收益。资金费或实际周期缺失、超过 5 分钟未更新时显示「—」。</p><p>价格超过 {(data?.staleAfterMs ?? 30_000) / 1000} 秒未更新会退出排名，成交价不会代替缺失盘口。报价时间取两腿较早的价格时间，所有时钟均为北京时间。毛价差未计手续费、滑点、深度和资金费；跨平台对冲仍存在成交差异。</p><p>聚合质量权重：市值 20%、市值 / FDV 15%、官方多空拥挤度 15%、近 1 小时盘口价差稳定度 30%、近 24 小时预估资金费稳定度 20%。只使用真实采样，缺失项不补零；资料不足时暂不评分，分数不代表盈利概率。当前列表仍为每币种最大毛价差组合，不按质量分重排。</p><p>每 5 分钟核对交易所公开合约目录；未标记不代表尚未公告，公开接口信息可能不完整。</p><p>最近快照 {stamp(data?.generatedAt)}。页面隐藏或切换监控后暂停接收，返回立即刷新；实时推送中断时自动切换为每 5 秒快照，并尝试恢复推送。</p></details>
   </section>;
 }
 

@@ -11,6 +11,7 @@ import { externalExchanges, exchangeAction, exchangeFromAction, EXCHANGE_REFRESH
 import { OIL_CANDLE_ACTION, OIL_CANDLE_REFRESH_MS } from "../modules/oil/intraday.mjs";
 import { openPerpetualStore } from './perpetual-store.mjs';
 import { createPerpetualService } from './perpetual-service.mjs';
+import { createFundamentalsClient } from './perpetual-fundamentals.mjs';
 
 const exchangeActions = Object.fromEntries(externalExchanges.map(exchange => [exchangeAction(exchange), ["GET"]]));
 
@@ -45,7 +46,14 @@ export async function createMonitorServices(directory, { externallyLocked = fals
     if (oilData !== previousOil) await oilStore.write(oilData);
     const oil = new Monitor({ store: oilStore, data: oilData, fetchMarket: async () => read("oil", "quote", true), pollSeconds, ...oilOptions, notify: notifications.send, webhookConfigured: notifications.configured });
     perpetualStore = await openPerpetualStore(join(directory, 'perpetual', 'market.sqlite'));
-    const perpetual = createPerpetualService({ store: perpetualStore, ...perpetualOptions });
+    let coinIds = {};
+    if (env.PERPETUAL_COIN_IDS) {
+      try {
+        coinIds = JSON.parse(env.PERPETUAL_COIN_IDS);
+        if (!coinIds || typeof coinIds !== 'object' || Array.isArray(coinIds) || Object.keys(coinIds).length > 2000 || Object.entries(coinIds).some(([base, id]) => !/^[A-Z0-9._-]{1,40}$/.test(base) || typeof id !== 'string' || !/^[a-z0-9-]{1,120}$/.test(id))) throw new Error();
+      } catch { throw new Error('PERPETUAL_COIN_IDS 必须为币种到 CoinGecko ID 的 JSON 对象'); }
+    }
+    const perpetual = createPerpetualService({ store: perpetualStore, qualityOptions: { fundamentals: createFundamentalsClient({ coinIds, apiKey: env.COINGECKO_DEMO_API_KEY || '' }) }, ...perpetualOptions });
     const services = new Map([
       ['perpetual', perpetual],
       ["hynix", {

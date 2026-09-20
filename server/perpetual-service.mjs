@@ -3,6 +3,7 @@ import { createGzip, constants as zlibConstants } from 'node:zlib';
 import { randomUUID } from 'node:crypto';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { PerpetualWebSocket } from './perpetual-socket.mjs';
+import { createPerpetualQualityService } from './perpetual-quality-service.mjs';
 
 export const PERPETUAL_STALE_MS = 30_000;
 const MAX_FUTURE_MS = 5_000;
@@ -100,10 +101,11 @@ function withLifecycle(quote, market) {
   return quote.delisting === delisting && quote.delistingAt === delistingAt ? quote : { ...quote, delisting, delistingAt };
 }
 
-export function createPerpetualService({ store, exchanges = EXCHANGES, discover = discoverMarkets, subscriptions = createSubscriptions, parse = parseMessage, control = getControlResponse, WebSocketImpl = PerpetualWebSocket, clock = Date.now, staleAfterMs = PERPETUAL_STALE_MS, retryMs = 5_000, discoveryIntervalMs = 5 * 60_000, saveIntervalMs = 15_000, broadcastIntervalMs = 1_000, watchdogIntervalMs = 10_000, quoteTimeoutMs = 45_000 } = {}) {
+export function createPerpetualService({ store, exchanges = EXCHANGES, discover = discoverMarkets, subscriptions = createSubscriptions, parse = parseMessage, control = getControlResponse, WebSocketImpl = PerpetualWebSocket, clock = Date.now, staleAfterMs = PERPETUAL_STALE_MS, retryMs = 5_000, discoveryIntervalMs = 5 * 60_000, saveIntervalMs = 15_000, broadcastIntervalMs = 1_000, watchdogIntervalMs = 10_000, quoteTimeoutMs = 45_000, qualityOptions } = {}) {
   const quotes = new Map(), dirty = new Map(), pendingPrunes = new Map(), connections = new Set(), clients = new Map(), timers = new Set(), discoveries = new Map(), publishedQuotes = new Map(), pollBudgets = new Map();
   const states = new Map(exchanges.map(exchange => [exchange.id, { ...exchange, kind: exchange.kind ?? exchange.type, marketCount: 0, lastMessageAt: null, lastSourceLagMs: null, rejectedFuture: 0, error: null, discovering: false }]));
   let running = false, storageError = null, broadcastTimer, saveTimer, refreshTimer, metricsTimer, sequence = 0;
+  const quality = store?.saveQualitySample ? createPerpetualQualityService({ getSnapshot: snapshot, store, clock, ...qualityOptions }) : null;
   const streamId = randomUUID(), eventLoop = monitorEventLoopDelay({ resolution: 20 });
   const metrics = { lastWriteMs: 0, lastPublishMs: 0, frames: 0, fullFrames: 0, frameBytes: 0, lastFrameUpdates: 0, messages: 0, updates: 0, messagesPerSecond: 0, cpuPercent: 0, eventLoopP99Ms: 0, eventLoopMaxMs: 0 };
   let cpuBaseline = process.cpuUsage(), sampledAt = performance.now(), sampledMessages = 0;
@@ -317,6 +319,7 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
   return {
     start() {
       if (running) return; running = true;
+      quality?.start();
       eventLoop.enable(); cpuBaseline = process.cpuUsage(); sampledAt = performance.now();
       metricsTimer = setInterval(() => {
         const now = performance.now(), elapsed = now - sampledAt, cpu = process.cpuUsage(cpuBaseline);
@@ -358,12 +361,13 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
       for (const item of pending) item.controller.abort();
       for (const connection of [...connections]) connection.dispose();
       await Promise.allSettled(pending.map(item => item.promise));
+      await quality?.stop();
       flush(); store?.close();
     },
     closeStreams, snapshot, healthy: () => !storageError,
     metrics: () => ({ ...metrics, quotes: quotes.size, pendingWrites: dirty.size, connections: connections.size, clients: clients.size, rssMb: Number((process.memoryUsage.rss() / 1048576).toFixed(1)), auxiliary: [...pollBudgets].map(([host, budget]) => ({ host, sentInWindow: budget.sent, retryAt: budget.blockedUntil })), venues: snapshot().exchanges.map(exchange => ({ ...exchange, sourceLagMs: states.get(exchange.id).lastSourceLagMs, rejectedFuture: states.get(exchange.id).rejectedFuture, lastProtocolError: states.get(exchange.id).lastProtocolError ?? null })) }),
-    actions: { quote: ['GET'], stream: ['GET'], diagnostics: ['GET'] },
-    handle(action) { if (action === 'quote') return snapshot(); if (action === 'diagnostics') return this.metrics(); },
+    actions: { quote: ['GET'], stream: ['GET'], diagnostics: ['GET'], quality: ['POST'] },
+    handle(action, _method, input) { if (action === 'quote') return snapshot(); if (action === 'diagnostics') return { ...this.metrics(), quality: quality?.metrics() ?? null }; if (action === 'quality') { if (!quality) throw new Error('质量采集服务未就绪'); return quality.read(input); } },
     stream(request, response) {
       const gzip = /(?:^|,)\s*gzip\s*(?:,|$)/i.test(request.headers['accept-encoding'] ?? '');
       response.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no', Vary: 'Accept-Encoding', ...(gzip ? { 'Content-Encoding': 'gzip' } : {}) });
