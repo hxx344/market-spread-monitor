@@ -17,6 +17,8 @@ const emptyQuotes: PerpetualQuote[] = [];
 const emptyExchanges: PerpetualExchange[] = [];
 const emptySpreads: PerpetualSpread[] = [];
 const exchangeLabels = { connecting: "连接中", live: "实时", stale: "已过期", error: "连接异常", disabled: "未启用" };
+const positioningVenues = [{ id: "binance", name: "Binance" }, { id: "bybit", name: "Bybit" }, { id: "okx", name: "OKX" }, { id: "bitget", name: "Bitget" }, { id: "gate", name: "Gate" }];
+const positioningStatusLabels = { fresh: "已纳入", stale: "未纳入", pending: "采集中", unsupported: "不支持", unavailable: "暂无资料", error: "更新失败", "rate-limited": "请求限流" };
 const clockFormat = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
 const delistingFormat = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 const stamp = (value: number | null | undefined) => value && Number.isFinite(value) ? clockFormat.format(value) : "—";
@@ -51,6 +53,29 @@ function QualityCell({ quality, base, onInspect }: { quality: OpportunityQuality
   </button>;
 }
 
+function PositioningOverviewCard({ base, report, venues, now }: { base: string; report: PerpetualQualityReport | null; venues: Map<string, PerpetualExchange>; now: number }) {
+  const overview = report?.positioningOverview?.[base];
+  const reportStale = Boolean(report && now - report.generatedAt > 180_000);
+  const stale = reportStale || Boolean(overview?.observedAt && now - overview.observedAt > 900_000);
+  const ready = Boolean(overview && overview.availableExchanges >= 2 && finite(overview.longRatio) && finite(overview.shortRatio) && overview.longRatio >= 0 && overview.longRatio <= 1 && overview.shortRatio >= 0 && overview.shortRatio <= 1 && Math.abs(overview.longRatio + overview.shortRatio - 1) <= 0.001);
+  return <section className={`perp-positioning-overview${stale ? " is-stale" : ""}`} aria-label={`${base} 跨所账户多空概览`}>
+    <div className="perp-positioning-overview-heading"><h4>{base} 跨所账户多空概览<small>USDT 合约全体持仓账户比例 · 5 分钟</small></h4><span className={stale || !ready ? "perp-positioning-state is-warning" : "perp-positioning-state"}>{stale ? "资料过期 · 保留上次值" : ready ? "免费跨所汇总" : overview ? "资料不足" : "资料采集中"}</span></div>
+    {ready ? <div className="perp-positioning-composition"><div className="perp-positioning-overview-values"><strong>多 <b>{share(overview!.longRatio)}</b></strong><strong>空 <b>{share(overview!.shortRatio)}</b></strong></div><div className="perp-positioning-bar" aria-hidden="true"><span style={{ width: `${overview!.longRatio! * 100}%` }}/><span style={{ width: `${overview!.shortRatio! * 100}%` }}/></div></div> : <p className="perp-positioning-insufficient">{overview ? "资料不足，至少需要 2 家有效官方数据" : "等待交易所官方账户比例"}</p>}
+    <div className="perp-positioning-coverage"><strong>{stale ? "上次有效覆盖" : "有效覆盖"} {overview?.availableExchanges ?? "—"} / {overview?.totalExchanges ?? 5} 家</strong><span>{overview ? `当前发现 ${overview.eligibleExchanges} 家有对应 USDT 市场` : "对应 USDT 市场待核对"}</span><span>数据时间 {stamp(overview?.observedAt)} 北京时间</span></div>
+    <p className="perp-positioning-method">每家交易所等权：对有效的多头账户比例取平均，空头比例为 100% 减去多头比例；缺失数据不补 50%。这是跨所比例概览，不是全网真实人数，不参与两腿质量评分。</p>
+    <details className="perp-positioning-breakdown"><summary>查看五家交易所明细 <ChevronDown size={14} aria-hidden="true"/></summary><ul>{positioningVenues.map(venue => {
+      const item = overview?.constituents.find(entry => entry.exchange === venue.id);
+      const ratio = item?.key ? report?.positioning[item.key] : undefined;
+      const error = item?.key ? report?.positioningErrors[item.key] : undefined;
+      const status = item?.status ?? "pending";
+      const sourceStale = stale || Boolean(ratio && now - ratio.observedAt > 900_000);
+      const statusLabel = status === "fresh" && sourceStale ? "资料过期" : status === "fresh" && error ? "已纳入 · 更新失败" : positioningStatusLabels[status];
+      const reason = item?.reason || error;
+      return <li key={venue.id}><div className="perp-positioning-venue-heading"><strong>{venues.get(venue.id)?.name ?? venue.name}</strong><span className={status === "fresh" && !sourceStale && !error ? "perp-positioning-state" : "perp-positioning-state is-warning"}>{statusLabel}</span></div><small>{item?.symbol ?? (item ? "无对应 USDT 合约" : "对应合约待核对")}</small>{ratio ? <><p className="perp-positioning-venue-values">{status === "fresh" && !sourceStale ? "官方值" : "上次官方值"} · 多 {share(ratio.longRatio)} / 空 {share(ratio.shortRatio)}</p><small>{ratio.source.startsWith("https://") ? <a href={ratio.source} target="_blank" rel="noopener noreferrer">官方来源</a> : "官方来源"} · {stamp(ratio.observedAt)} 北京时间</small></> : null}{reason ? <p className="perp-positioning-reason">{reason}</p> : status === "pending" ? <p className="perp-positioning-reason">官方账户比例采集中</p> : sourceStale ? <p className="perp-positioning-reason">资料过期，保留上次值供核对</p> : null}</li>;
+    })}</ul></details>
+  </section>;
+}
+
 function QualityEvidence({ row, report, quality, venues, now }: { row: PerpetualSpread; report: PerpetualQualityReport | null; quality: OpportunityQuality; venues: Map<string, PerpetualExchange>; now: number }) {
   const asset = report?.assets[row.base];
   const history = report?.pairs[qualityPairKey(row)];
@@ -60,11 +85,12 @@ function QualityEvidence({ row, report, quality, venues, now }: { row: Perpetual
   const legs = [{ label: "做多腿", quote: row.long }, { label: "做空腿", quote: row.short }];
   return <div className="perp-quality-evidence">
     <div className="perp-quality-evidence-heading"><strong>聚合质量依据 <span>{quality.label}{quality.score === null ? "" : ` · ${quality.score} / 100`}</span></strong><span>{report ? `${reportStale ? "上次资料 · 已过期" : "资料更新"} ${stamp(report.generatedAt)} 北京时间` : "资料采集中"}</span></div>
+    <PositioningOverviewCard base={row.base} report={report} venues={venues} now={now}/>
     <div className="perp-quality-grid">
       <section><h4>市值与 FDV <small>USD</small></h4><dl><div><dt>市值</dt><dd>{usd(asset?.marketCapUsd)}</dd></div><div><dt>完全稀释估值 / FDV</dt><dd>{usd(asset?.fdvUsd)}</dd></div><div><dt>市值 / FDV</dt><dd>{share(dilution)}</dd></div></dl><p>{asset ? <><a href={`https://www.coingecko.com/en/coins/${encodeURIComponent(asset.coinId)}`} target="_blank" rel="noopener noreferrer">{asset.name}</a> · CoinGecko · {stamp(asset.updatedAt)}</> : report?.assetErrors[row.base] || "市值资料采集中"}</p>{asset && (!asset.updatedAt || now - asset.updatedAt > 3_600_000) ? <p className="perp-quality-warning">市值资料已过期，未计入评分</p> : null}</section>
       <section><h4>交易所官方多空比例</h4>{legs.map(({ label, quote }) => {
-        const key = `${quote.exchange}:${quote.symbol}`, ratio = report?.positioning[key];
-        return <div className="perp-positioning-leg" key={key}><strong>{label} · {venues.get(quote.exchange)?.name ?? quote.exchange}</strong><small>{quote.symbol}</small>{ratio ? <><p className="perp-positioning-values">多 {share(ratio.longRatio)} <span>/</span> 空 {share(ratio.shortRatio)}</p><small>{ratio.kind === "accounts" ? "账户人数占比" : "持仓量占比"} · 范围：{ratio.scope}</small><small>{ratio.source.startsWith("https://") ? <a href={ratio.source} target="_blank" rel="noopener noreferrer">官方数据</a> : "官方数据"} · {stamp(ratio.observedAt)}{now - ratio.observedAt > 900_000 ? " · 已过期" : ""}</small></> : <p>{report?.positioningErrors[key] || "官方多空资料采集中"}</p>}</div>;
+        const key = `${quote.exchange}:${quote.symbol}`, ratio = report?.positioning[key], error = report?.positioningErrors[key];
+        return <div className="perp-positioning-leg" key={key}><strong>{label} · {venues.get(quote.exchange)?.name ?? quote.exchange}</strong><small>{quote.symbol}</small>{ratio ? <><p className="perp-positioning-values">多 {share(ratio.longRatio)} <span>/</span> 空 {share(ratio.shortRatio)}</p><small>{ratio.kind === "accounts" ? "账户人数占比" : "持仓量占比"} · 范围：{ratio.scope}</small><small>{ratio.source.startsWith("https://") ? <a href={ratio.source} target="_blank" rel="noopener noreferrer">官方数据</a> : "官方数据"} · {stamp(ratio.observedAt)}{reportStale || now - ratio.observedAt > 900_000 ? " · 已过期" : ""}</small>{error ? <p className="perp-quality-warning">保留上次值 · {error}</p> : null}</> : <p>{error || "官方多空资料采集中"}</p>}</div>;
       })}<p>账户人数与持仓量口径不混算。</p></section>
       <section><h4>盘口价差稳定度 <small>近 1h</small></h4><p className="perp-quality-samples">{spread?.samples ? `${spread.samples} / ${spread.expectedSamples} 个样本 · 覆盖 ${share(spread.coverage)}` : "采集中 · 暂无有效样本"}</p><dl><div><dt>价差均值</dt><dd>{percent(spread?.mean ?? null, 4)}</dd></div><div><dt>标准差</dt><dd>{deviation(spread?.stddev)}</dd></div><div><dt>正价差占比</dt><dd>{share(spread?.positiveRatio)}</dd></div></dl><p>{spread?.lastAt ? `最近有效样本 ${stamp(spread.lastAt)}${now - spread.lastAt > 180_000 ? " · 已过期" : ""}` : "等待同一平台组合的有效盘口"}{spread?.samples && spread.samples < 30 ? " · 尚未满 30 个有效点" : ""}</p></section>
       <section><h4>资金费稳定度 <small>近 24h · 折算 / 8h</small></h4><p className="perp-quality-samples">{funding?.samples ? `${funding.samples} / ${funding.expectedSamples} 个样本 · 覆盖 ${share(funding.coverage)}` : "采集中 · 暂无有效样本"}</p><dl><div><dt>做多腿标准差</dt><dd>{deviation(funding?.longStddev)}</dd></div><div><dt>做空腿标准差</dt><dd>{deviation(funding?.shortStddev)}</dd></div><div><dt>两腿费差均值</dt><dd>{percent(funding?.mean ?? null, 4)}</dd></div></dl><p>{funding?.lastAt ? `最近有效样本 ${stamp(funding.lastAt)}${now - funding.lastAt > 600_000 ? " · 已过期" : ""} · ` : ""}采样为实时预估费率，非已结算资金费。</p></section>

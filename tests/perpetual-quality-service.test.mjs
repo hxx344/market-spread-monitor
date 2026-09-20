@@ -22,6 +22,11 @@ function quote(exchange = 'binance', base = 'BTC', extra = {}) {
 const ratio = (quote, observedAt) => ({ exchange: quote.exchange, symbol: quote.symbol,
   longRatio: 0.6, shortRatio: 0.4, kind: 'accounts', scope: '合约全体持仓账户（5 分钟）',
   source: 'https://example.invalid/official-series', observedAt });
+const cexQuotes = (base = 'BTC') => [
+  quote('binance', base), quote('bybit', base),
+  quote('okx', base, { symbol: `${base}-USDT-SWAP` }), quote('bitget', base),
+  quote('gate', base, { symbol: `${base}_USDT` }),
+];
 function fixture(options = {}) {
   let now = START, snapshotReads = 0, refreshes = 0, fetches = 0, saves = 0;
   const quotes = options.quotes ?? [quote(), quote('bybit')];
@@ -95,11 +100,75 @@ test('empty and unsupported-only watches do not scan every quote or request exte
   await f.service.collectPositioning();
   assert.equal(f.counts().snapshotReads, before);
   const data = f.watch();
-  assert.match(data.positioningErrors['lighter:BTCUSDT'], /暂无接入/);
+  assert.match(data.positioningErrors['lighter:BTCUSDT'], /未接入/);
   before = f.counts().snapshotReads;
   await f.service.collectPositioning();
   assert.equal(f.counts().snapshotReads, before);
   assert.equal(f.counts().fetches, 0);
+});
+
+test('a visible DEX pair queues all five same-asset CEX representatives while reads stay cache-only', async t => {
+  const dex = [quote('lighter'), quote('hyperliquid')], cex = cexQuotes();
+  const called = [];
+  const f = fixture({ quotes: [...dex, ...cex], fetch: async (quote, { now }) => { called.push(key(quote)); return ratio(quote, now); } });
+  const initial = f.watch();
+  assert.equal(initial.positioningOverview.BTC.totalExchanges, 5);
+  assert.equal(initial.positioningOverview.BTC.eligibleExchanges, 5);
+  assert.equal(initial.positioningOverview.BTC.availableExchanges, 0);
+  assert.equal(initial.positioningOverview.BTC.longRatio, null);
+  assert.ok(initial.positioningOverview.BTC.constituents.every(item => item.status === 'pending'));
+  assert.deepEqual(f.counts(), { snapshotReads: 1, refreshes: 0, fetches: 0, saves: 0 });
+  await f.start(t);
+  for (let index = 0; index < 5; index++) await f.service.collectPositioning();
+  assert.deepEqual(new Set(called), new Set(cex.map(key)));
+  const before = f.counts();
+  const result = f.watch();
+  assert.deepEqual({ ...f.counts(), snapshotReads: before.snapshotReads }, before);
+  assert.equal(result.positioningOverview.BTC.availableExchanges, 5);
+  assert.equal(result.positioningOverview.BTC.method, 'equal-exchange');
+  assert.equal(result.positioningOverview.BTC.kind, 'accounts');
+  assert.ok(Math.abs(result.positioningOverview.BTC.longRatio - 0.6) < 1e-12);
+  assert.ok(Math.abs(result.positioningOverview.BTC.shortRatio - 0.4) < 1e-12);
+  assert.ok(result.positioningOverview.BTC.constituents.every(item => item.status === 'fresh'));
+  assert.deepEqual(Object.keys(result.positioning).sort(), cex.map(key).sort());
+  assert.match(result.positioningErrors[key(dex[0])], /未接入/);
+  await f.service.collectPositioning();
+  assert.equal(called.length, 5, 'Reading the overview does not reset the five-minute query cache');
+});
+
+test('duplicate visible pairs and multiple USDT specifications share one representative request per exchange', async t => {
+  const dex = [quote('lighter'), quote('hyperliquid')], cex = cexQuotes();
+  const variants = cex.map(item => ({ ...item, symbol: item.exchange === 'gate' ? '1000BTC_USDT' : `1000${item.symbol}`, multiplier: 1000 }));
+  const called = [];
+  const f = fixture({ quotes: [...dex, ...variants, ...cex], fetch: async (quote, { now }) => { called.push(key(quote)); return ratio(quote, now); } });
+  await f.start(t);
+  const rows = [pair(dex[0], dex[1]), pair(dex[0], dex[1]), pair(dex[1], dex[0])];
+  f.watch(rows);
+  for (let index = 0; index < 12; index++) await f.service.collectPositioning();
+  assert.equal(called.length, 5);
+  assert.equal(new Set(called).size, 5);
+  assert.deepEqual(called.map(value => value.split(':')[0]).sort(), ['binance', 'bitget', 'bybit', 'gate', 'okx']);
+  const result = f.watch(rows);
+  assert.equal(Object.keys(result.positioningOverview).length, 1);
+  assert.equal(result.positioningOverview.BTC.availableExchanges, 5);
+});
+
+test('unsupported USDC trade legs explain their limits while the overview collects those venues USDT contracts', async t => {
+  const legs = [quote('bybit', 'BTC', { symbol: 'BTCPERP', quoteCurrency: 'USDC' }), quote('bitget', 'BTC', { symbol: 'BTCPERP', quoteCurrency: 'USDC' })];
+  const cex = cexQuotes(), called = [];
+  const f = fixture({ quotes: [...legs, ...cex], fetch: async (quote, { now }) => { called.push(key(quote)); return ratio(quote, now); } });
+  await f.start(t); f.watch();
+  for (let index = 0; index < 7; index++) await f.service.collectPositioning();
+  assert.deepEqual(new Set(called), new Set(cex.map(key)));
+  const result = f.watch();
+  for (const leg of legs) {
+    assert.equal(result.positioning[key(leg)], undefined);
+    assert.match(result.positioningErrors[key(leg)], /USDT.*计价类别/);
+    const item = result.positioningOverview.BTC.constituents.find(item => item.exchange === leg.exchange);
+    assert.equal(item.key, `${leg.exchange}:BTCUSDT`);
+    assert.equal(item.status, 'fresh');
+  }
+  assert.equal(result.positioningOverview.BTC.availableExchanges, 5);
 });
 
 test('only one positioning request can be in flight, and queued contracts rotate', async t => {
@@ -148,7 +217,10 @@ test('failed and empty refreshes retain the published ratio and its original sou
     assert.deepEqual(data.positioning['binance:BTCUSDT'], original);
     assert.equal(data.positioning['binance:BTCUSDT'].observedAt, originalAt);
     assert.ok(data.generatedAt > originalAt + 300_000);
-    assert.match(data.positioningErrors['binance:BTCUSDT'], mode === 'failure' ? /不可用/ : /暂无/);
+    assert.match(data.positioningErrors['binance:BTCUSDT'], mode === 'failure' ? /不可用/ : /未返回/);
+    const constituent = data.positioningOverview.BTC.constituents.find(item => item.exchange === 'binance');
+    assert.equal(constituent.status, 'fresh', 'A still-fresh cached observation retains its original source time');
+    assert.match(constituent.reason, mode === 'failure' ? /不可用/ : /未返回/, 'The latest refresh failure must remain visible beside cached data');
   }
 });
 
@@ -164,6 +236,12 @@ test('429 backs off the venue using Retry-After without blocking other exchanges
   const rows = [pair(quotes[0], quotes[1]), pair(quotes[2], quotes[3])]; f.watch(rows);
   for (let i = 0; i < 4; i++) await f.service.collectPositioning();
   assert.deepEqual(called, ['binance:BTCUSDT', 'bybit:BTCUSDT', 'bybit:ETHUSDT']);
+  const limited = f.watch(rows);
+  assert.equal(limited.positioning['binance:ETHUSDT'], undefined);
+  assert.match(limited.positioningErrors['binance:ETHUSDT'], /限流/);
+  const unrequested = limited.positioningOverview.ETH.constituents.find(item => item.exchange === 'binance');
+  assert.equal(unrequested.status, 'rate-limited');
+  assert.match(unrequested.reason, /限流/);
   f.advance(599_999); f.watch(rows);
   for (let i = 0; i < 3; i++) await f.service.collectPositioning();
   assert.equal(called.filter(value => value.startsWith('binance:')).length, 1);
@@ -171,18 +249,43 @@ test('429 backs off the venue using Retry-After without blocking other exchanges
   assert.equal(called.at(-1), 'binance:ETHUSDT');
 });
 
-test('ratio cache cannot grow beyond 200 when users rotate more than 200 contracts', async t => {
-  const quotes = Array.from({ length: 205 }, (_, i) => [quote('binance', `C${i}`), quote('lighter', `C${i}`)]).flat();
+test('ratio cache cannot grow beyond 500 when users rotate more than 500 contracts', async t => {
+  const quotes = Array.from({ length: 505 }, (_, i) => [quote('binance', `C${i}`), quote('lighter', `C${i}`)]).flat();
   const f = fixture({ quotes }); await f.start(t);
   for (let i = 0; i < quotes.length; i += 2) {
     f.advance(1_000); f.watch([pair(quotes[i], quotes[i + 1])]);
     await f.service.collectPositioning();
-    assert.ok(f.service.metrics().positioningCache <= 200);
+    assert.ok(f.service.metrics().positioningCache <= 500);
   }
-  assert.equal(f.service.metrics().positioningCache, 200);
+  assert.equal(f.service.metrics().positioningCache, 500);
   assert.equal(f.service.metrics().watchedPairs, 60);
   assert.equal(f.watch([pair(quotes[0], quotes[1])]).positioning[key(quotes[0])], undefined);
   assert.ok(f.watch([pair(quotes.at(-2), quotes.at(-1))]).positioning[key(quotes.at(-2))]);
+});
+
+test('sixty visible bases retain all 300 CEX representatives plus 120 supported alternate-currency legs', async t => {
+  const groups = Array.from({ length: 60 }, (_, index) => {
+    const base = `C${index}`;
+    const legs = [quote('binance', base, { symbol: `${base}USDC`, quoteCurrency: 'USDC' }), quote('okx', base, { symbol: `${base}-USDC-SWAP`, quoteCurrency: 'USDC' })];
+    return { base, legs, cex: cexQuotes(base) };
+  });
+  const called = [];
+  const f = fixture({ quotes: groups.flatMap(group => [...group.legs, ...group.cex]), fetch: async (quote, { now }) => { called.push(key(quote)); return ratio(quote, now); } });
+  await f.start(t);
+  const rows = groups.map(group => pair(...group.legs));
+  f.watch(rows.slice(0, 30)); f.watch(rows.slice(30));
+  assert.equal(f.service.metrics().watchedPairs, 60);
+  for (let index = 0; index < 420; index++) await f.service.collectPositioning();
+  assert.equal(called.length, 420);
+  assert.equal(new Set(called).size, 420);
+  assert.equal(f.service.metrics().positioningCache, 420);
+  for (const batch of [rows.slice(0, 30), rows.slice(30)]) {
+    const result = f.watch(batch);
+    assert.equal(Object.keys(result.positioning).length, 210);
+    assert.ok(Object.values(result.positioningOverview).every(item => item.availableExchanges === 5));
+  }
+  for (let index = 0; index < 10; index++) await f.service.collectPositioning();
+  assert.equal(called.length, 420, 'All active observations fit in cache and remain cached after overview reads');
 });
 
 test('fundamental collection deduplicates comparable crypto bases and permits one refresh at a time', async t => {

@@ -43,7 +43,16 @@ function gateShares(row) {
   return ratio(row.lsr_account);
 }
 
-function sourceFor({ exchange, symbol, quoteCurrency }) {
+function sourceFor(quote) {
+  const { exchange, symbol, quoteCurrency } = quote ?? {};
+  // DEX symbols can legitimately use another format (for example io:SNDK).
+  // Do not report a CEX symbol-validation error for a venue we have not connected.
+  if (['hyperliquid', 'lighter', 'rh-lighter', 'aster', 'entropy'].includes(exchange)) {
+    return { source: null, reason: '当前未接入该 DEX 的官方多空账户比' };
+  }
+  if (typeof symbol !== 'string' || !/^[A-Za-z0-9_.-]{1,80}$/.test(symbol)) {
+    return { source: null, reason: '合约代码格式无效，无法查询官方多空账户比' };
+  }
   let path, params;
   switch (exchange) {
     case 'binance':
@@ -52,7 +61,7 @@ function sourceFor({ exchange, symbol, quoteCurrency }) {
       break;
     case 'bybit':
       // The documented linear account-ratio series covers USDT contracts.
-      if (quoteCurrency !== 'USDT') return null;
+      if (quoteCurrency !== 'USDT') return { source: null, reason: 'Bybit 当前仅接入 USDT 合约的官方多空账户比，该合约的计价类别不支持' };
       path = 'https://api.bybit.com/v5/market/account-ratio';
       params = { category: 'linear', symbol, period: '5min', limit: '1' };
       break;
@@ -63,18 +72,23 @@ function sourceFor({ exchange, symbol, quoteCurrency }) {
       params = { instId: symbol, period: '5m', limit: '1' };
       break;
     case 'bitget':
-      if (quoteCurrency !== 'USDT') return null;
+      if (quoteCurrency !== 'USDT') return { source: null, reason: 'Bitget 当前仅接入 USDT 合约的官方多空账户比，该合约的计价类别不支持' };
       path = 'https://api.bitget.com/api/v2/mix/market/long-short';
       params = { symbol, period: '5m' };
       break;
     case 'gate':
-      if (quoteCurrency !== 'USDT' || !symbol.endsWith('_USDT')) return null;
+      if (quoteCurrency !== 'USDT' || !symbol.endsWith('_USDT')) return { source: null, reason: 'Gate 当前仅接入 USDT 结算且代码以 _USDT 结尾的合约多空账户比' };
       path = 'https://api.gateio.ws/api/v4/futures/usdt/contract_stats';
       params = { contract: symbol, interval: '5m', limit: '1' };
       break;
-    default: return null;
+    default: return { source: null, reason: '当前未接入该平台的官方多空账户比' };
   }
-  return `${path}?${new URLSearchParams(params)}`;
+  return { source: `${path}?${new URLSearchParams(params)}`, reason: null };
+}
+
+/** Availability and collection share one routing decision; null means a public request is supported. */
+export function positioningUnavailableReason(quote) {
+  return sourceFor(quote).reason;
 }
 
 function upstreamError(exchange, message, status, code) {
@@ -111,9 +125,8 @@ function timestamp(value, seconds, now) {
 
 /** One public request at most. The caller owns queueing, cache, and staleness. */
 export async function fetchPositioning(quote, { fetchImpl = fetch, signal, now = Date.now() } = {}) {
-  if (!quote || typeof quote.symbol !== 'string' || !/^[A-Za-z0-9_.-]{1,80}$/.test(quote.symbol)) return null;
-  const source = sourceFor(quote);
-  if (!source) return null;
+  const { source, reason } = sourceFor(quote);
+  if (reason) return null;
   const deadline = AbortSignal.timeout(10_000);
   const requestSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
   const response = await fetchImpl(source, { signal: requestSignal, headers: { Accept: 'application/json' } });

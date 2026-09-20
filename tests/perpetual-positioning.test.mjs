@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchPositioning } from '../server/perpetual-positioning.mjs';
+import { fetchPositioning, positioningUnavailableReason } from '../server/perpetual-positioning.mjs';
 
 const now = 1_790_000_000_000;
 const ts = now - 300_000;
@@ -131,6 +131,40 @@ test('DEX and undocumented quote types make no requests', async () => {
   assert.equal(await fetchPositioning({ ...quotes.bybit, quoteCurrency: 'USDC', symbol: 'BTCPERP' }, { ...mock, now }), null);
   assert.equal(await fetchPositioning({ ...quotes.gate, quoteCurrency: 'USD' }, { ...mock, now }), null);
   assert.equal(await fetchPositioning({ ...quotes.bitget, quoteCurrency: 'USDC' }, { ...mock, now }), null);
+  assert.equal(mock.calls.length, 0);
+});
+
+test('positioning unavailability explains the shared routing decision without claiming a DEX has no official data', async () => {
+  const mock = fixture([]);
+  for (const quote of Object.values(quotes)) assert.equal(positioningUnavailableReason(quote), null);
+  for (const [exchange, quoteCurrency, symbol, reason] of [
+    ['bybit', 'USDC', 'BTCPERP', /Bybit.*USDT.*计价类别/],
+    ['bitget', 'USDC', 'BTCPERP', /Bitget.*USDT.*计价类别/],
+    ['gate', 'USD', 'BTC_USD', /Gate.*USDT.*_USDT/],
+    ['gate', 'USDT', 'BTCUSDT', /Gate.*_USDT/],
+    ['unknown', 'USDT', 'BTCUSDT', /当前未接入该平台/],
+  ]) {
+    const quote = { exchange, quoteCurrency, symbol };
+    assert.match(positioningUnavailableReason(quote), reason);
+    assert.equal(await fetchPositioning(quote, { ...mock, now }), null);
+  }
+  for (const exchange of ['hyperliquid', 'lighter', 'rh-lighter', 'aster', 'entropy']) {
+    const quote = { exchange, symbol: 'BTC', quoteCurrency: 'USDT' };
+    const reason = positioningUnavailableReason(quote);
+    assert.match(reason, /当前未接入.*DEX.*官方多空账户比/);
+    assert.doesNotMatch(reason, /不存在|不提供|没有/);
+    assert.equal(await fetchPositioning(quote, { ...mock, now }), null);
+  }
+  assert.match(positioningUnavailableReason({ exchange: 'entropy', symbol: 'io:SNDK', quoteCurrency: 'USDC' }), /当前未接入.*DEX/);
+  assert.equal(mock.calls.length, 0);
+});
+
+test('positioning invalid symbols have a distinct reason and never reach the network', async () => {
+  const mock = fixture([]);
+  for (const quote of [null, {}, { ...quotes.binance, symbol: '' }, { ...quotes.binance, symbol: 'BTC/USDT' }, { ...quotes.binance, symbol: 'A'.repeat(81) }, { ...quotes.binance, symbol: 123 }]) {
+    assert.match(positioningUnavailableReason(quote), /合约代码格式无效/);
+    assert.equal(await fetchPositioning(quote, { ...mock, now }), null);
+  }
   assert.equal(mock.calls.length, 0);
 });
 

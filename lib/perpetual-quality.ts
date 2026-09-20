@@ -9,6 +9,17 @@ export interface PositioningRatio {
   exchange: string; symbol: string; longRatio: number; shortRatio: number;
   kind: 'accounts' | 'positions'; scope: string; source: string; observedAt: number;
 }
+export interface PositioningOverview {
+  kind: 'accounts'; method: 'equal-exchange'; periodMs: 300000;
+  longRatio: number | null; shortRatio: number | null;
+  availableExchanges: number; eligibleExchanges: number; totalExchanges: number;
+  observedAt: number | null;
+  constituents: Array<{
+    exchange: string; key: string | null; symbol: string | null;
+    status: 'fresh' | 'stale' | 'pending' | 'unsupported' | 'unavailable' | 'error' | 'rate-limited';
+    reason: string | null;
+  }>;
+}
 export interface StabilityStats {
   samples: number; expectedSamples: number; coverage: number; firstAt: number | null; lastAt: number | null;
   mean: number | null; stddev: number | null; positiveRatio: number | null; signChanges: number;
@@ -26,6 +37,7 @@ export interface PerpetualQualityReport {
   assetErrors: Record<string, string>;
   positioning: Record<string, PositioningRatio>;
   positioningErrors: Record<string, string>;
+  positioningOverview?: Record<string, PositioningOverview>;
   error?: string | null;
 }
 export interface QualityBudget { feePercent: number; slippagePercent: number }
