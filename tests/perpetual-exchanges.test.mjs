@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EXCHANGES, normalizeUnderlying, classifyMarketIdentity, discoverMarkets, createSubscriptions, parseMessage, getControlResponse, fetchBookSnapshots } from '../modules/perpetual/exchanges.mjs';
+import { mergePerpetualQuote } from '../server/perpetual-service.mjs';
+import { normalizedFunding8h } from '../lib/perpetual-spreads.ts';
 
 const NOW = 1_789_820_000_000;
 function market(exchange, symbol = 'BTCUSDT', extra = {}) {
@@ -306,6 +308,109 @@ test('bulk BBO snapshots retain source times, clear empty sides and filter marke
   assert.equal(specs.filter(spec => spec.snapshot).length, 1);
   const rows = await specs[0].snapshot({ now: NOW, fetchImpl: reader(() => ({ retCode: 0, time: NOW, result: { list: [{ symbol: 'COIN399', bid1Price: '100', ask1Price: '101' }] } })) });
   assert.equal(rows[0].symbol, 'COIN399');
+});
+
+test('Bybit REST funding restores expired negative and zero rates through the existing bulk snapshot', async () => {
+  const markets = [market('bybit')];
+  const [spec] = createSubscriptions('bybit', markets);
+  for (const rate of [-0.0001, 0]) {
+    const [initial] = parseMessage('bybit', { topic: 'tickers.BTCUSDT', type: 'snapshot', ts: NOW, data: { symbol: 'BTCUSDT', bid1Price: '100', ask1Price: '101', fundingRate: String(rate) } }, markets, NOW);
+    let current = mergePerpetualQuote(undefined, initial, NOW);
+    assert.equal(normalizedFunding8h(current, NOW), rate);
+    for (const elapsed of [60_000, 180_000, 300_001]) {
+      const time = NOW + elapsed;
+      const [delta] = parseMessage('bybit', { topic: 'tickers.BTCUSDT', type: 'delta', ts: time, data: { bid1Price: '102', ask1Price: '103' } }, markets, time);
+      current = mergePerpetualQuote(current, delta, time);
+    }
+    const confirmedAt = NOW + 305_000;
+    assert.equal(current.bidAskAt, NOW + 300_001);
+    assert.equal(current.fundingAt, NOW);
+    assert.equal(normalizedFunding8h(current, confirmedAt), null);
+    const calls = [];
+    const [confirmation] = await spec.snapshot({ now: confirmedAt, fetchImpl: reader(url => {
+      calls.push(url);
+      return { retCode: 0, time: confirmedAt, result: { list: [{ symbol: 'BTCUSDT', bid1Price: '102', ask1Price: '103', fundingRate: String(rate), fundingIntervalHour: '4', nextFundingTime: String(confirmedAt + 3_600_000) }] } };
+    }) });
+    assert.deepEqual(calls, ['https://api.bybit.com/v5/market/tickers?category=linear']);
+    current = mergePerpetualQuote(current, confirmation, confirmedAt);
+    assert.equal(current.fundingAt, confirmedAt);
+    assert.equal(current.fundingRate, rate);
+    assert.equal(normalizedFunding8h(current, confirmedAt), rate * 2);
+    assert.equal(current.fundingIntervalHours, 4);
+    assert.equal(current.nextFundingAt, confirmedAt + 3_600_000);
+  }
+});
+
+test('Bybit REST funding maps server time and prefers ticker interval over catalog fallback', async () => {
+  const markets = [market('bybit'), market('bybit', 'ETHUSDT', { base: 'ETH', fundingIntervalHours: 4 })];
+  const rows = await fetchBookSnapshots('bybit', markets, { now: NOW, fetchImpl: reader(() => ({ retCode: 0, time: NOW - 20, result: { list: [
+    { symbol: 'BTCUSDT', fundingRate: '-0.0002', fundingIntervalHour: '1', nextFundingTime: String(NOW + 3_600_000) },
+    { symbol: 'ETHUSDT', fundingRate: '0' },
+  ] } })) });
+  assert.equal(rows.length, 2);
+  const [explicit, fallback] = rows;
+  assert.equal(explicit.sourceTime, NOW - 20);
+  assert.equal(explicit.transport, 'rest');
+  assert.equal(explicit.fundingRate, -0.0002);
+  assert.equal(explicit.fundingIntervalHours, 1);
+  assert.equal(explicit.nextFundingAt, NOW + 3_600_000);
+  assert.equal(fallback.fundingRate, 0);
+  assert.equal(fallback.fundingIntervalHours, 4);
+  assert.equal(Object.hasOwn(fallback, 'nextFundingAt'), false);
+});
+
+test('Bybit REST funding omission preserves stale rate while explicit empty fields clear values', async () => {
+  const markets = [market('bybit')], later = NOW + 300_001;
+  const [initial] = parseMessage('bybit', { topic: 'tickers.BTCUSDT', ts: NOW, data: { fundingRate: '-0.0001', nextFundingTime: String(NOW + 3_600_000) } }, markets, NOW);
+  const prior = mergePerpetualQuote(undefined, initial, NOW);
+  const [missing] = await fetchBookSnapshots('bybit', markets, { now: later, fetchImpl: reader(() => ({ retCode: 0, time: later, result: { list: [{ symbol: 'BTCUSDT', bid1Price: '100', ask1Price: '101' }] } })) });
+  for (const key of ['fundingRate', 'fundingIntervalHours', 'nextFundingAt']) assert.equal(Object.hasOwn(missing, key), false, `${key} must remain omitted`);
+  const unchanged = mergePerpetualQuote(prior, missing, later);
+  assert.equal(unchanged.fundingAt, NOW);
+  assert.equal(unchanged.fundingRate, prior.fundingRate);
+  assert.equal(unchanged.nextFundingAt, prior.nextFundingAt);
+  assert.equal(normalizedFunding8h(unchanged, later), null);
+  for (const empty of ['', null]) {
+    const [cleared] = await fetchBookSnapshots('bybit', markets, { now: later, fetchImpl: reader(() => ({ retCode: 0, time: later, result: { list: [{ symbol: 'BTCUSDT', bid1Price: '100', ask1Price: '101', fundingRate: empty, fundingIntervalHour: empty, nextFundingTime: empty }] } })) });
+    for (const key of ['fundingRate', 'fundingIntervalHours', 'nextFundingAt']) assert.equal(cleared[key], null, `${key} must clear explicit ${String(empty)}`);
+    const current = mergePerpetualQuote(prior, cleared, later);
+    assert.equal(current.fundingRate, null);
+    assert.equal(current.fundingIntervalHours, null);
+    assert.equal(current.nextFundingAt, null);
+    assert.equal(normalizedFunding8h(current, later), null);
+  }
+});
+
+test('Bybit REST funding old response time cannot refresh or overwrite a newer funding confirmation', async () => {
+  const markets = [market('bybit')], receivedAt = NOW + 360_000;
+  const [initial] = parseMessage('bybit', { topic: 'tickers.BTCUSDT', ts: NOW, data: { fundingRate: '-0.0001', nextFundingTime: String(NOW + 3_600_000) } }, markets, NOW);
+  const prior = mergePerpetualQuote(undefined, initial, NOW);
+  const [old] = await fetchBookSnapshots('bybit', markets, { now: receivedAt, fetchImpl: reader(() => ({ retCode: 0, time: NOW - 1, result: { list: [{ symbol: 'BTCUSDT', bid1Price: '100', ask1Price: '101', fundingRate: '0.0003', fundingIntervalHour: '1', nextFundingTime: String(NOW + 7_200_000) }] } })) });
+  assert.equal(old.fundingRate, 0.0003);
+  assert.equal(old.sourceTime, NOW - 1);
+  const current = mergePerpetualQuote(prior, old, receivedAt);
+  assert.equal(current.fundingAt, NOW);
+  assert.equal(current.fundingRate, prior.fundingRate);
+  assert.equal(current.fundingIntervalHours, prior.fundingIntervalHours);
+  assert.equal(current.nextFundingAt, prior.nextFundingAt);
+  assert.equal(normalizedFunding8h(current, receivedAt), null);
+});
+
+test('Bybit REST funding failed confirmations emit no update and cannot refresh a stale rate', async () => {
+  const markets = [market('bybit')], later = NOW + 300_001;
+  const [initial] = parseMessage('bybit', { topic: 'tickers.BTCUSDT', ts: NOW, data: { fundingRate: '-0.0001' } }, markets, NOW);
+  const prior = mergePerpetualQuote(undefined, initial, NOW);
+  const [spec] = createSubscriptions('bybit', markets);
+  for (const fetchImpl of [reader(() => ({ retCode: 10006, retMsg: 'Too many visits' })), async () => { throw new Error('Network unavailable'); }]) {
+    let current = prior;
+    await assert.rejects(async () => {
+      const updates = await spec.snapshot({ now: later, fetchImpl });
+      for (const update of updates) current = mergePerpetualQuote(current, update, later);
+    }, /Too many visits|Network unavailable/);
+    assert.equal(current, prior);
+    assert.equal(current.fundingAt, NOW);
+    assert.equal(normalizedFunding8h(current, later), null);
+  }
 });
 
 test('Hyperliquid WS info snapshots confirm exact BBO and expose post or partial subscription errors', () => {

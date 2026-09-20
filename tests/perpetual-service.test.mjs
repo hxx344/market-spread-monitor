@@ -91,6 +91,28 @@ test('funding schedules do not refresh old rates and changed contract identities
   assert.equal(changed.mark, 12);
 });
 
+test('late REST funding cannot revive an old rate after a newer WS funding interval change', () => {
+  const initial = mergePerpetualQuote(null, update({ fundingRate: 0.001, fundingIntervalHours: 8 }), 1000);
+  const schedule = mergePerpetualQuote(initial, update({ bid: undefined, ask: undefined, fundingIntervalHours: 4, sourceTime: 3000 }), 3000);
+  assert.equal(schedule.fundingRate, null);
+  assert.equal(schedule.fundingIntervalHours, 4);
+  assert.equal(schedule.fundingIntervalHoursUpdatedAt, 3000);
+  assert.equal(schedule.fundingAt, 1000, 'A new interval is not a new rate confirmation');
+
+  const delayed = mergePerpetualQuote(schedule, update({ fundingRate: 0.002, fundingIntervalHours: 8, sourceTime: 2000, transport: 'rest' }), 3500);
+  assert.equal(delayed.fundingRate, null, 'An earlier 8-hour REST rate must not be combined with the newer 4-hour interval');
+  assert.equal(delayed.fundingIntervalHours, 4);
+  assert.equal(delayed.fundingIntervalHoursUpdatedAt, 3000);
+  assert.equal(delayed.fundingAt, 1000);
+  assert.equal(delayed.bidAskAt, 2000, 'The delayed response may still confirm older independent book fields');
+
+  const confirmed = mergePerpetualQuote(delayed, update({ fundingRate: 0.003, fundingIntervalHours: 4, sourceTime: 4000, transport: 'rest' }), 4500);
+  assert.equal(confirmed.fundingRate, 0.003);
+  assert.equal(confirmed.fundingIntervalHours, 4);
+  assert.equal(confirmed.fundingIntervalHoursUpdatedAt, 4000);
+  assert.equal(confirmed.fundingAt, 4000, 'Recovery keeps the actual confirmation time, not the local receipt time');
+});
+
 test('latest quotes survive restart with original timestamps and delisted instruments are pruned', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'perpetual-test-'));
   let store;

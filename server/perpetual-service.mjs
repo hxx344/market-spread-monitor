@@ -78,6 +78,8 @@ export function mergePerpetualQuote(previous, update, now = Date.now()) {
     if (value !== null && (!Number.isFinite(value) || (priceFields.has(field) && value <= 0) || (field === 'fundingIntervalHours' && value <= 0))) continue;
     const stamp = priceFields.has(field) ? `${field}At` : field === 'fundingRate' ? 'fundingAt' : `${field}UpdatedAt`;
     if (Number.isFinite(next[stamp]) && time < next[stamp]) continue;
+    // A delayed rate must not revive a value from before the current interval.
+    if (field === 'fundingRate' && Number.isFinite(next.fundingIntervalHoursUpdatedAt) && time < next.fundingIntervalHoursUpdatedAt) continue;
     if (field === 'fundingIntervalHours' && next[field] !== null && value !== next[field] && !rateUpdated) next.fundingRate = null;
     next[field] = value; next[stamp] = time; changed = true;
     if (field === 'fundingRate') rateUpdated = true;

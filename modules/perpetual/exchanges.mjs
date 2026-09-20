@@ -351,9 +351,11 @@ function quote(row, receivedAt, sourceTime, fields) {
   return result;
 }
 
-/** Low-frequency confirmation of actual best bid/ask, never mark or last.
- * Bybit includes response-generation time. Aster's per-row time is explicitly
- * transaction time: retain it even if old; do not re-stamp with local now.
+/** Bulk confirmation of actual best bid/ask; never substitute mark or last.
+ * Bybit also confirms funding from the same response: WS deltas omit unchanged
+ * rates. Use response-generation time without adding another request.
+ * Aster's per-row time is transaction time: retain it even if old;
+ * do not re-stamp with local now.
  * https://bybit-exchange.github.io/docs/v5/market/tickers
  * https://asterdex.github.io/aster-api-website/futures/market-data/#symbol-order-book-ticker
  * Bitget's per-row ts is the current data timestamp, requestTime the server
@@ -400,7 +402,13 @@ export async function fetchBookSnapshots(exchangeId, markets, { fetchImpl = fetc
     const market = bySymbol.get(row.symbol);
     if (!market) continue;
     const fields = exchangeId === 'bybit'
-      ? { bid: bestPrice(row.bid1Price, row.bid1Size), ask: bestPrice(row.ask1Price, row.ask1Size) }
+      ? {
+        bid: bestPrice(row.bid1Price, row.bid1Size), ask: bestPrice(row.ask1Price, row.ask1Size),
+        fundingRate: row.fundingRate, nextFundingAt: row.nextFundingTime,
+        fundingIntervalHours: row.fundingIntervalHour === undefined
+          ? (row.fundingRate === undefined ? undefined : market.fundingIntervalHours)
+          : row.fundingIntervalHour,
+      }
       : { bid: bestPrice(row.bidPrice, row.bidQty), ask: bestPrice(row.askPrice, row.askQty) };
     const update = quote(market, now, exchangeId === 'bybit' ? responseTime : row.time, fields);
     if (update) { update.transport = 'rest'; updates.push(update); }
