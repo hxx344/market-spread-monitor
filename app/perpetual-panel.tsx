@@ -14,6 +14,7 @@ import type { SummaryProps } from "../lib/monitor-summary";
 import "./perpetual.css";
 
 const PerpetualHealth = dynamic(() => import("./perpetual-health"));
+const PerpetualManualPairs = dynamic(() => import("./perpetual-manual-pairs"));
 const PerpetualAlerts = dynamic(() => import("./perpetual-alerts"));
 const PerpetualExecution = dynamic(() => import("./perpetual-execution").then(module => module.PerpetualExecution));
 const PerpetualHolding = dynamic(() => import("./perpetual-holding"));
@@ -286,6 +287,7 @@ function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: 
       <button type="button" onClick={() => setHealthOpen(true)}><span>报价有效率</span><strong>{quoteSelection.keys.length ? `${Math.round((1 - (quoteQuality.stale + quoteQuality.unavailable) / quoteSelection.keys.length) * 100)}%` : "—"}</strong><small>{quoteQuality.stale} 过期 / {quoteQuality.unavailable} 暂缺 · 查看原因</small></button>
     </div> : null}
     <div className="perp-venue-strip" role="group" aria-label="快速选择交易所">{exchanges.map(exchange => <button key={exchange.id} type="button" aria-pressed={!selected || selected.has(exchange.id)} aria-label={`${!selected || selected.has(exchange.id) ? "排除" : "启用"} ${exchange.name}`} title={`${exchange.name} · ${expired ? "快照过期" : exchangeLabels[exchange.status]} · ${exchange.freshBookCount ?? exchange.quoteCount} 个有效盘口`} onClick={() => toggleExchange(exchange.id)}><i className={expired ? "stale" : exchange.status} aria-hidden="true"/><span>{exchange.name}</span><small>{exchange.freshBookCount ?? exchange.quoteCount}</small></button>)}</div>
+    <PerpetualManualPairs snapshot={data} mode={filters.priceMode} now={now} budget={qualityBudget} active={active} paused={paused}/>
     {healthOpen ? <PerpetualHealth active={active} defaultOpen/> : null}
     <div id="perpetual-alert-region" hidden={!alertsOpen}>{alertsVisited ? <PerpetualAlerts active={active && alertsOpen} pair={alertPair} budget={qualityBudget} defaultOpen/> : null}</div>
 
