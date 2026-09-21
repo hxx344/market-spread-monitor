@@ -7,7 +7,7 @@ import { join, resolve, sep } from 'node:path';
 import { createServer } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createPerpetualService, mergePerpetualQuote, createPerpetualDelta, createPerpetualPatch } from '../server/perpetual-service.mjs';
+import { createPerpetualService, mergePerpetualQuote, createPerpetualDelta, createPerpetualPatch, createPerpetualChangedPatch } from '../server/perpetual-service.mjs';
 import { openPerpetualStore } from '../server/perpetual-store.mjs';
 import { createHandler } from '../server/http.mjs';
 
@@ -42,6 +42,24 @@ test('identity resets explicitly clear old wire price timestamps', () => {
   const patch = createPerpetualPatch({ quotes: [next] }, previous).patches[0][1];
   assert.equal(patch.base, 'OTHER'); assert.equal(patch.bid, null); assert.equal(patch.bidAskAt, null);
   assert.equal(previous.get('test:BTCUSDT').bidAt, null);
+});
+
+test('dirty-only patches match full baseline semantics for additions, deletions, metadata and paced confirmations', () => {
+  const a = mergePerpetualQuote(null, update(), 1000), b = mergePerpetualQuote(null, update({ symbol: 'ETHUSDT', base: 'ETH' }), 1000);
+  const initial = new Map([['test:BTCUSDT', a], ['test:ETHUSDT', b]]), full = new Map(initial), incremental = new Map(initial);
+  let quotes = new Map(initial);
+  const check = keys => {
+    const metadata = { schemaVersion: 1, monitorId: 'perpetual', generatedAt: 5000, sequence: 4, exchanges: [{ id: 'test', status: 'live' }] };
+    const expected = createPerpetualPatch({ ...metadata, quotes: [...quotes.values()] }, full);
+    const actual = createPerpetualChangedPatch(metadata, quotes, incremental, keys);
+    assert.deepEqual(actual, expected); assert.deepEqual(incremental, full);
+  };
+  quotes.set('test:BTCUSDT', mergePerpetualQuote(a, update({ sourceTime: 1100 }), 1100)); check(new Set(['test:BTCUSDT']));
+  quotes.set('test:BTCUSDT', { ...quotes.get('test:BTCUSDT'), delisting: true, takerFeeRate: 0.0005, takerFeeAt: 1200 }); check(new Set(['test:BTCUSDT']));
+  quotes.delete('test:ETHUSDT'); check(new Set(['test:ETHUSDT']));
+  quotes.set('test:BTCUSDT', mergePerpetualQuote(quotes.get('test:BTCUSDT'), update({ sourceTime: 5000 }), 5000)); check(new Set(['test:BTCUSDT']));
+  const c = mergePerpetualQuote(null, update({ symbol: 'SOLUSDT', base: 'SOL', sourceTime: 5000 }), 5000); quotes.set('test:SOLUSDT', c); check(new Set(['test:SOLUSDT']));
+  check(new Set());
 });
 
 test('incremental frames send changed values, pace time confirmations and remove delisted quotes', () => {

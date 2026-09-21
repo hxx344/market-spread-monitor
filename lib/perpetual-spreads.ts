@@ -1,4 +1,6 @@
 import type { PerpetualExchange, PerpetualPairMode, PerpetualPriceMode, PerpetualQuote, PerpetualSnapshot } from "./perpetual-types.ts";
+import { contractFeeMaxAgeMs, defaultQualityBudget, resolveTakerFee, validFeePercent, type QualityBudget } from "./perpetual-fees.ts";
+import { quoteCurrencyFx, type PerpetualFxSnapshot } from "./perpetual-fx.ts";
 
 export interface PerpetualFilters {
   search: string;
@@ -9,6 +11,10 @@ export interface PerpetualFilters {
   minSpreadPercent: number;
   favoritesOnly: boolean;
   favorites: string[];
+  /** The threshold uses the selected ranking metric. Omitted means gross. */
+  sortBy?: "gross" | "net";
+  favoritePairs?: string[];
+  blockedPairs?: string[];
 }
 
 export interface PerpetualSpread {
@@ -22,11 +28,24 @@ export interface PerpetualSpread {
   fundingSpread8h: number | null;
   updatedAt: number;
   crossCurrency: boolean;
+  /** Estimated convergence edge after four taker fills and the configured slippage budget. */
+  netSpreadPercent?: number | null;
+  roundTripFeePercent?: number | null;
+  netUnavailableReason?: "mark" | "cross-currency" | "fees" | "budget" | null;
+  fxAdjusted?: boolean;
+  fxAt?: number | null;
+  rawSpreadPercent?: number;
+  referenceBuyPrice?: number;
+  referenceSellPrice?: number;
 }
 
 /** A direction and both contracts identify an opportunity, even within the same base. */
 export const perpetualSpreadKey = (row: Pick<PerpetualSpread, "base" | "long" | "short">): string =>
   JSON.stringify([row.base, `${row.long.exchange}:${row.long.symbol}`, `${row.short.exchange}:${row.short.symbol}`]);
+
+/** Legacy asset favorites remain active until the user removes them explicitly. */
+export const perpetualSpreadIsFavorite = (row: Pick<PerpetualSpread, "base" | "long" | "short">, filters: PerpetualFilters): boolean =>
+  filters.favorites.includes(row.base) || (filters.favoritePairs?.includes(perpetualSpreadKey(row)) ?? false);
 
 const stableQuotes = new Set(["USD", "USDT", "USDC", "USD1", "USDG"]);
 const positive = (value: number | null): value is number => value !== null && Number.isFinite(value) && value > 0;
@@ -68,37 +87,41 @@ function compatiblePair(long: PerpetualExchange, short: PerpetualExchange, mode:
   return true;
 }
 
-export function rankPerpetualSpreads(snapshot: PerpetualSnapshot, filters: PerpetualFilters, now: number): PerpetualSpread[] {
-  return collectPerpetualSpreads(snapshot, filters, now, false);
+export function rankPerpetualSpreads(snapshot: PerpetualSnapshot, filters: PerpetualFilters, now: number, budget: QualityBudget = defaultQualityBudget, fx: PerpetualFxSnapshot | null = null): PerpetualSpread[] {
+  return collectPerpetualSpreads(snapshot, filters, now, false, budget, fx);
 }
 
 /** Bounded background discovery: watched pairs are sampled separately by the history service. */
-export function rankBestPerpetualSpreads(snapshot: PerpetualSnapshot, filters: PerpetualFilters, now: number): PerpetualSpread[] {
-  return collectPerpetualSpreads(snapshot, filters, now, true);
+export function rankBestPerpetualSpreads(snapshot: PerpetualSnapshot, filters: PerpetualFilters, now: number, budget: QualityBudget = defaultQualityBudget, fx: PerpetualFxSnapshot | null = null): PerpetualSpread[] {
+  return collectPerpetualSpreads(snapshot, filters, now, true, budget, fx);
 }
 
-function collectPerpetualSpreads(snapshot: PerpetualSnapshot, filters: PerpetualFilters, now: number, bestPerBase: boolean): PerpetualSpread[] {
-  if (snapshot.status === "unavailable") return [];
+function rankingContext(snapshot: PerpetualSnapshot, filters: PerpetualFilters, now: number, budget: QualityBudget, fx: PerpetualFxSnapshot | null) {
   const venues = new Map(snapshot.exchanges.map(exchange => [exchange.id, exchange]));
   const selected = filters.exchanges === null ? null : new Set(filters.exchanges);
   const favorites = new Set(filters.favorites);
+  const favoritePairs = new Set(filters.favoritePairs);
+  const blockedPairs = new Set(filters.blockedPairs);
   const search = filters.search.trim().toUpperCase();
-  const groups = new Map<string, { quote: PerpetualQuote; venue: PerpetualExchange; time: number; buy: number | null; sell: number | null; funding: number | null }[]>();
-  for (const quote of snapshot.quotes) {
-    const venue = venues.get(quote.exchange);
-    if (!venue || venue.status !== "live" || quote.comparable === false) continue;
-    if (selected && !selected.has(quote.exchange)) continue;
-    if (search && !quote.base.includes(search)) continue;
-    if (filters.favoritesOnly && !favorites.has(quote.base)) continue;
-    if (!quoteIsFresh(quote, filters.priceMode, now, snapshot.staleAfterMs)) continue;
-    const ready = { quote, venue, time: quotePriceTime(quote, filters.priceMode), buy: quotePrice(quote, filters.priceMode, "buy"), sell: quotePrice(quote, filters.priceMode, "sell"), funding: normalizedFunding8h(quote, now) };
-    const group = groups.get(quote.base);
-    if (group) group.push(ready); else groups.set(quote.base, [ready]);
-  }
-  const rows: PerpetualSpread[] = [];
-  for (const [base, quotes] of groups) {
-    if (quotes.length < 2) continue;
+  const netSort = filters.sortBy === "net";
+  const compare = (a: PerpetualSpread, b: PerpetualSpread) =>
+    (netSort ? b.netSpreadPercent! - a.netSpreadPercent! : b.spreadPercent - a.spreadPercent)
+    || compareText(a.base, b.base) || compareLegs(a.long, a.short, b.long, b.short);
+  return { compare, collect(base: string, source: Iterable<PerpetualQuote>, bestPerBase: boolean): PerpetualSpread[] {
+    if (snapshot.status === "unavailable" || (search && !base.includes(search))) return [];
+    if (filters.favoritesOnly && !favorites.has(base) && favoritePairs.size === 0) return [];
+    const quotes = [];
+    for (const quote of source) {
+      const venue = venues.get(quote.exchange);
+      if (!venue || venue.status !== "live" || quote.comparable === false || (selected && !selected.has(quote.exchange))) continue;
+      if (!quoteIsFresh(quote, filters.priceMode, now, snapshot.staleAfterMs)) continue;
+      // Resolve each contract once; a venue can participate in many combinations.
+      quotes.push({ quote, venue, time: quotePriceTime(quote, filters.priceMode), buy: quotePrice(quote, filters.priceMode, "buy"), sell: quotePrice(quote, filters.priceMode, "sell"), funding: normalizedFunding8h(quote, now), fee: resolveTakerFee(quote, budget.takerOverrides, now).percent, fx: filters.crossCurrency ? quoteCurrencyFx(quote.quoteCurrency, fx, now) : null });
+    }
+    const rows: PerpetualSpread[] = [];
+    if (quotes.length < 2) return rows;
     let best: PerpetualSpread | null = null;
+    let bestMetric = -Infinity;
     for (const longLeg of quotes) {
       const long = longLeg.quote;
       const buyPrice = longLeg.buy;
@@ -111,20 +134,47 @@ function collectPerpetualSpreads(snapshot: PerpetualSnapshot, filters: Perpetual
         if (crossCurrency && (!filters.crossCurrency || !stableQuotes.has(long.quoteCurrency) || !stableQuotes.has(short.quoteCurrency))) continue;
         const sellPrice = shortLeg.sell;
         if (sellPrice === null) continue;
-        const spreadPercent = (sellPrice / buyPrice - 1) * 100;
-        if (!Number.isFinite(spreadPercent) || spreadPercent < filters.minSpreadPercent) continue;
-        if (best && (spreadPercent < best.spreadPercent || (spreadPercent === best.spreadPercent && compareLegs(long, short, best.long, best.short) >= 0))) continue;
+        // Never compare unlike currency units directly or silently assume a stablecoin peg.
+        if (crossCurrency && (!longLeg.fx || !shortLeg.fx)) continue;
+        const referenceBuyPrice = crossCurrency ? buyPrice * longLeg.fx!.ask : buyPrice;
+        const referenceSellPrice = crossCurrency ? sellPrice * shortLeg.fx!.bid : sellPrice;
+        const spreadPercent = (referenceSellPrice / referenceBuyPrice - 1) * 100;
+        if (!Number.isFinite(spreadPercent)) continue;
+        const roundTripFeePercent = longLeg.fee === null || shortLeg.fee === null ? null : 2 * (longLeg.fee + shortLeg.fee);
+        const netUnavailableReason = filters.priceMode === "mark" ? "mark" : roundTripFeePercent === null ? "fees" : !validFeePercent(budget.slippagePercent) ? "budget" : null;
+        const netSpreadPercent = netUnavailableReason === null ? spreadPercent - roundTripFeePercent! - budget.slippagePercent : null;
+        const metric = netSort ? netSpreadPercent : spreadPercent;
+        if (metric === null || metric < filters.minSpreadPercent) continue;
+        if (blockedPairs.size || (filters.favoritesOnly && !favorites.has(base))) {
+          const key = perpetualSpreadKey({ base, long, short });
+          if (blockedPairs.has(key) || (filters.favoritesOnly && !favorites.has(base) && !favoritePairs.has(key))) continue;
+        }
+        if (best && (metric < bestMetric || (metric === bestMetric && compareLegs(long, short, best.long, best.short) >= 0))) continue;
         const longFunding = longLeg.funding, shortFunding = shortLeg.funding;
         const row: PerpetualSpread = { base, long, short, buyPrice, sellPrice, spreadPercent, fundingSpread8h: longFunding === null || shortFunding === null ? null : shortFunding - longFunding,
-          updatedAt: Math.min(longLeg.time, shortLeg.time), crossCurrency };
-        if (bestPerBase) best = row; else rows.push(row);
+          updatedAt: Math.min(longLeg.time, shortLeg.time), crossCurrency, roundTripFeePercent, netSpreadPercent, netUnavailableReason,
+          fxAdjusted: crossCurrency, fxAt: crossCurrency ? Math.min(longLeg.fx!.at, shortLeg.fx!.at) : null,
+          rawSpreadPercent: (sellPrice / buyPrice - 1) * 100, referenceBuyPrice, referenceSellPrice };
+        if (bestPerBase) { best = row; bestMetric = metric; } else rows.push(row);
       }
     }
     if (best) rows.push(best);
+    return rows;
+  } };
+}
+
+function collectPerpetualSpreads(snapshot: PerpetualSnapshot, filters: PerpetualFilters, now: number, bestPerBase: boolean, budget: QualityBudget, fx: PerpetualFxSnapshot | null): PerpetualSpread[] {
+  if (snapshot.status === "unavailable") return [];
+  const context = rankingContext(snapshot, filters, now, budget, fx);
+  const groups = new Map<string, PerpetualQuote[]>();
+  for (const quote of snapshot.quotes) {
+    const group = groups.get(quote.base);
+    if (group) group.push(quote); else groups.set(quote.base, [quote]);
   }
+  const rows: PerpetualSpread[] = [];
+  for (const [base, quotes] of groups) rows.push(...context.collect(base, quotes, bestPerBase));
   // Compare fields directly: no per-comparison key allocation or locale-dependent ties.
-  return rows.sort((a, b) => b.spreadPercent - a.spreadPercent || compareText(a.base, b.base)
-    || compareLegs(a.long, a.short, b.long, b.short));
+  return rows.sort(context.compare);
 }
 
 export interface PerpetualQuoteSelection {
@@ -139,7 +189,7 @@ export function createPerpetualQuoteSelector() {
   let byKey = new Map<string, PerpetualQuote>();
   let order: string[] = [];
   let baseCount = 0;
-  let search = "", exchanges: string[] | null | undefined, favorites: string[] | undefined, favoritesOnly = false;
+  let search = "", exchanges: string[] | null | undefined, favorites: string[] | undefined, favoritePairs: string[] | undefined, favoritesOnly = false;
   let keys: string[] = [];
   return (quotes: PerpetualQuote[], filters: PerpetualFilters): PerpetualQuoteSelection => {
     let catalogChanged = previousQuotes === null;
@@ -159,13 +209,17 @@ export function createPerpetualQuoteSelector() {
       }
     }
     const nextSearch = filters.search.trim().toUpperCase();
-    if (catalogChanged || search !== nextSearch || exchanges !== filters.exchanges || favorites !== filters.favorites || favoritesOnly !== filters.favoritesOnly) {
-      search = nextSearch; exchanges = filters.exchanges; favorites = filters.favorites; favoritesOnly = filters.favoritesOnly;
+    if (catalogChanged || search !== nextSearch || exchanges !== filters.exchanges || favorites !== filters.favorites || favoritePairs !== filters.favoritePairs || favoritesOnly !== filters.favoritesOnly) {
+      search = nextSearch; exchanges = filters.exchanges; favorites = filters.favorites; favoritePairs = filters.favoritePairs; favoritesOnly = filters.favoritesOnly;
       const selected = exchanges === null ? null : new Set(exchanges);
       const starred = new Set(favorites);
+      const starredContracts = new Set<string>();
+      for (const key of favoritePairs ?? []) {
+        try { const tuple = JSON.parse(key); if (Array.isArray(tuple) && tuple.length === 3) { starredContracts.add(tuple[1]); starredContracts.add(tuple[2]); } } catch { /* Invalid saved key. */ }
+      }
       keys = order.filter(key => {
         const quote = byKey.get(key)!;
-        return (!selected || selected.has(quote.exchange)) && (!favoritesOnly || starred.has(quote.base))
+        return (!selected || selected.has(quote.exchange)) && (!favoritesOnly || starred.has(quote.base) || starredContracts.has(key))
           && (!search || `${quote.base} ${quote.displayBase ?? ""} ${quote.symbol}`.toUpperCase().includes(search));
       });
     }
@@ -180,32 +234,109 @@ export function classifyPerpetualQuote(quote: PerpetualQuote, mode: PerpetualPri
   return now - time > staleAfterMs ? "stale" : "fresh";
 }
 
-/** Metadata-only frames reuse the ranking until a price or funding validity boundary is crossed. */
+function quoteRankingExpiry(quote: PerpetualQuote, mode: PerpetualPriceMode, staleAfterMs: number, now: number): number {
+  let expiry = Infinity;
+  const deadline = (timestamp: number | null | undefined, maxAge: number) => {
+    if (typeof timestamp !== "number" || !Number.isFinite(timestamp) || timestamp <= 0) return;
+    if (timestamp > now + 5_000) expiry = Math.min(expiry, timestamp - 5_000);
+    if (timestamp + maxAge + 1 > now) expiry = Math.min(expiry, timestamp + maxAge + 1);
+  };
+  deadline(quotePriceTime(quote, mode), staleAfterMs);
+  deadline(quote.fundingAt, 300_000);
+  deadline(quote.takerFeeAt, contractFeeMaxAgeMs);
+  return expiry;
+}
+
+/** Rebuild only changed/expired assets; retained rows preserve identity across other assets' ticks. */
 export function createPerpetualRankingSelector() {
   let previousQuotes: PerpetualQuote[] | null = null;
+  let previousByKey = new Map<string, PerpetualQuote>();
+  const groups = new Map<string, { quotes: Map<string, PerpetualQuote>; rows: PerpetualSpread[]; nextExpiry: number }>();
+  let previousSettings = "";
+  let settingsKey = "";
   let previousFilters: PerpetualFilters | null = null;
+  let previousBudget: QualityBudget | null = null;
+  let previousFx: PerpetualFxSnapshot | null = null;
+  let nextFxExpiry = Infinity;
   let previousVenues = "";
   let previousStatus = "";
   let previousStaleAfter = 0;
   let previousNow = 0;
-  let nextExpiry = Infinity;
   let result: PerpetualSpread[] = [];
-  return (snapshot: PerpetualSnapshot, filters: PerpetualFilters, now: number): PerpetualSpread[] => {
+  return (snapshot: PerpetualSnapshot, filters: PerpetualFilters, now: number, budget: QualityBudget = defaultQualityBudget, fx: PerpetualFxSnapshot | null = null): PerpetualSpread[] => {
     const venueKey = snapshot.exchanges.map(exchange => `${exchange.id}:${exchange.kind}:${exchange.status}`).join("|");
     const statusKey = snapshot.status === "unavailable" ? "unavailable" : "available";
-    if (snapshot.quotes === previousQuotes && filters === previousFilters && venueKey === previousVenues && statusKey === previousStatus
-      && snapshot.staleAfterMs === previousStaleAfter && now >= previousNow && now < nextExpiry) return result;
-    result = rankPerpetualSpreads(snapshot, filters, now);
-    previousQuotes = snapshot.quotes; previousFilters = filters; previousVenues = venueKey;
-    previousStatus = statusKey; previousStaleAfter = snapshot.staleAfterMs; previousNow = now;
-    nextExpiry = Infinity;
-    for (const quote of snapshot.quotes) {
-      const priceTime = quotePriceTime(quote, filters.priceMode);
-      const priceExpiry = priceTime + snapshot.staleAfterMs + 1;
-      if (priceExpiry > now) nextExpiry = Math.min(nextExpiry, priceExpiry);
-      if (priceTime > now + 5_000) nextExpiry = Math.min(nextExpiry, priceTime - 5_000);
-      if (quote.fundingAt && quote.fundingAt + 300_001 > now) nextExpiry = Math.min(nextExpiry, quote.fundingAt + 300_001);
+    if (filters !== previousFilters || budget !== previousBudget) settingsKey = JSON.stringify([filters, budget]);
+    const allChanged = previousQuotes === null || settingsKey !== previousSettings || venueKey !== previousVenues || statusKey !== previousStatus || snapshot.staleAfterMs !== previousStaleAfter || now < previousNow
+      || (filters.crossCurrency && (fx !== previousFx || now >= nextFxExpiry));
+    const dirty = new Set<string>();
+    if (snapshot.quotes !== previousQuotes) {
+      const nextByKey = new Map<string, PerpetualQuote>();
+      for (const quote of snapshot.quotes) {
+        const key = `${quote.exchange}:${quote.symbol}`;
+        const previous = previousByKey.get(key);
+        nextByKey.set(key, quote);
+        if (previous === quote) continue;
+        if (previous && previous.base !== quote.base) {
+          groups.get(previous.base)?.quotes.delete(key);
+          dirty.add(previous.base);
+        }
+        let group = groups.get(quote.base);
+        if (!group) { group = { quotes: new Map(), rows: [], nextExpiry: Infinity }; groups.set(quote.base, group); }
+        group.quotes.set(key, quote);
+        dirty.add(quote.base);
+      }
+      for (const [key, quote] of previousByKey) {
+        if (nextByKey.has(key)) continue;
+        groups.get(quote.base)?.quotes.delete(key);
+        dirty.add(quote.base);
+      }
+      previousByKey = nextByKey;
     }
+    for (const [base, group] of groups) {
+      if (!group.quotes.size) { groups.delete(base); dirty.add(base); }
+      else if (allChanged || now >= group.nextExpiry) dirty.add(base);
+    }
+    if (dirty.size) {
+      const context = rankingContext(snapshot, filters, now, budget, fx);
+      const changedRows: PerpetualSpread[] = [];
+      let changedGroupCount = 0;
+      for (const base of dirty) {
+        const group = groups.get(base);
+        if (!group) continue;
+        changedGroupCount++;
+        group.rows = context.collect(base, group.quotes.values(), false);
+        changedRows.push(...group.rows);
+        group.nextExpiry = Infinity;
+        for (const quote of group.quotes.values()) group.nextExpiry = Math.min(group.nextExpiry, quoteRankingExpiry(quote, filters.priceMode, snapshot.staleAfterMs, now));
+      }
+      changedRows.sort(context.compare);
+      if (allChanged || changedGroupCount === groups.size) result = changedRows;
+      else {
+        // The unaffected part is already sorted. Merge new rows without sorting the whole market.
+        const merged: PerpetualSpread[] = [];
+        let oldIndex = 0, changedIndex = 0;
+        while (oldIndex < result.length || changedIndex < changedRows.length) {
+          while (oldIndex < result.length && dirty.has(result[oldIndex].base)) oldIndex++;
+          if (oldIndex >= result.length) { while (changedIndex < changedRows.length) merged.push(changedRows[changedIndex++]); break; }
+          if (changedIndex >= changedRows.length || context.compare(result[oldIndex], changedRows[changedIndex]) <= 0) merged.push(result[oldIndex++]);
+          else merged.push(changedRows[changedIndex++]);
+        }
+        result = merged;
+      }
+    }
+    previousQuotes = snapshot.quotes; previousSettings = settingsKey; previousVenues = venueKey;
+    previousFilters = filters; previousBudget = budget;
+    previousFx = fx;
+    nextFxExpiry = Infinity;
+    if (filters.crossCurrency && fx) {
+      for (const rate of Object.values(fx.rates)) {
+        const deadline = rate.at + Math.min(180_000, fx.staleAfterMs) + 1;
+        if (deadline > now) nextFxExpiry = Math.min(nextFxExpiry, deadline);
+        if (rate.at > now + 5_000) nextFxExpiry = Math.min(nextFxExpiry, rate.at - 5_000);
+      }
+    }
+    previousStatus = statusKey; previousStaleAfter = snapshot.staleAfterMs; previousNow = now;
     return result;
   };
 }
@@ -213,6 +344,7 @@ export function createPerpetualRankingSelector() {
 export const defaultPerpetualFilters: PerpetualFilters = {
   search: "", exchanges: null, pairMode: "all", priceMode: "book", crossCurrency: false,
   minSpreadPercent: 0, favoritesOnly: false, favorites: [],
+  sortBy: "gross", favoritePairs: [], blockedPairs: [],
 };
 
 /** Versioned browser preferences are untrusted and may have been written by an older release. */
@@ -220,7 +352,7 @@ export function parsePerpetualPreferences(value: string | null): PerpetualFilter
   if (!value) return { ...defaultPerpetualFilters, favorites: [] };
   try {
     const parsed = JSON.parse(value);
-    if (!parsed || parsed.version !== 1) return { ...defaultPerpetualFilters, favorites: [] };
+    if (!parsed || ![1, 2].includes(parsed.version)) return { ...defaultPerpetualFilters, favorites: [] };
     const strings = (items: unknown): string[] => Array.isArray(items) ? [...new Set(items.filter((item): item is string => typeof item === "string" && item.length <= 80))].slice(0, 1000) : [];
     return {
       search: typeof parsed.search === "string" ? parsed.search.slice(0, 40) : "",
@@ -231,6 +363,26 @@ export function parsePerpetualPreferences(value: string | null): PerpetualFilter
       minSpreadPercent: typeof parsed.minSpreadPercent === "number" && Number.isFinite(parsed.minSpreadPercent) ? Math.min(1000, Math.max(-100, parsed.minSpreadPercent)) : 0,
       favoritesOnly: parsed.favoritesOnly === true,
       favorites: strings(parsed.favorites),
+      sortBy: parsed.sortBy === "net" ? "net" : "gross",
+      favoritePairs: parsePairKeys(parsed.favoritePairs),
+      blockedPairs: parsePairKeys(parsed.blockedPairs),
     };
   } catch { return { ...defaultPerpetualFilters, favorites: [] }; }
+}
+
+/** Pair keys can contain namespaced contracts, so validate the tuple rather than splitting on ':'. */
+function parsePairKeys(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const keys = new Set<string>();
+  for (const key of value) {
+    if (typeof key !== "string" || key.length > 512) continue;
+    try {
+      const tuple = JSON.parse(key);
+      if (!Array.isArray(tuple) || tuple.length !== 3 || !tuple.every(item => typeof item === "string" && item.length > 0 && item.length <= 160)) continue;
+      if (!tuple[1].includes(":") || !tuple[2].includes(":") || tuple[1] === tuple[2]) continue;
+      keys.add(JSON.stringify(tuple));
+      if (keys.size >= 1000) break;
+    } catch { /* Ignore malformed browser preferences. */ }
+  }
+  return [...keys];
 }

@@ -22,6 +22,8 @@ export interface PerpetualQuote {
   symbol: string;
   base: string;
   quoteCurrency: string;
+  /** Original contract multiplier; public prices are normalized per base asset. */
+  multiplier?: number;
   bid: number | null;
   ask: number | null;
   mark: number | null;

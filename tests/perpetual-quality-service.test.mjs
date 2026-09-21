@@ -45,6 +45,7 @@ function fixture(options = {}) {
     };
   };
   const service = createPerpetualQualityService({ getSnapshot, store, fundamentals, clock: () => now,
+    shouldDeferAuxiliary: options.shouldDeferAuxiliary,
     positioningFetch: async (...args) => { fetches++; return options.fetch ? options.fetch(...args) : ratio(args[0], now - 300_000); },
   });
   return { service, quotes, assets, fundamentals, getSnapshot, setNow: value => { now = value; }, advance: ms => { now += ms; },
@@ -66,6 +67,38 @@ test('quality reads inspect cached data only and cannot fetch or write history',
   }
   await f.service.collectPositioning(); await f.service.collectFundamentals(); f.service.collectSample();
   assert.deepEqual(f.counts(), { snapshotReads: 10, refreshes: 0, fetches: 0, saves: 0 });
+});
+
+test('detail series are opt-in for at most one pair without extra collection or writes', async t => {
+  const f = fixture({ quotes: [quote(), quote('bybit'), quote('okx')] });
+  await f.start(t);
+  const first = pair(f.quotes[0], f.quotes[1]), second = pair(f.quotes[0], f.quotes[2]);
+  const before = f.counts();
+  const result = f.service.read({ pairs: [{ ...first, includeSeries: true }, { ...second, includeSeries: true }] });
+  assert.ok(Array.isArray(result.pairs[pairId(first)].priceSeries));
+  assert.equal(result.pairs[pairId(second)].priceSeries, undefined);
+  assert.equal(f.counts().saves, before.saves);
+  assert.equal(f.counts().fetches, before.fetches);
+  assert.equal(f.counts().refreshes, before.refreshes);
+  assert.equal(f.service.read({ pairs: [first] }).pairs[pairId(first)].priceSeries, undefined);
+});
+
+test('load shedding defers auxiliary requests while price history continues and resumes', async t => {
+  let overloaded = true;
+  const f = fixture({ shouldDeferAuxiliary: () => overloaded });
+  await f.start(t);
+  f.watch();
+  await f.service.collectFundamentals(); await f.service.collectPositioning();
+  assert.equal(f.counts().refreshes, 0);
+  assert.equal(f.counts().fetches, 0);
+  const saved = f.counts().saves;
+  f.advance(60_000); f.service.collectSample();
+  assert.ok(f.counts().saves > saved);
+  assert.ok(f.service.metrics().auxiliaryDeferredAt);
+  overloaded = false;
+  await f.service.collectFundamentals(); await f.service.collectPositioning();
+  assert.equal(f.counts().refreshes, 1);
+  assert.equal(f.counts().fetches, 1);
 });
 
 test('request validation limits input to 30 and ignores mismatched or same-venue pairs', () => {

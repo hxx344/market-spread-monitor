@@ -1,11 +1,16 @@
 import type { PerpetualQualityReport } from "./perpetual-quality.ts";
 
-export interface QualityPairRequest { base: string; longKey: string; shortKey: string }
+export interface QualityPairRequest { base: string; longKey: string; shortKey: string; includeSeries?: boolean }
 
 /** A reordered ranking is the same request; prices and timestamps are not request dependencies. */
 export function qualityRequestKey(pairs: QualityPairRequest[]) {
   const entries = new Map<string, QualityPairRequest>();
-  for (const pair of pairs.slice(0, 30)) entries.set(JSON.stringify([pair.base, pair.longKey, pair.shortKey]), { base: pair.base, longKey: pair.longKey, shortKey: pair.shortKey });
+  let seriesIncluded = false;
+  for (const pair of pairs.slice(0, 30)) {
+    const includeSeries = pair.includeSeries === true && !seriesIncluded;
+    if (includeSeries) seriesIncluded = true;
+    entries.set(JSON.stringify([pair.base, pair.longKey, pair.shortKey]), { base: pair.base, longKey: pair.longKey, shortKey: pair.shortKey, ...(includeSeries ? { includeSeries: true } : {}) });
+  }
   return JSON.stringify([...entries].sort(([a], [b]) => a.localeCompare(b)).map(([, pair]) => pair));
 }
 

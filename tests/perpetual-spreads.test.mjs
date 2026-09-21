@@ -1,12 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyPerpetualQuote, createPerpetualQuoteSelector, createPerpetualRankingSelector, defaultPerpetualFilters, normalizedFunding8h, parsePerpetualPreferences, perpetualSpreadKey, quoteIsFresh, rankBestPerpetualSpreads, rankPerpetualSpreads } from "../lib/perpetual-spreads.ts";
+import { classifyPerpetualQuote, createPerpetualQuoteSelector, createPerpetualRankingSelector, defaultPerpetualFilters, normalizedFunding8h, parsePerpetualPreferences, perpetualSpreadIsFavorite, perpetualSpreadKey, quoteIsFresh, rankBestPerpetualSpreads, rankPerpetualSpreads } from "../lib/perpetual-spreads.ts";
+import { defaultQualityBudget } from "../lib/perpetual-fees.ts";
 
 const now = 1_800_000_000_000;
 const venue = (id, kind = "cex", status = "live") => ({ id, name: id, kind, status, marketCount: 1, quoteCount: 1, lastMessageAt: now, error: null });
 const quote = (exchange, overrides = {}) => ({ exchange, symbol: "BTCUSDT", base: "BTC", quoteCurrency: "USDT", bid: 99, ask: 100, mark: 100, last: 100, fundingRate: 0.0001, fundingIntervalHours: 8, nextFundingAt: now + 3600000, sourceTime: now, receivedAt: now, transport: "ws", bidAskAt: now, markAt: now, fundingAt: now, ...overrides });
 const snapshot = (quotes, exchanges = [venue("a"), venue("b"), venue("c", "dex")]) => ({ schemaVersion: 1, monitorId: "perpetual", status: "live", generatedAt: now, staleAfterMs: 30000, exchanges, quotes });
-const rank = (data, filters = {}) => rankPerpetualSpreads(data, { ...defaultPerpetualFilters, ...filters }, now);
+const fx = { baseCurrency: "USDT", generatedAt: now, staleAfterMs: 180000, rates: { USDC: { bid: 1, ask: 1, at: now, source: "fixture" } } };
+const rank = (data, filters = {}, fxSnapshot = fx) => rankPerpetualSpreads(data, { ...defaultPerpetualFilters, ...filters }, now, defaultQualityBudget, fxSnapshot);
 
 test("perpetual ranking uses buy ask / sell bid on different venues, not mark or last", () => {
   const rows = rank(snapshot([quote("a", { mark: 200 }), quote("b", { bid: 102, ask: 103, mark: 90 }), quote("a", { symbol: "BTCUSDC", quoteCurrency: "USDC", bid: 150, ask: 151 })]));
@@ -16,10 +18,11 @@ test("perpetual ranking uses buy ask / sell bid on different venues, not mark or
   assert.equal(rank(snapshot([quote("a"), quote("a", { bid: 102, ask: 103 })])).length, 0);
 });
 
-test("quote currencies stay separate by default; explicit stable currency comparison is flagged", () => {
+test("quote currencies stay separate by default; cross-currency comparison requires a fresh conversion", () => {
   const data = snapshot([quote("a"), quote("c", { quoteCurrency: "USDC", bid: 102, ask: 103 })]);
   assert.equal(rank(data).length, 0);
   assert.equal(rank(data, { crossCurrency: true })[0].crossCurrency, true);
+  assert.equal(rank(data, { crossCurrency: true }, null).length, 0);
   assert.equal(rank(snapshot([quote("a"), quote("c", { quoteCurrency: "BTC", bid: 102, ask: 103 })]), { crossCurrency: true }).length, 0);
 });
 
@@ -198,4 +201,115 @@ test("price changes preserve alphabetical selection keys; catalog, search and ex
   const added = select([...data, quote("a", { base: "AAA", symbol: "AAAUSDT" })], defaultPerpetualFilters);
   assert.equal(added.keys[0], "a:AAAUSDT"); assert.equal(added.baseCount, 3);
   assert.equal(select([], defaultPerpetualFilters).keys.length, 0);
+});
+
+test("net ranking uses both legs' taker fees and its threshold, with unavailable estimates excluded", () => {
+  const data = snapshot([
+    quote("binance", { bid: 100, ask: 100 }), quote("gate", { bid: 103, ask: 103 }),
+    quote("bybit", { bid: 103.05, ask: 103.05, takerFeeRate: 0.0011, takerFeeAt: now, takerFeeSource: "bybit-standard" }),
+  ], [venue("binance"), venue("gate"), venue("bybit")]);
+  assert.equal(rank(data)[0].short.exchange, "bybit");
+  const net = rank(data, { sortBy: "net" });
+  assert.deepEqual(net.map(row => row.short.exchange), ["gate", "bybit"]);
+  assert.ok(Math.abs(net[0].netSpreadPercent - 2.7) < 1e-10);
+  assert.equal(net[0].roundTripFeePercent, 0.2);
+  assert.equal(rank(data, { sortBy: "net", minSpreadPercent: 2.65 }).length, 1);
+  assert.equal(rank({ ...data, quotes: data.quotes.map(q => ({ ...q, mark: q.ask })) }, { sortBy: "net", priceMode: "mark" }).length, 0);
+  const missing = { ...data, quotes: data.quotes.map(q => q.exchange === "bybit" ? { ...q, takerFeeRate: null } : q) };
+  assert.equal(rank(missing, { sortBy: "net" }).length, 1);
+  const manual = rankPerpetualSpreads(missing, { ...defaultPerpetualFilters, sortBy: "net" }, now, { takerOverrides: { bybit: 0 }, slippagePercent: 0 });
+  assert.equal(manual[0].short.exchange, "bybit");
+  assert.ok(Math.abs(manual[0].netSpreadPercent - 2.95) < 1e-10);
+  assert.equal(rankPerpetualSpreads(data, { ...defaultPerpetualFilters, sortBy: "net" }, now, { takerOverrides: {}, slippagePercent: NaN }).length, 0);
+  assert.deepEqual(rankBestPerpetualSpreads(data, { ...defaultPerpetualFilters, sortBy: "net" }, now), [net[0]]);
+});
+
+test("cross-currency ranking converts buy at FX ask and sell at FX bid while retaining original leg prices", () => {
+  const data = snapshot([quote("binance", { bid: 100, ask: 100 }), quote("gate", { bid: 103, ask: 103, quoteCurrency: "USDC" })], [venue("binance"), venue("gate")]);
+  const depeg = { ...fx, rates: { USDC: { bid: 0.98, ask: 0.99, at: now, source: "fixture" } } };
+  const rows = rank(data, { crossCurrency: true }, depeg);
+  assert.equal(rows[0].buyPrice, 100); assert.equal(rows[0].sellPrice, 103);
+  assert.equal(rows[0].referenceSellPrice, 100.94);
+  assert.ok(Math.abs(rows[0].spreadPercent - 0.94) < 1e-10);
+  assert.ok(Math.abs(rows[0].rawSpreadPercent - 3) < 1e-10);
+  assert.equal(rows[0].fxAdjusted, true);
+  assert.equal(rank(data, { crossCurrency: true }, { ...depeg, rates: { USDC: { ...depeg.rates.USDC, at: now - 180001 } } }).length, 0);
+  const reverse = rank({ ...data, quotes: [quote("gate", { bid: 100, ask: 100, quoteCurrency: "USDC" }), quote("binance", { bid: 100, ask: 100 })] }, { crossCurrency: true }, depeg);
+  assert.equal(reverse[0].referenceBuyPrice, 99);
+  assert.ok(Math.abs(reverse[0].spreadPercent - (100 / 99 - 1) * 100) < 1e-10);
+  assert.equal(rank({ ...data, quotes: data.quotes.map(q => ({ ...q, quoteCurrency: q.exchange === "gate" ? "USD" : "USDT" })) }, { crossCurrency: true }).length, 0);
+});
+
+test("pair favorites preserve direction and contract, coexist with old asset favorites, and blocking wins", () => {
+  const data = snapshot([quote("a"), quote("b", { bid: 103, ask: 104 }), quote("c", { bid: 106, ask: 107 })]);
+  const all = rank(data), favoriteKey = perpetualSpreadKey(all[1]);
+  const filters = { ...defaultPerpetualFilters, favoritesOnly: true, favoritePairs: [favoriteKey] };
+  assert.deepEqual(rank(data, filters), [all[1]]);
+  assert.equal(perpetualSpreadIsFavorite(all[1], filters), true);
+  assert.equal(perpetualSpreadIsFavorite(all[0], filters), false);
+  assert.equal(rank(data, { ...filters, favorites: ["BTC"] }).length, 3);
+  assert.equal(rank(data, { ...filters, blockedPairs: [favoriteKey] }).length, 0);
+  assert.equal(rank(data, { blockedPairs: [favoriteKey] }).length, 2);
+  const parsed = parsePerpetualPreferences(JSON.stringify({ version: 1, favorites: ["ETH"], favoritePairs: [favoriteKey, favoriteKey, "oops", "[1,2,3]"], blockedPairs: [favoriteKey], sortBy: "net" }));
+  assert.deepEqual(parsed.favoritePairs, [favoriteKey]); assert.deepEqual(parsed.favorites, ["ETH"]); assert.equal(parsed.sortBy, "net");
+  assert.equal(parsePerpetualPreferences(JSON.stringify({ version: 2, favoritePairs: [favoriteKey] })).favoritePairs.length, 1);
+  const quotes = createPerpetualQuoteSelector()(data.quotes, filters);
+  assert.deepEqual(new Set(quotes.keys), new Set([`${all[1].long.exchange}:${all[1].long.symbol}`, `${all[1].short.exchange}:${all[1].short.symbol}`]));
+});
+
+test("incremental ranking retains untouched asset rows and tracks removal, base moves and timer-only expiry", () => {
+  const select = createPerpetualRankingSelector();
+  const data = snapshot([
+    quote("a", { bidAskAt: now - 5000 }), quote("b", { bid: 102, ask: 103, bidAskAt: now - 5000 }),
+    quote("a", { base: "ETH", symbol: "ETHUSDT" }), quote("b", { base: "ETH", symbol: "ETHUSDT", bid: 105, ask: 106 }),
+  ]);
+  const first = select(data, defaultPerpetualFilters, now), oldBtc = first.find(row => row.base === "BTC"), oldEth = first.find(row => row.base === "ETH");
+  const update = { ...data, quotes: data.quotes.map(q => q.base === "BTC" && q.exchange === "b" ? { ...q, bid: 103 } : q) };
+  const second = select(update, defaultPerpetualFilters, now + 1);
+  assert.equal(second.find(row => row.base === "ETH"), oldEth);
+  assert.notEqual(second.find(row => row.base === "BTC"), oldBtc);
+  assert.equal(select({ ...update, quotes: [...update.quotes] }, { ...defaultPerpetualFilters }, now + 2), second);
+  const expired = select(update, defaultPerpetualFilters, now + 25001);
+  assert.equal(expired.length, 1); assert.equal(expired[0], oldEth);
+  const moved = { ...data, quotes: data.quotes.map(q => q.base === "BTC" ? { ...q, base: "WBTC" } : q) };
+  assert.ok(select(moved, defaultPerpetualFilters, now).some(row => row.base === "WBTC"));
+  assert.equal(select({ ...data, quotes: data.quotes.filter(q => q.base === "ETH") }, defaultPerpetualFilters, now).length, 1);
+  assert.equal(select({ ...data, quotes: [] }, defaultPerpetualFilters, now).length, 0);
+});
+
+test("incremental ranking refreshes contract fee and FX validity without a price tick", () => {
+  const select = createPerpetualRankingSelector();
+  const data = snapshot([quote("binance"), quote("bybit", { bid: 102, ask: 103, takerFeeRate: 0.00055, takerFeeAt: now - 900000, takerFeeSource: "bybit-standard" })], [venue("binance"), venue("bybit")]);
+  const filters = { ...defaultPerpetualFilters, sortBy: "net" };
+  assert.equal(select(data, filters, now).length, 1);
+  assert.equal(select(data, filters, now + 1).length, 0);
+  const zeroFees = { takerOverrides: { binance: 0, bybit: 0 }, slippagePercent: 0 };
+  assert.equal(select(data, filters, now + 1, zeroFees).length, 1);
+  const cross = { ...data, quotes: data.quotes.map(q => q.exchange === "bybit" ? { ...q, quoteCurrency: "USDC" } : q) };
+  const crossFilters = { ...filters, crossCurrency: true };
+  const almostStale = { ...fx, rates: { USDC: { ...fx.rates.USDC, at: now - 180000 } } };
+  assert.equal(select(cross, crossFilters, now, zeroFees, almostStale).length, 1);
+  assert.equal(select(cross, crossFilters, now + 1, zeroFees, almostStale).length, 0);
+  assert.equal(select(cross, crossFilters, now + 1, zeroFees, fx).length, 1);
+});
+
+test("incremental merge matches a full ranking through mixed updates, removals, outages and settings changes", () => {
+  const select = createPerpetualRankingSelector();
+  const venues = [venue("binance"), venue("gate"), venue("hyperliquid", "dex")];
+  let data = snapshot(Array.from({ length: 8 }, (_, index) => venues.map((venue, leg) => quote(venue.id, { base: `COIN${index}`, symbol: `COIN${index}USDT`, bid: 100 + leg, ask: 100 + leg }))).flat(), venues);
+  let filters = { ...defaultPerpetualFilters }, clock = now;
+  let seed = 37;
+  const random = () => (seed = (seed * 1664525 + 1013904223) >>> 0);
+  for (let step = 0; step < 100; step++) {
+    clock += 1000;
+    const editedBase = `COIN${random() % 8}`;
+    data = { ...data, quotes: data.quotes.map(q => q.base === editedBase ? { ...q, bid: 90 + random() % 20, ask: 110 + random() % 3, bidAskAt: clock, receivedAt: clock } : q) };
+    if (step === 9) data = { ...data, quotes: data.quotes.filter(q => q.base !== "COIN0") };
+    if (step === 10) data = { ...data, quotes: data.quotes.filter(q => q.base !== "COIN1").map(q => q.base === "COIN2" ? { ...q, bid: 109 } : q) };
+    if (step % 11 === 0) filters = { ...filters, minSpreadPercent: step % 22 ? -20 : -100 };
+    if (step % 13 === 0) filters = { ...filters, sortBy: filters.sortBy === "net" ? "gross" : "net" };
+    if (step % 17 === 0) data = { ...data, exchanges: venues.map(v => v.id === "gate" ? { ...v, status: step % 34 ? "live" : "error" } : v) };
+    const actual = select(data, filters, clock);
+    assert.deepEqual(actual, rankPerpetualSpreads(data, filters, clock), `step ${step}`);
+  }
 });

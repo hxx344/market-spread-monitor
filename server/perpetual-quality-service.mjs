@@ -3,6 +3,7 @@ import { createFundamentalsClient } from './perpetual-fundamentals.mjs';
 import { fetchPositioning, positioningUnavailableReason } from './perpetual-positioning.mjs';
 import { selectPositioningConstituents, summarizePositioning } from './perpetual-positioning-summary.mjs';
 import { createQualityHistory, QUALITY_SAMPLE_MS, QUALITY_PRICE_WINDOW_MS, QUALITY_FUNDING_WINDOW_MS } from './perpetual-quality-history.mjs';
+import { qualityHistoryIdentity } from '../lib/perpetual-quality.ts';
 
 const pairKey = row => JSON.stringify([row.base, row.longKey, row.shortKey]);
 const qkey = quote => `${quote.exchange}:${quote.symbol}`;
@@ -10,10 +11,16 @@ const assetMessages = { pending: '基本面等待查询', unmapped: '未找到�
 const POSITIONING_CACHE_LIMIT = 500;
 
 /** Secondary research data: one shared, bounded collector; page requests read cached evidence only. */
-export function createPerpetualQualityService({ getSnapshot, store, clock = Date.now, fundamentals = createFundamentalsClient({ clock }), positioningFetch = fetchPositioning } = {}) {
+export function createPerpetualQualityService({ getSnapshot, store, clock = Date.now, fundamentals = createFundamentalsClient({ clock }), positioningFetch = fetchPositioning, shouldDeferAuxiliary = () => false } = {}) {
   const history = createQualityHistory(), watches = new Map(), positioning = new Map(), attempts = new Map(), venueRetryAt = new Map();
   let running = false, restoring = false, metadataBusy = false, ratioBusy = false, metadataRetryAt = 0, metadataFailures = 0;
   let historyError = null, metadataError = null, timer, sampleTimer, metadataTimer, restorePromise;
+  let auxiliaryDeferredAt = null;
+  function deferAuxiliary() {
+    if (!shouldDeferAuxiliary()) return false;
+    auxiliaryDeferredAt = clock();
+    return true;
+  }
   const controllers = new Set(), pending = new Set();
   const launch = fn => {
     const promise = Promise.resolve().then(fn).catch(() => {}).finally(() => pending.delete(promise));
@@ -36,7 +43,7 @@ export function createPerpetualQualityService({ getSnapshot, store, clock = Date
     }
   }
   async function collectFundamentals() {
-    if (!running || metadataBusy || clock() < metadataRetryAt) return;
+    if (!running || metadataBusy || clock() < metadataRetryAt || deferAuxiliary()) return;
     const bases = [...new Set(getSnapshot().quotes.filter(row => row.comparable !== false && /^[A-Z0-9-]{1,40}$/.test(row.base)).map(row => row.base))];
     if (!bases.length) return;
     metadataBusy = true;
@@ -52,7 +59,7 @@ export function createPerpetualQualityService({ getSnapshot, store, clock = Date
     finally { metadataBusy = false; controllers.delete(controller); }
   }
   async function collectPositioning() {
-    if (!running || ratioBusy) return;
+    if (!running || ratioBusy || deferAuxiliary()) return;
     const now = clock();
     watched(now);
     const keys = new Set([...watches.values()].flatMap(item => item.positioningKeys));
@@ -95,6 +102,7 @@ export function createPerpetualQualityService({ getSnapshot, store, clock = Date
       quotesByBase.get(quote.base).push(quote);
     }
     const constituentsByBase = new Map();
+    let seriesIncluded = false;
     for (const row of input.pairs) {
       if (!row || ['base', 'longKey', 'shortKey'].some(key => typeof row[key] !== 'string' || row[key].length > 160)) throw new Error('平台组合格式无效');
       const long = byKey.get(row.longKey), short = byKey.get(row.shortKey);
@@ -106,7 +114,9 @@ export function createPerpetualQualityService({ getSnapshot, store, clock = Date
       const positioningKeys = [...keys].filter(key => byKey.has(key) && !positioningUnavailableReason(byKey.get(key)));
       watches.delete(id); watches.set(id, { row: { base: row.base, longKey: row.longKey, shortKey: row.shortKey }, positioningKeys, at: now });
       while (watches.size > 60) watches.delete(watches.keys().next().value);
-      pairs[id] = history.get(row.base, row.longKey, row.shortKey, now);
+      const includeSeries = row.includeSeries === true && !seriesIncluded;
+      if (includeSeries) seriesIncluded = true;
+      pairs[id] = history.get(row.base, row.longKey, row.shortKey, now, includeSeries, qualityHistoryIdentity(long, short));
       const asset = fundamentals.get(row.base);
       if (asset) assets[row.base] = asset;
       else assetErrors[row.base] = assetMessages[fundamentals.describe(row.base).status] || '基本面尚未就绪';
@@ -159,6 +169,6 @@ export function createPerpetualQualityService({ getSnapshot, store, clock = Date
     },
     // Testable collector operations also power the timers; no alternate implementation.
     collectSample, collectFundamentals, collectPositioning,
-    metrics: () => ({ ...history.metrics(), watchedPairs: watches.size, positioningCache: positioning.size, restoring, metadataRetryAt, error: historyError || metadataError }),
+    metrics: () => ({ ...history.metrics(), watchedPairs: watches.size, positioningCache: positioning.size, restoring, metadataRetryAt, auxiliaryDeferredAt, error: historyError || metadataError }),
   };
 }

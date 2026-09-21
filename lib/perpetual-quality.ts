@@ -1,4 +1,5 @@
 import { perpetualSpreadKey, type PerpetualSpread } from './perpetual-spreads.ts';
+import type { PerpetualQuote } from './perpetual-types.ts';
 import { defaultQualityBudget, pairTakerFees, validFeePercent, type PairTakerFees, type QualityBudget } from './perpetual-fees.ts';
 export { defaultQualityBudget, parseQualityBudget, type QualityBudget } from './perpetual-fees.ts';
 
@@ -28,9 +29,12 @@ export interface StabilityStats {
 }
 export interface PairQualityHistory {
   base: string; longKey: string; shortKey: string;
+  identity?: string;
   /** All history values are percentage points. Funding is normalized to 8h. */
   spread: StabilityStats;
   funding: StabilityStats & { longStddev: number | null; shortStddev: number | null };
+  /** Requested for one inspected pair only; real minute observations, never interpolated. */
+  priceSeries?: Array<[number, number]>;
 }
 export interface PerpetualQualityReport {
   schemaVersion: 1; generatedAt: number; sampleIntervalMs: number; priceWindowMs: number; fundingWindowMs: number;
@@ -50,6 +54,12 @@ export interface OpportunityQuality {
   fees: PairTakerFees;
 }
 export const qualityPairKey = perpetualSpreadKey;
+export const qualityHistoryIdentity = (long: PerpetualQuote, short: PerpetualQuote): string => JSON.stringify([long.base, long.quoteCurrency, long.collateralCurrency ?? '', long.multiplier ?? 1, long.contractUnit ?? '', short.base, short.quoteCurrency, short.collateralCurrency ?? '', short.multiplier ?? 1, short.contractUnit ?? '']);
+/** Existing history is in one common quote currency; never apply it to an FX-adjusted pair. */
+export function pairQualityHistory(row: PerpetualSpread, report: PerpetualQualityReport | null | undefined): PairQualityHistory | undefined {
+  const history = report?.pairs[qualityPairKey(row)];
+  return !row.crossCurrency && history && (!history.identity || history.identity === qualityHistoryIdentity(row.long, row.short)) ? history : undefined;
+}
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 const fresh = (at: unknown, now: number, age: number) => finite(at) && at > 0 && at <= now + 5_000 && now - at <= age;
 const clamp = (value: number) => Math.max(0, Math.min(100, value));
@@ -64,7 +74,7 @@ export function evaluateOpportunityQuality(row: PerpetualSpread, report: Perpetu
   const fdv = assetFresh && finite(asset.fdvUsd) && asset.fdvUsd > 0 ? asset.fdvUsd : null;
   const dilution = cap !== null && fdv !== null && fdv >= cap * 0.95 ? Math.min(1, cap / fdv) : null;
   const capScore = cap === null ? null : cap >= 10e9 ? 100 : cap >= 1e9 ? 80 : cap >= 100e6 ? 60 : cap >= 10e6 ? 35 : 10;
-  const history = currentReport?.pairs[qualityPairKey(row)];
+  const history = pairQualityHistory(row, currentReport);
   const spread = history?.spread, funding = history?.funding;
   const spreadReady = spread && spread.samples >= 30 && spread.coverage >= 0.5 && fresh(spread.lastAt, now, 180_000) && finite(spread.mean) && finite(spread.stddev) && finite(spread.positiveRatio);
   const fundingReady = funding && funding.samples >= 12 && funding.coverage >= 1 / 24 && fresh(funding.lastAt, now, 600_000) && finite(funding.mean) && finite(funding.longStddev) && finite(funding.shortStddev);
@@ -87,11 +97,13 @@ export function evaluateOpportunityQuality(row: PerpetualSpread, report: Perpetu
   const rawScore = coverage ? Math.round(dimensions.reduce((sum, item) => sum + (item.score ?? 0) * item.weight, 0) / coverage) : null;
   const fees = pairTakerFees(row, budget.takerOverrides, now);
   const validBudget = fees.roundTripPercent !== null && validFeePercent(budget.slippagePercent);
-  const reference = mode === 'mark' || row.crossCurrency || !fresh(row.updatedAt, now, 30_000);
+  const fxReady = !row.crossCurrency || (row.fxAdjusted === true && fresh(row.fxAt, now, 180_000));
+  const reference = mode === 'mark' || !fxReady || !fresh(row.updatedAt, now, 30_000);
   const netSpreadPercent = !reference && validBudget ? row.spreadPercent - fees.roundTripPercent! - budget.slippagePercent : null;
   if (fees.roundTripPercent === null) reasons.push('两腿 taker 费率尚未齐全，暂不计算扣费价差，等级不评为较好');
   if (!validFeePercent(budget.slippagePercent)) reasons.push('滑点预算无效，暂不计算扣费价差');
-  if (reference) reasons.push(mode === 'mark' ? '标记价不能用于判断可成交套利质量' : row.crossCurrency ? '跨计价币尚未换汇，仅供参考' : '当前两腿价格已过期');
+  if (reference) reasons.push(mode === 'mark' ? '标记价不能用于判断可成交套利质量' : !fxReady ? '跨计价币汇率缺失或已过期，仅供参考' : '当前两腿价格已过期');
+  if (row.fxAdjusted) reasons.push('跨计价币已按现货买卖价换算，未计额外换汇手续费；尚无相同换算口径的历史，不套用原币种历史评分');
   if (!spreadReady || !fundingReady) reasons.push('历史正在积累，未用回填或模拟数据补齐');
   if (fundingReady && funding.coverage < 0.5) reasons.push('资金费历史不足12小时，等级暂不评为较好');
   if (coverage < 100) reasons.push(`可评分数据覆盖${coverage}%，缺失项未计为零分`);

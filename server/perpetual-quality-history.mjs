@@ -1,4 +1,5 @@
 import { defaultPerpetualFilters, rankBestPerpetualSpreads, quoteIsFresh, normalizedFunding8h } from '../lib/perpetual-spreads.ts';
+import { qualityHistoryIdentity } from '../lib/perpetual-quality.ts';
 
 export const QUALITY_SAMPLE_MS = 60_000;
 export const QUALITY_PRICE_WINDOW_MS = 3_600_000;
@@ -7,7 +8,7 @@ const FUNDING_STEP = 300_000;
 const keyOf = (base, longKey, shortKey) => JSON.stringify([base, longKey, shortKey]);
 const qkey = quote => `${quote.exchange}:${quote.symbol}`;
 const finite = value => typeof value === 'number' && Number.isFinite(value);
-const signature = (long, short) => JSON.stringify([long.base, long.quoteCurrency, long.collateralCurrency ?? '', long.multiplier ?? 1, long.contractUnit ?? '', short.base, short.quoteCurrency, short.collateralCurrency ?? '', short.multiplier ?? 1, short.contractUnit ?? '']);
+const signature = qualityHistoryIdentity;
 function stats(points, expected, index = 1) {
   const count = points.length;
   if (!count) return { samples: 0, expectedSamples: expected, coverage: 0, firstAt: null, lastAt: null, mean: null, stddev: null, positiveRatio: null, signChanges: 0 };
@@ -95,11 +96,12 @@ export function createQualityHistory({ maxPairs = 1000 } = {}) {
   }
   return {
     sample, ingest,
-    get(base, longKey, shortKey, now) {
-      const item = pairs.get(keyOf(base, longKey, shortKey));
+    get(base, longKey, shortKey, now, includeSeries = false, expectedIdentity) {
+      const candidate = pairs.get(keyOf(base, longKey, shortKey));
+      const item = expectedIdentity && candidate?.identity !== expectedIdentity ? undefined : candidate;
       const prices = item?.spread.filter(point => point[0] > now - QUALITY_PRICE_WINDOW_MS && point[0] <= now) ?? [];
       const funding = item?.funding.filter(point => point[0] > now - QUALITY_FUNDING_WINDOW_MS && point[0] <= now) ?? [];
-      return { base, longKey, shortKey, spread: stats(prices, 60), funding: { ...stats(funding, 288), longStddev: stats(funding, 288, 2).stddev, shortStddev: stats(funding, 288, 3).stddev } };
+      return { base, longKey, shortKey, identity: expectedIdentity ?? item?.identity, spread: stats(prices, 60), funding: { ...stats(funding, 288), longStddev: stats(funding, 288, 2).stddev, shortStddev: stats(funding, 288, 3).stddev }, ...(includeSeries ? { priceSeries: prices.map(point => [...point]) } : {}) };
     },
     metrics: () => ({ trackedPairs: pairs.size, pricePoints: [...pairs.values()].reduce((sum, pair) => sum + pair.spread.length, 0), fundingPoints: [...pairs.values()].reduce((sum, pair) => sum + pair.funding.length, 0) }),
   };

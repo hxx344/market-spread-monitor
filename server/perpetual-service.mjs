@@ -4,6 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { PerpetualWebSocket } from './perpetual-socket.mjs';
 import { createPerpetualQualityService } from './perpetual-quality-service.mjs';
+import { createPerpetualAlertService } from './perpetual-alert-service.mjs';
+import { createPerpetualExecutionService } from './perpetual-depth.mjs';
 
 export const PERPETUAL_STALE_MS = 30_000;
 const MAX_FUTURE_MS = 5_000;
@@ -42,6 +44,21 @@ export function createPerpetualPatch(snapshot, previous, freshnessMs = 5_000) {
   for (const key of previous.keys()) if (!seen.has(key)) { removed.push(key); previous.delete(key); }
   const metadata = { ...snapshot }; delete metadata.quotes;
   return { ...metadata, type: 'patch', patches, removed };
+}
+
+/** Visit only changed identities. Unchanged quote confirmations retain the same pacing. */
+export function createPerpetualChangedPatch(metadata, quotes, previous, keys, freshnessMs = 5_000) {
+  const changed = [], baseline = new Map(), removed = [];
+  for (const key of keys) {
+    const quote = quotes.get(key);
+    if (!quote) { if (previous.delete(key)) removed.push(key); continue; }
+    changed.push(quote);
+    if (previous.has(key)) baseline.set(key, previous.get(key));
+  }
+  const frame = createPerpetualPatch({ ...metadata, quotes: changed }, baseline, freshnessMs);
+  for (const [key, quote] of baseline) previous.set(key, quote);
+  frame.removed = removed;
+  return frame;
 }
 
 /** Shared incremental frame, preserving actual field times while pacing unchanged price confirmations. */
@@ -112,13 +129,24 @@ function withMarketMetadata(quote, market) {
     ? quote : { ...quote, delisting, delistingAt, takerFeeRate, takerFeeAt, takerFeeSource };
 }
 
-export function createPerpetualService({ store, exchanges = EXCHANGES, discover = discoverMarkets, subscriptions = createSubscriptions, parse = parseMessage, control = getControlResponse, WebSocketImpl = PerpetualWebSocket, clock = Date.now, staleAfterMs = PERPETUAL_STALE_MS, retryMs = 5_000, discoveryIntervalMs = 5 * 60_000, saveIntervalMs = 15_000, broadcastIntervalMs = 1_000, watchdogIntervalMs = 10_000, quoteTimeoutMs = 45_000, qualityOptions } = {}) {
-  const quotes = new Map(), dirty = new Map(), pendingPrunes = new Map(), connections = new Set(), clients = new Map(), timers = new Set(), discoveries = new Map(), publishedQuotes = new Map(), pollBudgets = new Map();
+export function createPerpetualService({ store, exchanges = EXCHANGES, discover = discoverMarkets, subscriptions = createSubscriptions, parse = parseMessage, control = getControlResponse, WebSocketImpl = PerpetualWebSocket, clock = Date.now, staleAfterMs = PERPETUAL_STALE_MS, retryMs = 5_000, discoveryIntervalMs = 5 * 60_000, saveIntervalMs = 15_000, broadcastIntervalMs = 1_000, watchdogIntervalMs = 10_000, quoteTimeoutMs = 45_000, qualityOptions, alertOptions, notifications } = {}) {
+  const quotes = new Map(), dirty = new Map(), pendingPrunes = new Map(), connections = new Set(), clients = new Map(), timers = new Set(), discoveries = new Map(), publishedQuotes = new Map(), publishDirty = new Set(), pollBudgets = new Map();
   const states = new Map(exchanges.map(exchange => [exchange.id, { ...exchange, kind: exchange.kind ?? exchange.type, marketCount: 0, lastMessageAt: null, lastSourceLagMs: null, rejectedFuture: 0, error: null, discovering: false }]));
   let running = false, storageError = null, broadcastTimer, saveTimer, refreshTimer, metricsTimer, sequence = 0;
-  const quality = store?.saveQualitySample ? createPerpetualQualityService({ getSnapshot: snapshot, store, clock, ...qualityOptions }) : null;
+  const quality = store?.saveQualitySample ? createPerpetualQualityService({ getSnapshot: snapshot, store, clock, shouldDeferAuxiliary: () => metrics.eventLoopP99Ms > 80 || metrics.cpuPercent > 160, ...qualityOptions }) : null;
+  const alerts = createPerpetualAlertService({ getQuote: key => quotes.get(key), isVenueLive: id => [...connections].some(connection => connection.exchange === id && connection.socket?.readyState === 1), marketHealthy: () => !storageError, clock, notifications, ...alertOptions });
+  const execution = createPerpetualExecutionService({ getQuote: (exchange, symbol) => quotes.get(`${exchange}:${symbol}`), getMarket: (exchange, symbol) => states.get(exchange)?.markets?.get(symbol), clock });
   const streamId = randomUUID(), eventLoop = monitorEventLoopDelay({ resolution: 20 });
-  const metrics = { lastWriteMs: 0, lastPublishMs: 0, frames: 0, fullFrames: 0, frameBytes: 0, lastFrameUpdates: 0, messages: 0, updates: 0, messagesPerSecond: 0, cpuPercent: 0, eventLoopP99Ms: 0, eventLoopMaxMs: 0 };
+  const metrics = { lastWriteMs: 0, lastPublishMs: 0, frames: 0, fullFrames: 0, frameBytes: 0, lastFrameUpdates: 0, lastPatchVisitedQuotes: 0, messages: 0, updates: 0, messagesPerSecond: 0, cpuPercent: 0, eventLoopP99Ms: 0, eventLoopMaxMs: 0 };
+  const healthEvents = [];
+  let healthEventId = 0;
+  function recordHealth(exchange, kind, reason) {
+    const now = clock(), last = healthEvents.find(item => item.exchange === exchange);
+    if (last?.kind === kind && last.reason === reason && now - last.at < 60_000) return;
+    healthEvents.unshift({ id: ++healthEventId, exchange, kind, reason, at: now });
+    healthEvents.length = Math.min(healthEvents.length, 60);
+  }
+  function changedQuote(key, quote) { quotes.set(key, quote); dirty.set(key, quote); if (clients.size) publishDirty.add(key); }
   let cpuBaseline = process.cpuUsage(), sampledAt = performance.now(), sampledMessages = 0;
   for (const quote of store?.load() ?? []) if (states.has(quote.exchange)) quotes.set(`${quote.exchange}:${quote.symbol}`, quote);
   const later = (fn, ms) => {
@@ -172,20 +200,20 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
     connection.dispose = () => { connection.closed = true; clear(); connection.snapshotController?.abort(); try { if (connection.socket?.terminate) connection.socket.terminate(); else connection.socket?.close(); } catch {} };
     const fail = message => {
       if (connection.closed) return;
-      state.error = message; connection.dispose();
+      state.error = message; state.reconnects = (state.reconnects ?? 0) + 1; recordHealth(exchange, 'error', message); connection.dispose();
       if (running) later(() => connect(exchange, spec, attempt + 1), Math.min(60_000, retryMs * 2 ** Math.min(attempt, 4)) + Math.floor(Math.random() * retryMs / 4));
     };
     const acceptUpdates = (updates, now, transport = 'ws') => {
       for (const update of updates) {
         if (update.exchange !== exchange) continue;
         if (Number.isFinite(update.sourceTime)) {
-          state.lastSourceLagMs = now - update.sourceTime;
+          state.lastSourceLagMs = now - update.sourceTime; state.sourceLagObservedAt = now;
           if (state.lastSourceLagMs < -MAX_FUTURE_MS) { state.rejectedFuture++; state.error = '行情时间领先服务器，请检查服务器时钟。'; }
         }
         const key = `${exchange}:${update.symbol}`, previous = quotes.get(key), next = mergePerpetualQuote(previous, transport === 'rest' ? { ...update, transport } : update, now);
         if (next && next !== previous) {
           const current = withMarketMetadata(next, state.markets?.get(update.symbol));
-          metrics.updates++; quotes.set(key, current); dirty.set(key, current);
+          metrics.updates++; changedQuote(key, current);
           if (transport === 'ws') connection.lastQuoteAt = now;
           state.lastMessageAt = now; state.error = null; attempt = 0;
         }
@@ -232,6 +260,7 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
       scheduleTask(() => { if (connection.socket.readyState !== 1) fail('WebSocket 连接超时，正在重连。'); }, 20_000);
       connection.socket.addEventListener('open', () => {
         if (connection.closed || !running) return connection.dispose();
+        state.lastConnectedAt = clock(); recordHealth(exchange, 'connected', '行情连接已建立');
         (spec.subscribe ?? []).forEach((message, index) => scheduleTask(() => {
           try { send(connection, message); } catch { fail('WebSocket 订阅失败，正在重连。'); }
         }, index * (spec.sendIntervalMs ?? 100)));
@@ -297,7 +326,7 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
         for (const [key, quote] of quotes) {
           if (quote.exchange !== exchange || !identities.has(quote.symbol)) continue;
           const current = withMarketMetadata(quote, identities.get(quote.symbol));
-          if (current !== quote) { quotes.set(key, current); dirty.set(key, current); }
+          if (current !== quote) changedQuote(key, current);
         }
         if (signature === state.signature) return;
         const symbols = new Set(markets.map(market => market.symbol));
@@ -306,7 +335,7 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
           if (quote.exchange !== exchange) continue;
           const market = identities.get(quote.symbol);
           if (!market || quote.base !== market.base || quote.quoteCurrency !== market.quoteCurrency || (quote.multiplier ?? 1) !== (market.multiplier ?? 1) || (market.contractUnit && market.contractUnit !== quote.contractUnit) || (market.comparable === false && quote.comparable !== false)) {
-            quotes.delete(key); dirty.delete(key); keepStored.delete(quote.symbol);
+            quotes.delete(key); dirty.delete(key); if (clients.size) publishDirty.add(key); keepStored.delete(quote.symbol);
           }
         }
         pendingPrunes.set(exchange, keepStored);
@@ -320,17 +349,18 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
           later(() => connect(exchange, current), spec.startDelayMs ?? 0);
         }
       } catch {
-        if (running) { state.error = '合约列表获取失败，正在重试。'; later(() => { void refresh(exchange); }, 30_000); }
+        if (running) { state.error = '合约列表获取失败，正在重试。'; recordHealth(exchange, 'error', state.error); later(() => { void refresh(exchange); }, 30_000); }
       } finally { state.discovering = false; discoveries.delete(exchange); }
     })();
     discoveries.set(exchange, { controller, promise });
     await promise;
   }
-  function closeStreams() { for (const client of clients.values()) client.output.end(); clients.clear(); publishedQuotes.clear(); }
+  function closeStreams() { for (const client of clients.values()) client.output.end(); clients.clear(); publishedQuotes.clear(); publishDirty.clear(); }
   return {
     start() {
       if (running) return; running = true;
       quality?.start();
+      alerts.start();
       eventLoop.enable(); cpuBaseline = process.cpuUsage(); sampledAt = performance.now();
       metricsTimer = setInterval(() => {
         const now = performance.now(), elapsed = now - sampledAt, cpu = process.cpuUsage(cpuBaseline);
@@ -344,9 +374,13 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
       refreshTimer = setInterval(() => { for (const exchange of states.keys()) void refresh(exchange); }, discoveryIntervalMs);
       saveTimer = setInterval(flush, saveIntervalMs);
       broadcastTimer = setInterval(() => {
+        void alerts.check().catch(() => {});
         if (!clients.size) return;
         const started = performance.now(), baseSequence = sequence++;
-        const current = snapshot(), delta = createPerpetualPatch(current, publishedQuotes);
+        const current = snapshot();
+        metrics.lastPatchVisitedQuotes = publishDirty.size;
+        const delta = createPerpetualChangedPatch(current, quotes, publishedQuotes, publishDirty);
+        publishDirty.clear();
         const message = `data: ${JSON.stringify({ ...delta, baseSequence })}\n\n`;
         let fullMessage = null;
         for (const [response, client] of clients) {
@@ -355,7 +389,7 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
           if (response.writableLength + output.writableLength > 4_000_000) { response.destroy(); clients.delete(response); continue; }
           if (response.writableNeedDrain || output.writableNeedDrain) { client.needsSnapshot = true; continue; }
           // A slow reader cannot skip a delta and continue with a broken baseline.
-          if (client.needsSnapshot) { fullMessage ??= `data: ${JSON.stringify(current)}\n\n`; output.write(fullMessage); client.needsSnapshot = false; metrics.fullFrames++; }
+          if (client.needsSnapshot) { fullMessage ??= `data: ${JSON.stringify({ ...current, quotes: [...publishedQuotes.values()] })}\n\n`; output.write(fullMessage); client.needsSnapshot = false; metrics.fullFrames++; }
           else output.write(message);
         }
         metrics.frames++; metrics.frameBytes = Buffer.byteLength(message); metrics.lastFrameUpdates = delta.patches.length;
@@ -373,12 +407,14 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
       for (const connection of [...connections]) connection.dispose();
       await Promise.allSettled(pending.map(item => item.promise));
       await quality?.stop();
+      await alerts.stop();
+      execution.stop();
       flush(); store?.close();
     },
-    closeStreams, snapshot, healthy: () => !storageError,
-    metrics: () => ({ ...metrics, quotes: quotes.size, pendingWrites: dirty.size, connections: connections.size, clients: clients.size, rssMb: Number((process.memoryUsage.rss() / 1048576).toFixed(1)), auxiliary: [...pollBudgets].map(([host, budget]) => ({ host, sentInWindow: budget.sent, retryAt: budget.blockedUntil })), venues: snapshot().exchanges.map(exchange => ({ ...exchange, sourceLagMs: states.get(exchange.id).lastSourceLagMs, rejectedFuture: states.get(exchange.id).rejectedFuture, lastProtocolError: states.get(exchange.id).lastProtocolError ?? null })) }),
-    actions: { quote: ['GET'], stream: ['GET'], diagnostics: ['GET'], quality: ['POST'] },
-    handle(action, _method, input) { if (action === 'quote') return snapshot(); if (action === 'diagnostics') return { ...this.metrics(), quality: quality?.metrics() ?? null }; if (action === 'quality') { if (!quality) throw new Error('质量采集服务未就绪'); return quality.read(input); } },
+    closeStreams, snapshot, healthy: () => !storageError && alerts.healthy(),
+    metrics: () => ({ ...metrics, generatedAt: clock(), quotes: quotes.size, pendingWrites: dirty.size, connections: connections.size, clients: clients.size, rssMb: Number((process.memoryUsage.rss() / 1048576).toFixed(1)), storageError, events: healthEvents.filter(item => clock() - item.at <= 3_600_000), auxiliary: [...pollBudgets].map(([host, budget]) => ({ host, sentInWindow: budget.sent, retryAt: budget.blockedUntil })), venues: snapshot().exchanges.map(exchange => ({ ...exchange, sourceLagMs: states.get(exchange.id).lastSourceLagMs, sourceLagObservedAt: states.get(exchange.id).sourceLagObservedAt ?? null, rejectedFuture: states.get(exchange.id).rejectedFuture, reconnects: states.get(exchange.id).reconnects ?? 0, lastConnectedAt: states.get(exchange.id).lastConnectedAt ?? null, lastProtocolError: states.get(exchange.id).lastProtocolError ?? null })) }),
+    actions: { quote: ['GET'], stream: ['GET'], diagnostics: ['GET'], quality: ['POST'], alerts: ['GET', 'PUT'], depth: ['POST'], fx: ['GET'] },
+    handle(action, method, input) { if (action === 'quote') return snapshot(); if (action === 'diagnostics') return { ...this.metrics(), quality: quality?.metrics() ?? null, alerts: alerts.metrics(), execution: execution.metrics() }; if (action === 'quality') { if (!quality) throw new Error('质量采集服务未就绪'); return quality.read(input); } if (action === 'alerts') return method === 'PUT' ? alerts.update(input) : alerts.view(); if (action === 'depth') return execution.depth(input); if (action === 'fx') return execution.fx(); },
     stream(request, response) {
       const gzip = /(?:^|,)\s*gzip\s*(?:,|$)/i.test(request.headers['accept-encoding'] ?? '');
       response.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no', Vary: 'Accept-Encoding', ...(gzip ? { 'Content-Encoding': 'gzip' } : {}) });
@@ -386,7 +422,7 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
       const output = gzip ? createGzip({ level: 1, flush: zlibConstants.Z_SYNC_FLUSH }) : response;
       if (gzip) { output.pipe(response); output.on('error', () => response.destroy()); }
       const initial = snapshot();
-      if (!clients.size) { publishedQuotes.clear(); for (const quote of initial.quotes) publishedQuotes.set(`${quote.exchange}:${quote.symbol}`, quote); }
+      if (!clients.size) { publishedQuotes.clear(); publishDirty.clear(); for (const quote of initial.quotes) publishedQuotes.set(`${quote.exchange}:${quote.symbol}`, quote); }
       // Join the exact shared patch baseline. An immediate newer quote can
       // reverse before the next broadcast, which then omits that price field;
       // sending it here would leave the new reader with a wrong price despite
@@ -395,7 +431,7 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
       metrics.fullFrames++;
       output.write(`retry: 5000\ndata: ${JSON.stringify(initial)}\n\n`);
       clients.set(response, { output, needsSnapshot: false });
-      response.once('close', () => { clients.delete(response); if (!clients.size) publishedQuotes.clear(); if (gzip) output.destroy(); });
+      response.once('close', () => { clients.delete(response); if (!clients.size) { publishedQuotes.clear(); publishDirty.clear(); } if (gzip) output.destroy(); });
     },
   };
 }

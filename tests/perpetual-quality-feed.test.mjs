@@ -6,6 +6,14 @@ const pair = (base = 'BTC', short = 'b') => ({ base, longKey: `a:${base}`, short
 const report = generatedAt => ({ schemaVersion: 1, generatedAt, sampleIntervalMs: 60000, priceWindowMs: 3600000, fundingWindowMs: 86400000, pairs: {}, assets: {}, assetErrors: {}, positioning: {}, positioningErrors: {} });
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
+test('only the inspected pair requests minute series and selection changes the cache identity', () => {
+  const plain = qualityRequestKey([pair(), pair('ETH')]);
+  const selected = JSON.parse(qualityRequestKey([{ ...pair(), includeSeries: true }, { ...pair('ETH'), includeSeries: true }]));
+  assert.equal(selected.filter(row => row.includeSeries).length, 1);
+  assert.equal(selected.find(row => row.base === 'BTC').includeSeries, true);
+  assert.notEqual(plain, JSON.stringify(selected));
+});
+
 function fixture(load = async () => report(1)) {
   let now = 0, id = 0;
   const timers = new Map(), requests = [], results = [], errors = [];

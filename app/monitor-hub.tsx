@@ -38,9 +38,9 @@ const CardSummary = memo(function CardSummary({ summary, intervalMs, renderedAt 
   </>;
 });
 
-export default function MonitorHub({ initial = null }: { initial?: InitialMarketData | null }) {
-  const [active, setActive] = useState("oil");
-  const [perpetualVisited, setPerpetualVisited] = useState(false);
+export default function MonitorHub({ initial = null, initialMonitor = "oil" }: { initial?: InitialMarketData | null; initialMonitor?: "oil" | "hynix" | "perpetual" }) {
+  const [active, setActive] = useState<string>(initialMonitor);
+  const [perpetualVisited, setPerpetualVisited] = useState(initialMonitor === "perpetual");
   const [oil, setOil] = useState(() => initialSummaries(initial).oil);
   const [hynix, setHynix] = useState(() => initialSummaries(initial).hynix);
   const [perpetual, setPerpetual] = useState<MonitorSummary>({ status: "loading", fetchedAt: null, metrics: [{ label: "覆盖币种", value: "—" }, { label: "实时平台", value: "—" }], note: "CEX / DEX 永续合约 · 买卖盘口价差" });
@@ -83,7 +83,7 @@ export default function MonitorHub({ initial = null }: { initial?: InitialMarket
     } catch { /* Standard browsers do not require WebMCP. */ }
     return () => lifecycle.abort();
   }, [selectMonitor]);
-  return <div className="monitor-hub">
+  return <div className={`monitor-hub ${active === "perpetual" ? "monitor-hub-perpetual" : ""}`}>
     <header className="hub-header"><Link className="hub-brand" href="/"><span><Activity size={23}/></span>MARKET <b>/ MONITOR</b></Link><div className="hub-source">跨市场行情 <span>· CEX / DEX</span></div></header>
     <div className="hub-intro"><div><p className="eyebrow">跨市场价差观察</p><h1>市场监控</h1></div><a href="https://github.com/hxx344/market-spread-monitor" target="_blank" rel="noreferrer"><Layers3 size={16}/>项目与扩展说明<ArrowUpRight size={15}/></a></div>
     <NotificationSettings/>

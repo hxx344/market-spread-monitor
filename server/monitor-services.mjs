@@ -12,6 +12,7 @@ import { OIL_CANDLE_ACTION, OIL_CANDLE_REFRESH_MS } from "../modules/oil/intrada
 import { openPerpetualStore } from './perpetual-store.mjs';
 import { createPerpetualService } from './perpetual-service.mjs';
 import { createFundamentalsClient } from './perpetual-fundamentals.mjs';
+import { openPerpetualAlertStore } from './perpetual-alert-store.mjs';
 
 const exchangeActions = Object.fromEntries(externalExchanges.map(exchange => [exchangeAction(exchange), ["GET"]]));
 
@@ -53,7 +54,8 @@ export async function createMonitorServices(directory, { externallyLocked = fals
         if (!coinIds || typeof coinIds !== 'object' || Array.isArray(coinIds) || Object.keys(coinIds).length > 2000 || Object.entries(coinIds).some(([base, id]) => !/^[A-Z0-9._-]{1,40}$/.test(base) || typeof id !== 'string' || !/^[a-z0-9-]{1,120}$/.test(id))) throw new Error();
       } catch { throw new Error('PERPETUAL_COIN_IDS 必须为币种到 CoinGecko ID 的 JSON 对象'); }
     }
-    const perpetual = createPerpetualService({ store: perpetualStore, qualityOptions: { fundamentals: createFundamentalsClient({ coinIds, apiKey: env.COINGECKO_DEMO_API_KEY || '' }) }, ...perpetualOptions });
+    const perpetualAlertStore = await openPerpetualAlertStore(join(directory, 'perpetual'));
+    const perpetual = createPerpetualService({ store: perpetualStore, notifications, alertOptions: { store: perpetualAlertStore }, qualityOptions: { fundamentals: createFundamentalsClient({ coinIds, apiKey: env.COINGECKO_DEMO_API_KEY || '' }) }, ...perpetualOptions });
     const services = new Map([
       ['perpetual', perpetual],
       ["hynix", {

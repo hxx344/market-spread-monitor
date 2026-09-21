@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { defaultQualityBudget, evaluateOpportunityQuality, parseQualityBudget, qualityPairKey } from '../lib/perpetual-quality.ts';
+import { defaultQualityBudget, evaluateOpportunityQuality, pairQualityHistory, parseQualityBudget, qualityHistoryIdentity, qualityPairKey } from '../lib/perpetual-quality.ts';
 import { createQualityHistory, QUALITY_SAMPLE_MS, QUALITY_PRICE_WINDOW_MS, QUALITY_FUNDING_WINDOW_MS } from '../server/perpetual-quality-history.mjs';
 import { openPerpetualStore } from '../server/perpetual-store.mjs';
 
@@ -26,6 +26,45 @@ function report(row = pair()) {
 const dimension = (result, id) => result.dimensions.find(item => item.id === id).score;
 const historyRow = (spread, long = 0.01, short = 0.02, patch = {}) => [patch.base ?? 'BTC', patch.longKey ?? 'binance:BTCUSDT', patch.shortKey ?? 'gate:BTCUSDT', patch.identity ?? 'same-contract', spread, long, short];
 const readPair = (history, now = NOW) => history.get('BTC', 'binance:BTCUSDT', 'gate:BTCUSDT', now);
+
+test('detail minute observations preserve gaps, bounded window and isolated copies', () => {
+  const history = createQualityHistory();
+  for (const minutes of [65, 59, 58, 56, 1, 0]) history.ingest(NOW - minutes * 60_000, [historyRow(minutes / 100)], NOW);
+  const before = history.metrics();
+  assert.equal(readPair(history).priceSeries, undefined);
+  const detail = history.get('BTC', 'binance:BTCUSDT', 'gate:BTCUSDT', NOW, true);
+  assert.deepEqual(detail.priceSeries.map(point => (NOW - point[0]) / 60_000), [59, 58, 56, 1, 0]);
+  detail.priceSeries[0][1] = 999;
+  assert.equal(history.get('BTC', 'binance:BTCUSDT', 'gate:BTCUSDT', NOW, true).priceSeries[0][1], .59);
+  assert.deepEqual(history.metrics(), before);
+});
+
+test('FX-adjusted current edge never reuses unconverted price or funding history', () => {
+  const row = pair({ crossCurrency: true, fxAdjusted: true, fxAt: NOW, short: quote('gate', { quoteCurrency: 'USDC', bid: 101, ask: 102 }) });
+  const budget = { ...defaultQualityBudget, takerOverrides: { gate: .05 } };
+  const result = evaluateOpportunityQuality(row, report(row), NOW, budget);
+  assert.equal(result.score, null);
+  assert.equal(dimension(result, 'spread'), null);
+  assert.equal(dimension(result, 'funding'), null);
+  assert.ok(result.netSpreadPercent > 0);
+  assert.equal(pairQualityHistory(row, report(row)), undefined);
+  const expired = evaluateOpportunityQuality({ ...row, fxAt: NOW - 180001 }, report(row), NOW, budget);
+  assert.equal(expired.netSpreadPercent, null);
+  assert.match(expired.reasons.join(' '), /汇率.*过期/);
+});
+
+test('unit changes invalidate cached evidence before the next minute sampler runs', () => {
+  const row = pair(), cached = report(row), key = qualityPairKey(row);
+  cached.pairs[key].identity = qualityHistoryIdentity(row.long, row.short);
+  const changed = { ...row, long: { ...row.long, multiplier: 1000 } };
+  assert.equal(pairQualityHistory(changed, cached), undefined);
+  assert.equal(dimension(evaluateOpportunityQuality(changed, cached, NOW), 'spread'), null);
+  const history = createQualityHistory();
+  history.ingest(NOW, [historyRow(2, .01, .02, { identity: cached.pairs[key].identity })], NOW);
+  const read = history.get(row.base, 'binance:BTCUSDT', 'gate:BTCUSDT', NOW, true, qualityHistoryIdentity(changed.long, changed.short));
+  assert.equal(read.spread.samples, 0);
+  assert.deepEqual(read.priceSeries, []);
+});
 function livePair(now, longPatch = {}, shortPatch = {}) {
   const time = { bidAskAt: now, fundingAt: now, receivedAt: now, sourceTime: now };
   return snapshot([quote('binance', { ...time, ...longPatch }), quote('gate', { bid: 101, ask: 102, ...time, ...shortPatch })], now);
