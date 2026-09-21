@@ -232,6 +232,54 @@ test('quality history keeps venue combinations and trading directions separate w
   assert.notEqual(forward, reverse);
 });
 
+test('same-asset watched combinations keep separate spread and funding evidence across persistence', () => {
+  const history = createQualityHistory(), restored = createQualityHistory();
+  const watched = [
+    { base: 'BTC', longKey: 'binance:BTCUSDT', shortKey: 'gate:BTCUSDT' },
+    { base: 'BTC', longKey: 'binance:BTCUSDT', shortKey: 'c:BTCUSDT' },
+    { base: 'BTC', longKey: 'gate:BTCUSDT', shortKey: 'binance:BTCUSDT' },
+  ];
+  const end = NOW + 300_000;
+  for (const at of [NOW, end]) {
+    const time = { bidAskAt: at, receivedAt: at, fundingAt: at };
+    const sample = history.sample(snapshot([
+      quote('binance', time),
+      quote('gate', { ...time, bid: 101, ask: 102, fundingRate: 0.0002 }),
+      quote('c', { ...time, bid: 103, ask: 104, fundingRate: 0.0004 }),
+    ], at), at, [...watched, watched[0]]);
+    assert.equal(sample.rows.length, 3, 'Repeated watches and the background best pair share their existing histories');
+    restored.ingest(sample.bucket, sample.rows, end);
+  }
+  for (const [index, spread, funding] of [[0, 1, 0.01], [1, 3, 0.03], [2, (99 / 102 - 1) * 100, -0.01]]) {
+    const row = watched[index], evidence = history.get(row.base, row.longKey, row.shortKey, end);
+    assert.equal(evidence.spread.samples, 2);
+    assert.equal(evidence.funding.samples, 2);
+    assert.ok(Math.abs(evidence.spread.mean - spread) < 1e-10);
+    assert.ok(Math.abs(evidence.funding.mean - funding) < 1e-10);
+    assert.deepEqual(restored.get(row.base, row.longKey, row.shortKey, end), evidence);
+  }
+  assert.equal(history.get('BTC', 'c:BTCUSDT', 'binance:BTCUSDT', end).spread.samples, 0);
+});
+
+test('combination ranking keeps background history per asset and watched combinations within one shared cap', () => {
+  const data = snapshot(Array.from({ length: 5 }, (_, index) => [
+    quote('binance', { base: `COIN${index}`, symbol: `COIN${index}USDT` }),
+    quote('gate', { base: `COIN${index}`, symbol: `COIN${index}USDT`, bid: 101, ask: 102 }),
+    quote('c', { base: `COIN${index}`, symbol: `COIN${index}USDT`, bid: 103, ask: 104 }),
+  ]).flat());
+  assert.equal(createQualityHistory().sample(data, NOW).rows.length, 5, 'Background sampling must not expand to every ranked combination');
+  const history = createQualityHistory({ maxPairs: 3 });
+  const best = { base: 'COIN0', longKey: 'binance:COIN0USDT', shortKey: 'c:COIN0USDT' };
+  const second = { ...best, shortKey: 'gate:COIN0USDT' };
+  const sample = history.sample(data, NOW, [best, second, best]);
+  assert.equal(sample.rows.length, 3);
+  assert.equal(history.metrics().trackedPairs, 3);
+  for (const row of [best, second, { base: 'COIN1', longKey: 'binance:COIN1USDT', shortKey: 'c:COIN1USDT' }]) {
+    assert.equal(history.get(row.base, row.longKey, row.shortKey, NOW).spread.samples, 1);
+  }
+  assert.equal(history.get('COIN2', 'binance:COIN2USDT', 'c:COIN2USDT', NOW).spread.samples, 0);
+});
+
 test('quality history resets changed units, multipliers, collateral and quote currencies without carrying old samples', () => {
   for (const patch of [{ contractUnit: 'new unit' }, { multiplier: 1000 }, { quoteCurrency: 'USDC' }, { collateralCurrency: 'USDC' }]) {
     const history = createQualityHistory();

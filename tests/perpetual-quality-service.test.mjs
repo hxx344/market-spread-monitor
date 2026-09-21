@@ -142,13 +142,15 @@ test('duplicate visible pairs and multiple USDT specifications share one represe
   const called = [];
   const f = fixture({ quotes: [...dex, ...variants, ...cex], fetch: async (quote, { now }) => { called.push(key(quote)); return ratio(quote, now); } });
   await f.start(t);
-  const rows = [pair(dex[0], dex[1]), pair(dex[0], dex[1]), pair(dex[1], dex[0])];
+  const rows = [pair(dex[0], dex[1]), pair(dex[0], dex[1]), pair(dex[1], dex[0]), pair(cex[0], cex[1]), pair(cex[0], cex[2])];
   f.watch(rows);
   for (let index = 0; index < 12; index++) await f.service.collectPositioning();
   assert.equal(called.length, 5);
   assert.equal(new Set(called).size, 5);
   assert.deepEqual(called.map(value => value.split(':')[0]).sort(), ['binance', 'bitget', 'bybit', 'gate', 'okx']);
   const result = f.watch(rows);
+  assert.deepEqual(Object.keys(result.pairs).sort(), [...new Set(rows.map(pairId))].sort());
+  assert.equal(f.service.metrics().watchedPairs, 4, 'Distinct same-asset combinations are watched independently');
   assert.equal(Object.keys(result.positioningOverview).length, 1);
   assert.equal(result.positioningOverview.BTC.availableExchanges, 5);
 });

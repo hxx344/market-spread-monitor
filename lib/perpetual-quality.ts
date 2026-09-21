@@ -1,4 +1,4 @@
-import type { PerpetualSpread } from './perpetual-spreads.ts';
+import { perpetualSpreadKey, type PerpetualSpread } from './perpetual-spreads.ts';
 import { defaultQualityBudget, pairTakerFees, validFeePercent, type PairTakerFees, type QualityBudget } from './perpetual-fees.ts';
 export { defaultQualityBudget, parseQualityBudget, type QualityBudget } from './perpetual-fees.ts';
 
@@ -49,7 +49,7 @@ export interface OpportunityQuality {
   netSpreadPercent: number | null;
   fees: PairTakerFees;
 }
-export const qualityPairKey = (row: Pick<PerpetualSpread, 'base' | 'long' | 'short'>) => JSON.stringify([row.base, `${row.long.exchange}:${row.long.symbol}`, `${row.short.exchange}:${row.short.symbol}`]);
+export const qualityPairKey = perpetualSpreadKey;
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 const fresh = (at: unknown, now: number, age: number) => finite(at) && at > 0 && at <= now + 5_000 && now - at <= age;
 const clamp = (value: number) => Math.max(0, Math.min(100, value));

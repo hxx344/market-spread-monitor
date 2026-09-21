@@ -1,4 +1,4 @@
-import { defaultPerpetualFilters, rankPerpetualSpreads, quoteIsFresh, normalizedFunding8h } from '../lib/perpetual-spreads.ts';
+import { defaultPerpetualFilters, rankBestPerpetualSpreads, quoteIsFresh, normalizedFunding8h } from '../lib/perpetual-spreads.ts';
 
 export const QUALITY_SAMPLE_MS = 60_000;
 export const QUALITY_PRICE_WINDOW_MS = 3_600_000;
@@ -61,9 +61,15 @@ export function createQualityHistory({ maxPairs = 1000 } = {}) {
     const bucket = Math.floor(now / QUALITY_SAMPLE_MS) * QUALITY_SAMPLE_MS;
     if (bucket <= lastBucket) return null;
     const byKey = new Map(snapshot.quotes.map(quote => [qkey(quote), quote]));
-    const candidates = rankPerpetualSpreads(snapshot, { ...defaultPerpetualFilters, minSpreadPercent: -100 }, now);
-    const desired = [...watched, ...candidates.map(row => ({ base: row.base, longKey: qkey(row.long), shortKey: qkey(row.short) }))].slice(0, maxPairs);
-    const protectedKeys = new Set(desired.map(row => keyOf(row.base, row.longKey, row.shortKey)));
+    // Visible combinations share the existing cap with one background candidate per asset.
+    const candidates = rankBestPerpetualSpreads(snapshot, { ...defaultPerpetualFilters, minSpreadPercent: -100 }, now);
+    const desired = [], protectedKeys = new Set();
+    for (const row of [...watched, ...candidates.map(row => ({ base: row.base, longKey: qkey(row.long), shortKey: qkey(row.short) }))]) {
+      const key = keyOf(row.base, row.longKey, row.shortKey);
+      if (protectedKeys.has(key)) continue;
+      if (desired.length >= maxPairs) break;
+      desired.push(row); protectedKeys.add(key);
+    }
     for (const row of desired) {
       const long = byKey.get(row.longKey), short = byKey.get(row.shortKey);
       if (!long || !short || long.base !== row.base || short.base !== row.base || long.comparable === false || short.comparable === false || long.quoteCurrency !== short.quoteCurrency || long.exchange === short.exchange) continue;

@@ -6,7 +6,7 @@ import { usePerpetualFeed } from "../hooks/use-perpetual-feed";
 import { usePerpetualQuality } from "../hooks/use-perpetual-quality";
 import PerpetualFeeSettings from "./perpetual-fee-settings";
 import { defaultQualityBudget, evaluateOpportunityQuality, parseQualityBudget, qualityPairKey, type OpportunityQuality, type PerpetualQualityReport } from "../lib/perpetual-quality";
-import { classifyPerpetualQuote, createPerpetualQuoteSelector, createPerpetualRankingSelector, defaultPerpetualFilters, normalizedFunding8h, parsePerpetualPreferences, quotePriceTime, type PerpetualFilters, type PerpetualSpread } from "../lib/perpetual-spreads";
+import { classifyPerpetualQuote, createPerpetualQuoteSelector, createPerpetualRankingSelector, defaultPerpetualFilters, normalizedFunding8h, parsePerpetualPreferences, perpetualSpreadKey, quotePriceTime, type PerpetualFilters, type PerpetualSpread } from "../lib/perpetual-spreads";
 import type { PerpetualExchange, PerpetualPairMode, PerpetualPriceMode, PerpetualQuote, PerpetualSnapshot } from "../lib/perpetual-types";
 import type { SummaryProps } from "../lib/monitor-summary";
 import "./perpetual.css";
@@ -47,8 +47,8 @@ function DelistingNotice({ quote, now }: { quote: PerpetualQuote; now: number })
   </div>;
 }
 
-function QualityCell({ quality, base, onInspect }: { quality: OpportunityQuality; base: string; onInspect: () => void }) {
-  return <button type="button" className={`perp-quality-grade ${quality.grade}`} aria-label={`查看 ${base} 聚合质量依据：${quality.label}${quality.score === null ? "" : `，${quality.score} 分`}，数据覆盖 ${quality.coverage}%`} onClick={onInspect}>
+function QualityCell({ quality, pairLabel, onInspect }: { quality: OpportunityQuality; pairLabel: string; onInspect: () => void }) {
+  return <button type="button" className={`perp-quality-grade ${quality.grade}`} aria-label={`查看 ${pairLabel} 聚合质量依据：${quality.label}${quality.score === null ? "" : `，${quality.score} 分`}，数据覆盖 ${quality.coverage}%`} onClick={onInspect}>
     <strong>{quality.label}<b>{quality.score === null ? "—" : quality.score}<small>{quality.score === null ? "" : "/100"}</small></b></strong>
     <span>数据覆盖 {quality.coverage}%</span>
   </button>;
@@ -128,7 +128,7 @@ function QuoteDetails({ quotes, venues, mode, now, staleAfterMs, standalone = fa
 }
 
 function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: boolean }) {
-  const [inspection, setInspection] = useState<{ base: string; snapshot: PerpetualSnapshot; ranking: PerpetualSpread[]; page: number } | null>(null);
+  const [inspection, setInspection] = useState<{ key: string; base: string; snapshot: PerpetualSnapshot; ranking: PerpetualSpread[]; page: number } | null>(null);
   // Leaving this monitor releases the captured view before its next activation.
   if (!active && inspection) setInspection(null);
   const paused = active && inspection !== null;
@@ -139,7 +139,8 @@ function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: 
   const [qualityBudget, setQualityBudget] = useState(defaultQualityBudget);
   const [qualityBudgetReady, setQualityBudgetReady] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const expanded = paused ? inspection.base : null;
+  const expanded = paused ? inspection.key : null;
+  const expandedBase = paused ? inspection.base : null;
   const [page, setPage] = useState(1);
   const [view, setView] = useState<"rank" | "quotes">("rank");
   const search = useDeferredValue(filters.search);
@@ -173,7 +174,7 @@ function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: 
   const { report: qualityReport, loading: qualityLoading, error: qualityError } = usePerpetualQuality(qualityPairs, active && view === "rank");
   const qualities = useMemo(() => new Map(rows.map(row => [qualityPairKey(row), evaluateOpportunityQuality(row, qualityReport, now, qualityBudget, filters.priceMode)])), [rows, qualityReport, now, qualityBudget, filters.priceMode]);
   const quoteRows = view === "quotes" ? quoteSelection.keys.slice((visiblePage - 1) * pageSize, visiblePage * pageSize).map(key => quoteSelection.byKey.get(key)!) : emptyQuotes;
-  const detailQuotes = useMemo(() => expanded ? quotes.filter(quote => quote.base === expanded && (!selected || selected.has(quote.exchange))) : [], [quotes, expanded, selected]);
+  const detailQuotes = useMemo(() => expandedBase ? quotes.filter(quote => quote.base === expandedBase && (!selected || selected.has(quote.exchange))) : [], [quotes, expandedBase, selected]);
 
   useEffect(() => {
     function restorePreferences(event?: StorageEvent) {
@@ -216,9 +217,10 @@ function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: 
     });
   }, [summaryStatus, summaryTime, onSummary, availableBases, liveExchanges, exchanges.length, expired, paused]);
 
-  function inspect(base: string, toggle = false) {
-    if (toggle && expanded === base) { setInspection(null); return; }
-    if (data) setInspection(previous => previous ? { ...previous, base } : { base, snapshot: data, ranking, page: visiblePage });
+  function inspect(row: PerpetualSpread, toggle = false) {
+    const key = perpetualSpreadKey(row), base = row.base;
+    if (toggle && expanded === key) { setInspection(null); return; }
+    if (data) setInspection(previous => previous ? { ...previous, key, base } : { key, base, snapshot: data, ranking, page: visiblePage });
   }
   function updateFilters(update: Partial<PerpetualFilters>) { setInspection(null); setFilters(previous => ({ ...previous, ...update })); setPage(1); }
   function changeView(next: "rank" | "quotes") { setInspection(null); setView(next); setPage(1); }
@@ -249,7 +251,7 @@ function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: 
     <div className="perp-toolbar"><label className="perp-search"><Search size={17} aria-hidden="true"/><input aria-label="搜索币种" placeholder="搜索币种，如 BTC、ETH" value={filters.search} maxLength={40} onChange={event => updateFilters({ search: event.target.value.toUpperCase() })}/></label><button type="button" className={`perp-tool-button ${filters.favoritesOnly ? "is-selected" : ""}`} aria-pressed={filters.favoritesOnly} onClick={() => updateFilters({ favoritesOnly: !filters.favoritesOnly })}><Star size={16}/>自选<span>{favorites.size}</span></button><button type="button" className={`perp-tool-button ${filtersOpen ? "is-selected" : ""}`} aria-expanded={filtersOpen} aria-controls="perpetual-filters" onClick={() => setFiltersOpen(value => !value)}><SlidersHorizontal size={16}/>筛选<span>{selected ? selected.size : exchanges.length} 平台</span></button></div>
     {filtersOpen ? <div className="perp-filters" id="perpetual-filters"><fieldset><legend>交易所 <button type="button" onClick={() => updateFilters({ exchanges: null })}>全选</button><button type="button" onClick={() => updateFilters({ exchanges: [] })}>清空</button></legend><div className="perp-exchange-options">{exchanges.map(exchange => <label key={exchange.id}><input type="checkbox" checked={!selected || selected.has(exchange.id)} onChange={() => toggleExchange(exchange.id)}/>{exchange.name}<small>{exchange.kind.toUpperCase()}</small><span className={`perp-exchange-state ${exchange.status}`}>{exchangeLabels[exchange.status]}</span></label>)}</div></fieldset><div className="perp-filter-fields"><label>平台组合<select value={filters.pairMode} onChange={event => updateFilters({ pairMode: event.target.value as PerpetualPairMode })}><option value="all">全部组合</option><option value="cex-dex">CEX ↔ DEX</option><option value="cex-cex">CEX ↔ CEX</option><option value="dex-dex">DEX ↔ DEX</option></select></label><label>最低毛价差 / %<input type="number" min={-100} max={1000} step="0.01" value={filters.minSpreadPercent} onChange={event => { const value = event.target.valueAsNumber; updateFilters({ minSpreadPercent: Number.isFinite(value) ? Math.max(-100, Math.min(1000, value)) : 0 }); }}/></label><label>计价币范围<select value={filters.crossCurrency ? "cross" : "same"} onChange={event => updateFilters({ crossCurrency: event.target.value === "cross" })}><option value="same">仅相同计价币</option><option value="cross">USD / USDT / USDC / USD1 / USDG 跨币比较</option></select></label></div><div className="perp-filter-footer"><span>筛选与自选保存在当前浏览器</span><button type="button" onClick={resetFilters}>重置筛选</button><button type="button" className="perp-filter-done" onClick={() => setFiltersOpen(false)}>完成</button></div></div> : null}
 
-    <div className="perp-ranking-heading"><div><div className="perp-view-tabs" role="group" aria-label="行情视图"><button type="button" aria-pressed={view === "rank"} onClick={() => changeView("rank")}>价差排名 {view === "rank" ? <span>{ranking.length}</span> : null}</button><button type="button" aria-pressed={view === "quotes"} onClick={() => changeView("quotes")}>全部报价 <span>{quoteSelection.keys.length}</span></button></div><p>{view === "rank" ? "每币种最大毛价差组合；展开详情暂停行情与排名刷新" : "包含单平台、未配对及过期报价"}</p></div><div className="perp-price-mode" aria-label="报价口径"><button type="button" aria-pressed={filters.priceMode === "book"} className={filters.priceMode === "book" ? "active" : ""} onClick={() => updateFilters({ priceMode: "book" })}>买卖盘口</button><button type="button" aria-pressed={filters.priceMode === "mark"} className={filters.priceMode === "mark" ? "active" : ""} onClick={() => updateFilters({ priceMode: "mark" })}>标记价格</button></div></div>
+    <div className="perp-ranking-heading"><div><div className="perp-view-tabs" role="group" aria-label="行情视图"><button type="button" aria-pressed={view === "rank"} onClick={() => changeView("rank")}>价差排名 {view === "rank" ? <span>{ranking.length} 组合</span> : null}</button><button type="button" aria-pressed={view === "quotes"} onClick={() => changeView("quotes")}>全部报价 <span>{quoteSelection.keys.length}</span></button></div><p>{view === "rank" ? "同币种不同组合独立按毛价差降序；展开详情暂停刷新" : "包含单平台、未配对及过期报价"}</p></div><div className="perp-price-mode" aria-label="报价口径"><button type="button" aria-pressed={filters.priceMode === "book"} className={filters.priceMode === "book" ? "active" : ""} onClick={() => updateFilters({ priceMode: "book" })}>买卖盘口</button><button type="button" aria-pressed={filters.priceMode === "mark"} className={filters.priceMode === "mark" ? "active" : ""} onClick={() => updateFilters({ priceMode: "mark" })}>标记价格</button></div></div>
     <div className="perp-basis"><span>WS 优先 · 快照补充</span><span>{filters.crossCurrency ? "跨计价币比较 · 未做汇率换算" : "仅比较相同计价币"}</span><span>{filters.priceMode === "book" ? "毛价差未扣手续费与滑点" : "标记价仅供估值参考，不代表可成交价格"}</span>{quoteQuality.stale ? <span className="perp-stale-count">当前筛选 {quoteQuality.stale} 条报价超过 30 秒未更新</span> : null}{quoteQuality.unavailable ? <span>{quoteQuality.unavailable} 条{filters.priceMode === "book" ? "暂无有效盘口" : "暂无标记价"}</span> : null}</div>
     {view === "rank" ? <>
       <PerpetualFeeSettings budget={qualityBudget} onChange={setQualityBudget}/>
@@ -259,24 +261,27 @@ function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: 
     {filters.crossCurrency ? <p className="perp-currency-warning">USD、USDT、USDC、USD1、USDG 按数值直接比较，未换汇；价差可能包含稳定币偏离。</p> : null}
     {view === "quotes" ? <><p className="perp-quotes-caption">平台组合与价差阈值仅影响排名。此处保留原始合约单位，独立合约不参与跨所比较。</p><div className="perp-table-wrap"><QuoteDetails quotes={quoteRows} venues={venues} mode={filters.priceMode} now={now} staleAfterMs={data?.staleAfterMs ?? 30_000} standalone/>{!quoteRows.length ? <div className="perp-empty"><strong>暂无符合条件的报价</strong><p>{!data || !quotes.length ? emptyMessage : "可以调整币种搜索或交易所筛选。"}</p></div> : null}</div></> : <div className="perp-table-wrap"><table className="perp-table"><thead><tr><th scope="col">币种</th><th scope="col">做多 / {filters.priceMode === "book" ? "买入卖一" : "标记价"}</th><th scope="col">做空 / {filters.priceMode === "book" ? "卖出买一" : "标记价"}</th><th scope="col" aria-sort="descending">毛价差 <ArrowDown size={12}/></th><th scope="col">聚合质量</th><th scope="col">资金费差 / 8h</th><th scope="col">报价时间</th><th scope="col"><span className="perp-sr-only">展开报价</span></th></tr></thead>
       <tbody>{rows.map(row => {
-        const quality = qualities.get(qualityPairKey(row))!;
+        const rowKey = perpetualSpreadKey(row), isExpanded = expanded === rowKey;
+        const detailId = `perp-detail-${encodeURIComponent(rowKey)}`;
+        const pairLabel = `${row.base}，做多 ${venues.get(row.long.exchange)?.name ?? row.long.exchange} ${row.long.symbol}，做空 ${venues.get(row.short.exchange)?.name ?? row.short.exchange} ${row.short.symbol}`;
+        const quality = qualities.get(rowKey)!;
         const longFunding = normalizedFunding8h(row.long, now), shortFunding = normalizedFunding8h(row.short, now);
         const fundingSpread = longFunding === null || shortFunding === null ? null : shortFunding - longFunding;
-        return <Fragment key={row.base}><tr className={expanded === row.base ? "perp-row-expanded" : undefined}>
+        return <Fragment key={rowKey}><tr className={isExpanded ? "perp-row-expanded" : undefined}>
           <th scope="row" className="perp-base-cell"><button type="button" className={`perp-star ${favorites.has(row.base) ? "is-favorite" : ""}`} aria-label={`${favorites.has(row.base) ? "移除" : "添加"} ${row.base} 自选`} aria-pressed={favorites.has(row.base)} onClick={() => toggleFavorite(row.base)}><Star size={17} fill={favorites.has(row.base) ? "currentColor" : "none"}/></button><div><strong>{row.base}</strong><small>{row.crossCurrency ? `${row.long.quoteCurrency} / ${row.short.quoteCurrency}` : row.long.quoteCurrency}<span>{row.crossCurrency ? "未换汇" : "永续"}</span></small></div></th>
-          <td className="perp-leg perp-long"><span className="perp-mobile-label">做多</span><strong>{venues.get(row.long.exchange)?.name ?? row.long.exchange}<small>{venues.get(row.long.exchange)?.kind.toUpperCase()}</small></strong><span title={String(row.buyPrice)}>{price(row.buyPrice)} <small>{row.long.quoteCurrency}</small></span><DelistingNotice quote={row.long} now={now}/></td>
-          <td className="perp-leg perp-short"><span className="perp-mobile-label">做空</span><strong>{venues.get(row.short.exchange)?.name ?? row.short.exchange}<small>{venues.get(row.short.exchange)?.kind.toUpperCase()}</small></strong><span title={String(row.sellPrice)}>{price(row.sellPrice)} <small>{row.short.quoteCurrency}</small></span><DelistingNotice quote={row.short} now={now}/></td>
+          <td className="perp-leg perp-long"><span className="perp-mobile-label">做多</span><strong>{venues.get(row.long.exchange)?.name ?? row.long.exchange}<small>{venues.get(row.long.exchange)?.kind.toUpperCase()}</small></strong><small className="perp-leg-symbol">{row.long.symbol}</small><span title={String(row.buyPrice)}>{price(row.buyPrice)} <small>{row.long.quoteCurrency}</small></span><DelistingNotice quote={row.long} now={now}/></td>
+          <td className="perp-leg perp-short"><span className="perp-mobile-label">做空</span><strong>{venues.get(row.short.exchange)?.name ?? row.short.exchange}<small>{venues.get(row.short.exchange)?.kind.toUpperCase()}</small></strong><small className="perp-leg-symbol">{row.short.symbol}</small><span title={String(row.sellPrice)}>{price(row.sellPrice)} <small>{row.short.quoteCurrency}</small></span><DelistingNotice quote={row.short} now={now}/></td>
           <td className={`perp-spread ${row.spreadPercent > 0 ? "positive" : row.spreadPercent < 0 ? "negative" : ""}`}><strong>{percent(row.spreadPercent)}</strong><span className="perp-mobile-label">毛价差</span></td>
-          <td className="perp-quality-cell"><span className="perp-mobile-label">聚合质量</span><QualityCell quality={quality} base={row.base} onInspect={() => inspect(row.base)}/></td>
+          <td className="perp-quality-cell"><span className="perp-mobile-label">聚合质量</span><QualityCell quality={quality} pairLabel={pairLabel} onInspect={() => inspect(row)}/></td>
           <td className={`perp-funding ${fundingSpread !== null && fundingSpread < 0 ? "negative" : ""}`}><span className="perp-mobile-label">费差 / 8h</span><strong>{fundingSpread === null ? "—" : percent(fundingSpread * 100, 4)}</strong></td>
           <td className="perp-time"><time dateTime={new Date(row.updatedAt).toISOString()}>{stamp(row.updatedAt)}</time><small>{age(row.updatedAt, now)}{paused ? now - row.updatedAt > (data?.staleAfterMs ?? 30_000) ? " · 已过期" : " · 已暂停" : ""}</small></td>
-          <td className="perp-expand-cell"><button type="button" aria-label={`${expanded === row.base ? "收起" : "展开"} ${row.base} 质量依据与各平台报价`} aria-expanded={expanded === row.base} aria-controls={`perp-detail-${row.base}`} onClick={() => inspect(row.base, true)}><ChevronDown size={17}/></button></td>
-        </tr>{expanded === row.base ? <tr className="perp-detail-row" id={`perp-detail-${row.base}`}><td colSpan={8}><p className="perp-inspection-note" role="status">行情已暂停，保留 {stamp(data?.generatedAt)} 的列表与报价；收起后恢复。{expired ? "报价已过期，仅供核对。" : ""}</p><QualityEvidence row={row} report={qualityReport} quality={quality} venues={venues} now={now} slippagePercent={qualityBudget.slippagePercent}/><QuoteDetails quotes={detailQuotes} venues={venues} mode={filters.priceMode} now={now} staleAfterMs={data?.staleAfterMs ?? 30_000}/></td></tr> : null}</Fragment>;
+          <td className="perp-expand-cell"><button type="button" aria-label={`${isExpanded ? "收起" : "展开"} ${pairLabel} 质量依据与各平台报价`} aria-expanded={isExpanded} aria-controls={detailId} onClick={() => inspect(row, true)}><ChevronDown size={17}/></button></td>
+        </tr>{isExpanded ? <tr className="perp-detail-row" id={detailId}><td colSpan={8}><p className="perp-inspection-note" role="status">行情已暂停，保留 {stamp(data?.generatedAt)} 的列表与报价；收起后恢复。{expired ? "报价已过期，仅供核对。" : ""}</p><QualityEvidence row={row} report={qualityReport} quality={quality} venues={venues} now={now} slippagePercent={qualityBudget.slippagePercent}/><QuoteDetails quotes={detailQuotes} venues={venues} mode={filters.priceMode} now={now} staleAfterMs={data?.staleAfterMs ?? 30_000}/></td></tr> : null}</Fragment>;
       })}</tbody></table>
       {!rows.length ? <div className="perp-empty"><span aria-hidden="true">—</span><strong>{!data || data.status === "connecting" ? "等待实时报价" : "暂无符合条件的价差"}</strong><p>{emptyMessage}</p>{quotes.length > 0 ? <button type="button" onClick={resetFilters}>重置筛选</button> : null}</div> : null}
     </div>}
-    <div className="perp-pagination"><span>{totalItems ? `${(visiblePage - 1) * pageSize + 1}–${Math.min(visiblePage * pageSize, totalItems)} / ${totalItems} ${view === "rank" ? "币种" : "报价"}` : `0 ${view === "rank" ? "币种" : "报价"}`}<small>每页 {pageSize} 条</small></span><div><button type="button" aria-label="上一页" disabled={visiblePage <= 1} onClick={() => changePage(visiblePage - 1)}><ChevronLeft size={16}/></button><span>{visiblePage} / {totalPages}</span><button type="button" aria-label="下一页" disabled={visiblePage >= totalPages} onClick={() => changePage(visiblePage + 1)}><ChevronRight size={16}/></button></div></div>
-    <details className="perp-method"><summary>计算口径与数据时间</summary><p>毛价差 =（做空平台价格 ÷ 做多平台价格 − 1）× 100%。买卖盘口取买入卖一、卖出买一；标记价格取两平台标记价。做多与做空必须来自不同在线平台，两腿价格时间相差不超过 5 秒；每币种选择满足筛选条件的最高价差。</p><p>资金费差 = 做空腿费率 × 8 ÷ 该腿周期小时数 − 做多腿费率 × 8 ÷ 该腿周期小时数。正值表示按当前费率估算的净收入，负值为净支出；不是已结算收益。资金费或实际周期缺失、超过 5 分钟未更新时显示「—」。</p><p>价格超过 {(data?.staleAfterMs ?? 30_000) / 1000} 秒未更新会退出排名，成交价不会代替缺失盘口。报价时间取两腿较早的价格时间，所有时钟均为北京时间。毛价差未计手续费、滑点、深度和资金费；跨平台对冲仍存在成交差异。</p><p>聚合质量权重：市值 20%、市值 / FDV 15%、官方多空拥挤度 15%、近 1 小时盘口价差稳定度 30%、近 24 小时预估资金费稳定度 20%。只使用真实采样，缺失项不补零；资料不足时暂不评分，分数不代表盈利概率。当前列表仍为每币种最大毛价差组合，不按质量分重排。</p><p>每 5 分钟核对交易所公开合约目录；未标记不代表尚未公告，公开接口信息可能不完整。</p><p>最近快照 {stamp(data?.generatedAt)}。展开详情时保留当前列表、页码、平台组合及报价，并暂停本页行情接收；来源时间继续计时，过期值仅供核对。收起、翻页或修改筛选后恢复，后台采集与低频质量资料查询继续运行。页面隐藏或切换监控后暂停接收，返回立即刷新；实时推送中断时自动切换为每 5 秒快照，并尝试恢复推送。</p></details>
+    <div className="perp-pagination"><span>{totalItems ? `${(visiblePage - 1) * pageSize + 1}–${Math.min(visiblePage * pageSize, totalItems)} / ${totalItems} ${view === "rank" ? "组合" : "报价"}` : `0 ${view === "rank" ? "组合" : "报价"}`}<small>每页 {pageSize} 条</small></span><div><button type="button" aria-label="上一页" disabled={visiblePage <= 1} onClick={() => changePage(visiblePage - 1)}><ChevronLeft size={16}/></button><span>{visiblePage} / {totalPages}</span><button type="button" aria-label="下一页" disabled={visiblePage >= totalPages} onClick={() => changePage(visiblePage + 1)}><ChevronRight size={16}/></button></div></div>
+    <details className="perp-method"><summary>计算口径与数据时间</summary><p>毛价差 =（做空平台价格 ÷ 做多平台价格 − 1）× 100%。买卖盘口取买入卖一、卖出买一；标记价格取两平台标记价。做多与做空必须来自不同在线平台，两腿价格时间相差不超过 5 秒；同一币种的所有有效平台与合约组合分别参与排名，按每个组合的毛价差从高到低排列。</p><p>资金费差 = 做空腿费率 × 8 ÷ 该腿周期小时数 − 做多腿费率 × 8 ÷ 该腿周期小时数。正值表示按当前费率估算的净收入，负值为净支出；不是已结算收益。资金费或实际周期缺失、超过 5 分钟未更新时显示「—」。</p><p>价格超过 {(data?.staleAfterMs ?? 30_000) / 1000} 秒未更新会退出排名，成交价不会代替缺失盘口。报价时间取两腿较早的价格时间，所有时钟均为北京时间。毛价差未计手续费、滑点、深度和资金费；跨平台对冲仍存在成交差异。</p><p>聚合质量权重：市值 20%、市值 / FDV 15%、官方多空拥挤度 15%、近 1 小时盘口价差稳定度 30%、近 24 小时预估资金费稳定度 20%。只使用真实采样，缺失项不补零；资料不足时暂不评分，分数不代表盈利概率。质量、手续费和资金费差均对应当前行的做多与做空合约组合；排序依据为各组合毛价差。</p><p>每 5 分钟核对交易所公开合约目录；未标记不代表尚未公告，公开接口信息可能不完整。</p><p>最近快照 {stamp(data?.generatedAt)}。展开详情时保留当前列表、页码、平台组合及报价，并暂停本页行情接收；来源时间继续计时，过期值仅供核对。收起、翻页或修改筛选后恢复，后台采集与低频质量资料查询继续运行。页面隐藏或切换监控后暂停接收，返回立即刷新；实时推送中断时自动切换为每 5 秒快照，并尝试恢复推送。</p></details>
   </section>;
 }
 

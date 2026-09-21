@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyPerpetualQuote, createPerpetualQuoteSelector, createPerpetualRankingSelector, defaultPerpetualFilters, normalizedFunding8h, parsePerpetualPreferences, quoteIsFresh, rankPerpetualSpreads } from "../lib/perpetual-spreads.ts";
+import { classifyPerpetualQuote, createPerpetualQuoteSelector, createPerpetualRankingSelector, defaultPerpetualFilters, normalizedFunding8h, parsePerpetualPreferences, perpetualSpreadKey, quoteIsFresh, rankBestPerpetualSpreads, rankPerpetualSpreads } from "../lib/perpetual-spreads.ts";
 
 const now = 1_800_000_000_000;
 const venue = (id, kind = "cex", status = "live") => ({ id, name: id, kind, status, marketCount: 1, quoteCount: 1, lastMessageAt: now, error: null });
@@ -43,10 +43,13 @@ test("funding carry converts each leg by its actual period and leaves missing da
   assert.equal(rank(snapshot([quote("a"), quote("b", { bid: 102, ask: 103, fundingAt: now - 300001 })]))[0].fundingSpread8h, null);
 });
 
-test("pair filters choose the best compatible pair, and selecting no exchange shows no rows", () => {
+test("pair filters keep every compatible combination, and selecting no exchange shows no rows", () => {
   const data = snapshot([quote("a"), quote("b", { bid: 110, ask: 111 }), quote("c", { bid: 105, ask: 106 })]);
+  assert.equal(rank(data).length, 3);
+  assert.equal(rank(data, { pairMode: "cex-dex" }).length, 2);
   assert.equal(rank(data, { pairMode: "cex-dex" })[0].short.exchange, "c");
   assert.equal(rank(data, { pairMode: "cex-dex" })[0].long.exchange, "a");
+  assert.equal(rank(data, { pairMode: "cex-cex" }).length, 1);
   assert.equal(rank(data, { pairMode: "dex-dex" }).length, 0);
   assert.equal(rank(data, { exchanges: [] }).length, 0);
   assert.equal(rank(data, { exchanges: ["a", "c"] })[0].short.exchange, "c");
@@ -62,9 +65,95 @@ test("mark ranking requires fresh mark prices and never falls back to last or bo
   assert.equal(rank(snapshot([quote("a"), quote("b", { mark: null, last: 120 })]), { priceMode: "mark" }).length, 0);
 });
 
-test("one row per normalized base ranks by best compatible spread and validates persisted filters", () => {
-  const data = snapshot([quote("a"), quote("b", { bid: 102, ask: 103 }), quote("a", { quoteCurrency: "USDC" }), quote("c", { quoteCurrency: "USDC", bid: 104, ask: 105 })]);
-  assert.equal(rank(data).length, 1); assert.equal(rank(data)[0].short.exchange, "c");
+test("each base retains combinations from separate quote currencies without mixing their prices", () => {
+  const data = snapshot([quote("a"), quote("b", { bid: 102, ask: 103 }), quote("a", { symbol: "BTCUSDC", quoteCurrency: "USDC" }), quote("c", { symbol: "BTCUSDC", quoteCurrency: "USDC", bid: 104, ask: 105 })]);
+  const rows = rank(data);
+  assert.equal(rows.length, 2); assert.deepEqual(rows.map(row => row.short.exchange), ["c", "b"]);
+  assert.ok(rows.every(row => row.long.quoteCurrency === row.short.quoteCurrency && !row.crossCurrency));
+});
+
+test("all independent combinations rank globally by spread rather than being grouped by base", () => {
+  const data = snapshot([
+    quote("a", { bid: 100, ask: 100 }), quote("b", { bid: 102, ask: 102 }),
+    quote("c", { bid: 104, ask: 104 }), quote("d", { bid: 108, ask: 108 }),
+    quote("a", { base: "ETH", symbol: "ETHUSDT", bid: 100, ask: 100 }),
+    quote("b", { base: "ETH", symbol: "ETHUSDT", bid: 106, ask: 106 }),
+  ], [venue("a"), venue("b"), venue("c", "dex"), venue("d", "dex")]);
+  const rows = rank(data);
+  assert.deepEqual(rows.map(row => `${row.base}:${row.long.exchange}>${row.short.exchange}`), [
+    "BTC:a>d", "ETH:a>b", "BTC:b>d", "BTC:a>c", "BTC:c>d", "BTC:a>b", "BTC:b>c",
+  ]);
+  assert.equal(rank(data, { search: "btc" }).length, 6);
+  assert.equal(rank(data, { favoritesOnly: true, favorites: ["BTC"] }).length, 6);
+  assert.equal(rank(data, { minSpreadPercent: 5 }).length, 3);
+  assert.deepEqual(rank(data, { pairMode: "dex-dex" }).map(row => [row.long.exchange, row.short.exchange]), [["c", "d"]]);
+});
+
+test("opportunity identity includes direction and both contracts on a venue", () => {
+  const data = snapshot([
+    quote("a", { bid: 100, ask: 100 }),
+    quote("a", { symbol: "BTCUSDC", quoteCurrency: "USDC", bid: 100, ask: 100 }),
+    quote("b", { bid: 102, ask: 102 }),
+  ]);
+  const rows = rank(data, { crossCurrency: true, minSpreadPercent: -100 });
+  assert.deepEqual(rows.map(perpetualSpreadKey), [
+    '["BTC","a:BTCUSDC","b:BTCUSDT"]', '["BTC","a:BTCUSDT","b:BTCUSDT"]',
+    '["BTC","b:BTCUSDT","a:BTCUSDC"]', '["BTC","b:BTCUSDT","a:BTCUSDT"]',
+  ]);
+  assert.equal(new Set(rows.map(perpetualSpreadKey)).size, 4);
+  assert.equal(rows.filter(row => row.crossCurrency).length, 2);
+  assert.equal(rank(data, { crossCurrency: true }).length, 2);
+});
+
+test("equal spreads have a complete stable base and contract tie order independent of input order", () => {
+  const quotes = [
+    quote("c", { bid: 100 }), quote("a", { symbol: "BTCUSDT-Z", bid: 100 }),
+    quote("b", { bid: 100 }), quote("a", { bid: 100 }),
+    quote("b", { base: "ETH", symbol: "ETHUSDT", bid: 100 }),
+    quote("a", { base: "ETH", symbol: "ETHUSDT", bid: 100 }),
+  ];
+  const expected = [
+    '["BTC","a:BTCUSDT","b:BTCUSDT"]', '["BTC","a:BTCUSDT","c:BTCUSDT"]',
+    '["BTC","a:BTCUSDT-Z","b:BTCUSDT"]', '["BTC","a:BTCUSDT-Z","c:BTCUSDT"]',
+    '["BTC","b:BTCUSDT","a:BTCUSDT"]', '["BTC","b:BTCUSDT","a:BTCUSDT-Z"]', '["BTC","b:BTCUSDT","c:BTCUSDT"]',
+    '["BTC","c:BTCUSDT","a:BTCUSDT"]', '["BTC","c:BTCUSDT","a:BTCUSDT-Z"]', '["BTC","c:BTCUSDT","b:BTCUSDT"]',
+    '["ETH","a:ETHUSDT","b:ETHUSDT"]', '["ETH","b:ETHUSDT","a:ETHUSDT"]',
+  ];
+  for (let shift = 0; shift < quotes.length; shift++) {
+    const shifted = [...quotes.slice(shift), ...quotes.slice(0, shift)];
+    assert.deepEqual(rank(snapshot(shifted)).map(perpetualSpreadKey), expected);
+    assert.deepEqual(rank(snapshot(shifted.reverse())).map(perpetualSpreadKey), expected);
+  }
+});
+
+test("background discovery retains only the best combination per base and the same stable ties", () => {
+  const data = snapshot([
+    quote("a"), quote("b", { bid: 102, ask: 103 }), quote("c", { bid: 104, ask: 105 }),
+    quote("a", { base: "ETH", symbol: "ETHUSDT", bid: 100 }), quote("c", { base: "ETH", symbol: "ETHUSDT", bid: 100 }),
+  ]);
+  for (const filters of [defaultPerpetualFilters, { ...defaultPerpetualFilters, minSpreadPercent: -100 }, { ...defaultPerpetualFilters, pairMode: "cex-dex" }]) {
+    const all = rankPerpetualSpreads(data, filters, now);
+    const best = rankBestPerpetualSpreads(data, filters, now);
+    const seen = new Set();
+    assert.deepEqual(best, all.filter(row => { if (seen.has(row.base)) return false; seen.add(row.base); return true; }));
+    assert.deepEqual(rankBestPerpetualSpreads({ ...data, quotes: [...data.quotes].reverse() }, filters, now), best);
+    assert.equal(best.length, 2);
+  }
+});
+
+test("ranking returns the full combination count for pagination while background candidates stay bounded by bases", () => {
+  const exchanges = Array.from({ length: 10 }, (_, i) => venue(`venue${i}`, i < 5 ? "cex" : "dex"));
+  const quotes = Array.from({ length: 50 }, (_, i) => exchanges.map(exchange =>
+    quote(exchange.id, { base: `BASE${i}`, symbol: `BASE${i}USDT`, bid: 100, ask: 100 }),
+  )).flat();
+  const data = snapshot(quotes, exchanges);
+  const rows = rank(data);
+  assert.equal(rows.length, 50 * 10 * 9);
+  assert.equal(new Set(rows.map(perpetualSpreadKey)).size, rows.length);
+  assert.equal(rankBestPerpetualSpreads(data, defaultPerpetualFilters, now).length, 50);
+});
+
+test("persisted filters reject malformed preferences and normalize exchange selections", () => {
   assert.deepEqual(parsePerpetualPreferences("not json"), defaultPerpetualFilters);
   assert.deepEqual(parsePerpetualPreferences('{"version":1,"exchanges":["a","a",null],"crossCurrency":"true","minSpreadPercent":5000}').exchanges, ["a"]);
   assert.equal(parsePerpetualPreferences('{"version":1,"crossCurrency":"true"}').crossCurrency, false);

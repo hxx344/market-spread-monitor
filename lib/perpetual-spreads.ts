@@ -24,8 +24,16 @@ export interface PerpetualSpread {
   crossCurrency: boolean;
 }
 
+/** A direction and both contracts identify an opportunity, even within the same base. */
+export const perpetualSpreadKey = (row: Pick<PerpetualSpread, "base" | "long" | "short">): string =>
+  JSON.stringify([row.base, `${row.long.exchange}:${row.long.symbol}`, `${row.short.exchange}:${row.short.symbol}`]);
+
 const stableQuotes = new Set(["USD", "USDT", "USDC", "USD1", "USDG"]);
 const positive = (value: number | null): value is number => value !== null && Number.isFinite(value) && value > 0;
+const compareText = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0;
+const compareLegs = (leftLong: PerpetualQuote, leftShort: PerpetualQuote, rightLong: PerpetualQuote, rightShort: PerpetualQuote): number =>
+  compareText(leftLong.exchange, rightLong.exchange) || compareText(leftLong.symbol, rightLong.symbol)
+  || compareText(leftShort.exchange, rightShort.exchange) || compareText(leftShort.symbol, rightShort.symbol);
 
 export function quotePriceTime(quote: PerpetualQuote, mode: PerpetualPriceMode): number {
   const priceTime = mode === "book" ? quote.bidAskAt : quote.markAt;
@@ -61,6 +69,15 @@ function compatiblePair(long: PerpetualExchange, short: PerpetualExchange, mode:
 }
 
 export function rankPerpetualSpreads(snapshot: PerpetualSnapshot, filters: PerpetualFilters, now: number): PerpetualSpread[] {
+  return collectPerpetualSpreads(snapshot, filters, now, false);
+}
+
+/** Bounded background discovery: watched pairs are sampled separately by the history service. */
+export function rankBestPerpetualSpreads(snapshot: PerpetualSnapshot, filters: PerpetualFilters, now: number): PerpetualSpread[] {
+  return collectPerpetualSpreads(snapshot, filters, now, true);
+}
+
+function collectPerpetualSpreads(snapshot: PerpetualSnapshot, filters: PerpetualFilters, now: number, bestPerBase: boolean): PerpetualSpread[] {
   if (snapshot.status === "unavailable") return [];
   const venues = new Map(snapshot.exchanges.map(exchange => [exchange.id, exchange]));
   const selected = filters.exchanges === null ? null : new Set(filters.exchanges);
@@ -80,6 +97,7 @@ export function rankPerpetualSpreads(snapshot: PerpetualSnapshot, filters: Perpe
   }
   const rows: PerpetualSpread[] = [];
   for (const [base, quotes] of groups) {
+    if (quotes.length < 2) continue;
     let best: PerpetualSpread | null = null;
     for (const longLeg of quotes) {
       const long = longLeg.quote;
@@ -94,15 +112,19 @@ export function rankPerpetualSpreads(snapshot: PerpetualSnapshot, filters: Perpe
         const sellPrice = shortLeg.sell;
         if (sellPrice === null) continue;
         const spreadPercent = (sellPrice / buyPrice - 1) * 100;
-        if (!Number.isFinite(spreadPercent) || spreadPercent < filters.minSpreadPercent || (best && spreadPercent <= best.spreadPercent)) continue;
+        if (!Number.isFinite(spreadPercent) || spreadPercent < filters.minSpreadPercent) continue;
+        if (best && (spreadPercent < best.spreadPercent || (spreadPercent === best.spreadPercent && compareLegs(long, short, best.long, best.short) >= 0))) continue;
         const longFunding = longLeg.funding, shortFunding = shortLeg.funding;
-        best = { base, long, short, buyPrice, sellPrice, spreadPercent, fundingSpread8h: longFunding === null || shortFunding === null ? null : shortFunding - longFunding,
+        const row: PerpetualSpread = { base, long, short, buyPrice, sellPrice, spreadPercent, fundingSpread8h: longFunding === null || shortFunding === null ? null : shortFunding - longFunding,
           updatedAt: Math.min(longLeg.time, shortLeg.time), crossCurrency };
+        if (bestPerBase) best = row; else rows.push(row);
       }
     }
     if (best) rows.push(best);
   }
-  return rows.sort((a, b) => b.spreadPercent - a.spreadPercent || a.base.localeCompare(b.base));
+  // Compare fields directly: no per-comparison key allocation or locale-dependent ties.
+  return rows.sort((a, b) => b.spreadPercent - a.spreadPercent || compareText(a.base, b.base)
+    || compareLegs(a.long, a.short, b.long, b.short));
 }
 
 export interface PerpetualQuoteSelection {
