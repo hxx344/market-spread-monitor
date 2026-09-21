@@ -1,4 +1,5 @@
 import type { PerpetualQualityReport } from "./perpetual-quality.ts";
+import { createPerpetualQualityCache } from "./perpetual-quality-cache.ts";
 
 export interface QualityPairRequest { base: string; longKey: string; shortKey: string; includeSeries?: boolean }
 
@@ -30,6 +31,7 @@ export function startPerpetualQualityFeed(options: QualityFeedOptions) {
   let active = false, stopped = false, wanted = false;
   let pairs: QualityPairRequest[] = [], key = "[]";
   let request: AbortController | null = null;
+  const cache = createPerpetualQualityCache();
   let refreshTimer: unknown, debounceTimer: unknown, deadlineTimer: unknown, timeoutTimer: unknown;
   const clear = (timer: unknown) => { if (timer !== undefined) cancel(timer); };
   function clearSelectionTimers() {
@@ -41,14 +43,14 @@ export function startPerpetualQualityFeed(options: QualityFeedOptions) {
   async function load() {
     if (stopped || !active || !pairs.length || request) return;
     clearTimers(); wanted = false;
-    const requestedKey = key, controller = new AbortController();
+    const requestedKey = key, requestedPairs = pairs, controller = new AbortController();
     request = controller;
     let timedOut = false;
     timeoutTimer = schedule(() => { timedOut = true; controller.abort(); }, 12_000);
     options.onLoading(true);
     try {
-      const result = await options.load(pairs, controller.signal);
-      if (!stopped && active && !controller.signal.aborted) { options.onData(result); options.onError(""); }
+      const result = await options.load(requestedPairs, controller.signal);
+      if (!stopped && active && !controller.signal.aborted) { options.onData(cache.accept(result, requestedPairs)); options.onError(""); }
     } catch {
       if (!stopped && active && (timedOut || !controller.signal.aborted)) options.onError("质量资料暂时无法更新，保留上次记录，稍后自动重试。");
     } finally {

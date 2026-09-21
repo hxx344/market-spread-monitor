@@ -122,11 +122,58 @@ test('quality leaves missing, stale and malformed evidence unscored rather than 
     const data = report(row); Object.assign(data.positioning['binance:BTCUSDT'], patch);
     assert.equal(dimension(evaluateOpportunityQuality(row, data, NOW), 'positioning'), null);
   }
-  const stale = report(row); stale.generatedAt = NOW - 180_001;
-  const result = evaluateOpportunityQuality(row, stale, NOW);
-  assert.equal(result.coverage, 0);
-  assert.equal(result.score, null);
-  assert.ok(result.dimensions.every(item => item.score === null));
+});
+
+test('returning after three minutes retains evidence according to each source lifetime', () => {
+  const row = pair(), data = report(row);
+  const returnedAt = NOW + 181_000;
+  const result = evaluateOpportunityQuality({ ...row, updatedAt: returnedAt }, data, returnedAt);
+  assert.equal(result.coverage, 70, 'Only the three-minute spread evidence has expired');
+  assert.equal(dimension(result, 'spread'), null);
+  for (const id of ['marketCap', 'fdv', 'positioning', 'funding']) assert.notEqual(dimension(result, id), null, id);
+  for (const [elapsed, coverage] of [
+    [180_000, 100], [180_001, 70], [600_000, 70], [600_001, 50],
+    [900_000, 50], [900_001, 35], [3_600_000, 35], [3_600_001, 0],
+  ]) {
+    const now = NOW + elapsed;
+    assert.equal(evaluateOpportunityQuality({ ...row, updatedAt: now }, data, now).coverage, coverage, `Elapsed ${elapsed} ms`);
+    assert.equal(evaluateOpportunityQuality({ ...row, updatedAt: now }, { ...data, generatedAt: now }, now).coverage, coverage, 'A new response timestamp cannot renew old observations');
+  }
+});
+
+test('invalid or excessively future report times cannot establish quality evidence', () => {
+  const row = pair();
+  for (const generatedAt of [undefined, null, NaN, Infinity, -Infinity, 0, -1, String(NOW), NOW + 5_001]) {
+    const result = evaluateOpportunityQuality(row, { ...report(row), generatedAt }, NOW);
+    assert.equal(result.coverage, 0, String(generatedAt));
+    assert.equal(result.score, null);
+    assert.ok(result.dimensions.every(item => item.score === null));
+  }
+  assert.equal(evaluateOpportunityQuality(row, { ...report(row), generatedAt: NOW + 5_000 }, NOW).coverage, 100);
+});
+
+test('source observations cannot postdate their report beyond the clock-skew allowance', () => {
+  const row = pair(), at = NOW - 60_000;
+  function coherentReport() {
+    const data = report(row);
+    data.generatedAt = at;
+    data.assets.BTC.updatedAt = at;
+    for (const ratio of Object.values(data.positioning)) ratio.observedAt = at;
+    for (const history of Object.values(data.pairs)) { history.spread.lastAt = at; history.funding.lastAt = at; }
+    return data;
+  }
+  for (const [id, update] of [
+    ['marketCap', (data, value) => { data.assets.BTC.updatedAt = value; }],
+    ['positioning', (data, value) => { data.positioning['binance:BTCUSDT'].observedAt = value; }],
+    ['spread', (data, value) => { data.pairs[qualityPairKey(row)].spread.lastAt = value; }],
+    ['funding', (data, value) => { data.pairs[qualityPairKey(row)].funding.lastAt = value; }],
+  ]) {
+    const data = coherentReport();
+    update(data, at + 5_000);
+    assert.equal(evaluateOpportunityQuality(row, data, NOW).coverage, 100, id);
+    update(data, at + 5_001);
+    assert.equal(dimension(evaluateOpportunityQuality(row, data, NOW), id), null, id);
+  }
 });
 
 test('quality does not score insufficient or expired history and limits grades on partial coverage', () => {

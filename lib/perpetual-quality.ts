@@ -67,21 +67,23 @@ const clamp = (value: number) => Math.max(0, Math.min(100, value));
 /** A transparent screening rubric, not a probability of profit. Missing evidence stays unscored. */
 export function evaluateOpportunityQuality(row: PerpetualSpread, report: PerpetualQualityReport | null | undefined, now: number, budget: QualityBudget = defaultQualityBudget, mode: 'book' | 'mark' = 'book'): OpportunityQuality {
   const reasons: string[] = [];
-  const currentReport = report && fresh(report.generatedAt, now, 180_000) ? report : undefined;
+  // Switching away pauses reads, not the lifetime of each independent source observation.
+  const currentReport = report && finite(report.generatedAt) && report.generatedAt > 0 && report.generatedAt <= now + 5_000 ? report : undefined;
+  const evidenceFresh = (at: unknown, age: number) => currentReport && finite(at) && at <= currentReport.generatedAt + 5_000 && fresh(at, now, age);
   const asset = currentReport?.assets[row.base];
-  const assetFresh = asset && fresh(asset.updatedAt, now, 3_600_000);
+  const assetFresh = asset && evidenceFresh(asset.updatedAt, 3_600_000);
   const cap = assetFresh && finite(asset.marketCapUsd) && asset.marketCapUsd > 0 ? asset.marketCapUsd : null;
   const fdv = assetFresh && finite(asset.fdvUsd) && asset.fdvUsd > 0 ? asset.fdvUsd : null;
   const dilution = cap !== null && fdv !== null && fdv >= cap * 0.95 ? Math.min(1, cap / fdv) : null;
   const capScore = cap === null ? null : cap >= 10e9 ? 100 : cap >= 1e9 ? 80 : cap >= 100e6 ? 60 : cap >= 10e6 ? 35 : 10;
   const history = pairQualityHistory(row, currentReport);
   const spread = history?.spread, funding = history?.funding;
-  const spreadReady = spread && spread.samples >= 30 && spread.coverage >= 0.5 && fresh(spread.lastAt, now, 180_000) && finite(spread.mean) && finite(spread.stddev) && finite(spread.positiveRatio);
-  const fundingReady = funding && funding.samples >= 12 && funding.coverage >= 1 / 24 && fresh(funding.lastAt, now, 600_000) && finite(funding.mean) && finite(funding.longStddev) && finite(funding.shortStddev);
+  const spreadReady = spread && spread.samples >= 30 && spread.coverage >= 0.5 && evidenceFresh(spread.lastAt, 180_000) && finite(spread.mean) && finite(spread.stddev) && finite(spread.positiveRatio);
+  const fundingReady = funding && funding.samples >= 12 && funding.coverage >= 1 / 24 && evidenceFresh(funding.lastAt, 600_000) && finite(funding.mean) && finite(funding.longStddev) && finite(funding.shortStddev);
   const spreadScore = spreadReady ? clamp(spread.mean! <= 0 ? 0 : 100 * spread.positiveRatio! / (1 + spread.stddev! / Math.max(Math.abs(spread.mean!), 0.05))) : null;
   const fundingScore = fundingReady ? clamp(100 / (1 + Math.max(funding.longStddev!, funding.shortStddev!) / 0.05) * (1 - Math.min(0.5, funding.signChanges / Math.max(1, funding.samples - 1)))) : null;
   const long = currentReport?.positioning[`${row.long.exchange}:${row.long.symbol}`], short = currentReport?.positioning[`${row.short.exchange}:${row.short.symbol}`];
-  const validRatio = (item: PositioningRatio | undefined) => item && fresh(item.observedAt, now, 900_000) && finite(item.longRatio) && finite(item.shortRatio) && item.longRatio >= 0 && item.shortRatio >= 0 && item.longRatio <= 1 && item.shortRatio <= 1 && Math.abs(item.longRatio + item.shortRatio - 1) < 0.02;
+  const validRatio = (item: PositioningRatio | undefined) => item && evidenceFresh(item.observedAt, 900_000) && finite(item.longRatio) && finite(item.shortRatio) && item.longRatio >= 0 && item.shortRatio >= 0 && item.longRatio <= 1 && item.shortRatio <= 1 && Math.abs(item.longRatio + item.shortRatio - 1) < 0.02;
   const positioningReady = validRatio(long) && validRatio(short) && long!.kind === short!.kind;
   // Only crowding in the proposed directions is measured; account counts are never treated as position size.
   const positioningScore = positioningReady ? clamp(100 - 200 * Math.max(0, Math.max(long!.longRatio, short!.shortRatio) - 0.5)) : null;

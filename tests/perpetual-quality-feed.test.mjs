@@ -100,3 +100,28 @@ test('timed-out reads abort and do not permanently stop refresh', async () => {
   await f.advance(60000); assert.equal(f.requests.length, 2);
   f.feed.stop(); await settle(); assert.equal(f.timers.size, 0);
 });
+
+test('page A to B to A and a hidden resume retain cached evidence while a new read is pending', async () => {
+  let fail = false;
+  const f = fixture(async pairs => {
+    if (fail) throw Error('offline');
+    const value = report(10000);
+    for (const row of pairs) value.assets[row.base] = { updatedAt: 10000, marketCapUsd: 100 };
+    return value;
+  });
+  f.feed.setPairs([pair()]); f.feed.setActive(true); await settle();
+  f.feed.setPairs([pair('ETH')]); await f.advance(1200);
+  assert.ok(f.results.at(-1).assets.BTC);
+  assert.ok(f.results.at(-1).assets.ETH);
+  const count = f.requests.length;
+  f.feed.setPairs([pair()]);
+  assert.equal(f.requests.length, count, 'Selection keeps bounded debounce');
+  assert.ok(f.results.at(-1).assets.BTC, 'Previously visited page is already available');
+  f.feed.setActive(false); f.feed.setPairs([]); await f.advance(120000);
+  assert.equal(f.requests.length, count, 'Hidden panels perform no reads');
+  fail = true;
+  f.feed.setPairs([pair()]); f.feed.setActive(true); await settle();
+  assert.equal(f.requests.length, count + 1, 'Returning refreshes immediately');
+  assert.equal(f.results.at(-1).assets.BTC.updatedAt, 10000, 'Failed refresh retains the original source time');
+  f.feed.stop();
+});
