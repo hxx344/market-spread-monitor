@@ -8,6 +8,124 @@ download() { curl --fail --silent --show-error --location --retry 3 --connect-ti
 digest() { sha256sum "$1" | cut -d ' ' -f 1; }
 unit_fingerprint() { systemctl cat --no-pager market-spread-monitor.service | sha256sum | cut -d ' ' -f 1; }
 
+# Only installer-owned, real first-level directories are eligible for deletion.
+managed_release() {
+  local path=$1 name=${1##*/}
+  [[ "$name" =~ ^([0-9a-f]{12}|local-[0-9a-f]{6})-[A-Za-z0-9]{8}$ ]] || return 1
+  [[ -d "$path" && ! -L "$path" && "${path%/*}" == "$base/releases" && $(readlink -f "$path") == "$path" ]] || return 1
+  [[ -f "$path/.install-owned" || ( -f "$path/package-lock.json" && -f "$path/server/linux.mjs" ) ]]
+}
+
+protects_path() {
+  local directory=$1 protected
+  # Never remove anything inside the data root, or an ancestor containing it.
+  if [[ "$storage_data_dir" == / || ( -n "$storage_data_dir" && ( "$directory" == "$storage_data_dir" || "$directory" == "$storage_data_dir/"* ) ) ]]; then return 0; fi
+  for protected in "$storage_current" "$storage_running" "$storage_data_dir" "${source_dir:-}"; do
+    [[ -z "$protected" || ( "$protected" != "$directory" && "$protected" != "$directory/"* ) ]] || return 0
+  done
+  return 1
+}
+
+read_storage_protection() {
+  local pid data_path
+  storage_current=$(readlink -f "$base/current" 2>/dev/null || true)
+  storage_running=''
+  pid=$(systemctl show --property=MainPID --value market-spread-monitor.service 2>/dev/null || true)
+  if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+    storage_running=$(readlink -f "/proc/$pid/cwd") || die '无法确认运行中服务目录，暂不清理版本。'
+  fi
+  storage_data_dir=/var/lib/market-spread-monitor
+  if [[ -f "$config" ]]; then
+    # Use systemd's EnvironmentFile parser; never execute config or print secrets.
+    data_path=$(systemd-run --quiet --wait --pipe --collect --unit="market-spread-monitor-storage-$$" --property="EnvironmentFile=$config" /usr/bin/printenv ALERT_DATA_DIR) || die '无法确认数据目录，暂不清理版本。'
+    [[ "$data_path" == /* ]] || die 'ALERT_DATA_DIR 必须为绝对路径，确认前不清理版本。'
+    storage_data_dir=$(realpath -m -- "$data_path")
+  fi
+}
+
+prune_releases() {
+  local path keep='' newest=-1 modified removed=0
+  [[ -d "$base/releases" && ! -L "$base/releases" && $(readlink -f "$base/releases") == "$base/releases" ]] || return 0
+  read_storage_protection
+  if [[ -n "${old_current:-}" ]]; then
+    if [[ "$old_current" == /* ]]; then keep=$(realpath -m -- "$old_current"); else keep=$(realpath -m -- "$base/$old_current"); fi
+    if ! managed_release "$keep" || [[ ! -f "$keep/.install-ready" || "$keep" == "$storage_current" ]]; then keep=''; fi
+  fi
+  if [[ -z "$keep" ]]; then
+    for path in "$base"/releases/*; do
+      managed_release "$path" || continue
+      [[ "$path" != "$storage_current" && -f "$path/.install-ready" ]] || continue
+      modified=$(stat -c %Y -- "$path/.install-ready")
+      if (( modified > newest )); then newest=$modified; keep=$path; fi
+    done
+  fi
+  for path in "$base"/releases/*; do
+    managed_release "$path" || continue
+    [[ "$path" != "$keep" && "$path" != "${new_release:-}" ]] || continue
+    protects_path "$path" && continue
+    rm -rf --one-file-system -- "$path"
+    removed=$((removed + 1))
+  done
+  if (( removed )); then log "已回收 $removed 个旧版或未完成版本；保留当前、成功回退及受保护目录。"; fi
+}
+
+storage_stats() {
+  local path=$1
+  while [[ ! -e "$path" && "$path" != / ]]; do path=${path%/*}; [[ -n "$path" ]] || path=/; done
+  storage_free_kb=$(df -Pk -- "$path" | awk 'END {print $4}')
+  storage_free_inodes=$(df -Pi -- "$path" | awk 'END {print $4}')
+  [[ "$storage_free_kb" =~ ^[0-9]+$ && ( "$storage_free_inodes" =~ ^[0-9]+$ || "$storage_free_inodes" == - ) ]] || die "无法读取 $path 的剩余空间。"
+}
+
+reclaim_caches() {
+  local path directory removed=0
+  for path in /var/cache/market-spread-monitor/_cacache /var/cache/market-spread-monitor/_logs /var/cache/market-spread-monitor/_npx; do
+    [[ -d "$path" && ! -L "$path" && $(readlink -f "$path") == "$path" ]] || continue
+    protects_path "$path" && continue
+    rm -rf --one-file-system -- "$path"; removed=$((removed + 1))
+  done
+  for directory in "$base"/releases/*; do
+    managed_release "$directory" || continue
+    # Webpack compilation cache only; keep runtime images/fetch caches intact.
+    path="$directory/.next/cache/webpack"
+    [[ -d "$path" && ! -L "$path" && $(readlink -f "$path") == "$path" ]] || continue
+    protects_path "$path" && continue
+    rm -rf --one-file-system -- "$path"; removed=$((removed + 1))
+  done
+  if (( removed )); then log "已清理 $removed 处可重建的下载或编译缓存，保留配置、数据和可启动版本。"; fi
+}
+
+require_space() {
+  local path=$1 required_kb=$2 required_inodes=$3
+  storage_stats "$path"
+  if (( storage_free_kb < required_kb )) || { [[ "$storage_free_inodes" != - ]] && (( storage_free_inodes < required_inodes )); }; then
+    reclaim_caches
+    storage_stats "$path"
+  fi
+  (( storage_free_kb >= required_kb )) || die "空间不足：$path 所在分区剩余 $((storage_free_kb / 1024)) MiB，本阶段至少需要 $((required_kb / 1024)) MiB；原服务未切换。请释放该分区空间或扩容后重试。"
+  [[ "$storage_free_inodes" == - ]] || (( storage_free_inodes >= required_inodes )) || die "inode不足：$path 所在分区剩余 $storage_free_inodes 个，至少需要 $required_inodes 个；原服务未切换。"
+}
+
+check_build_space() {
+  local dependency_kb=1048576 dependency_inodes=100000 build_kb=524288 build_inodes=10000 value
+  if [[ -n "$candidate" && -d "$candidate/node_modules" ]]; then
+    dependency_kb=$(du -sk -- "$candidate/node_modules" | awk '{print $1}')
+    dependency_inodes=$(du --inodes -s -- "$candidate/node_modules" | awk '{print $1}')
+  fi
+  if [[ -n "$candidate" && -d "$candidate/.next" ]]; then
+    value=$(du -sk --exclude=cache -- "$candidate/.next" | awk '{print $1}')
+    (( value <= build_kb )) || build_kb=$value
+    value=$(du --inodes -s --exclude=cache -- "$candidate/.next" | awk '{print $1}')
+    (( value <= build_inodes )) || build_inodes=$value
+  fi
+  build_required_kb=$((build_kb + 262144))
+  build_required_inodes=$((build_inodes + 5000))
+  # Budget for ordinary copies, without assuming filesystem reflink support.
+  require_space "$base/releases" "$((dependency_kb + build_kb + 262144 + 524288 + 131072))" "$((dependency_inodes + build_inodes + 10000))"
+  require_space /tmp 131072 1024
+  require_space /var/cache/market-spread-monitor 524288 5000
+}
+
 check_config() {
   systemd-run --quiet --wait --pipe --collect --unit="market-spread-monitor-config-$$" --property="EnvironmentFile=$config" "$runtime/bin/node" "$release/deploy/check-install.mjs" --config-only
 }
@@ -64,8 +182,9 @@ finish() {
   fi
   if (( status != 0 )); then
     printf '安装未完成；配置和告警数据已保留。日志：journalctl -u market-spread-monitor -n 50\n' >&2
-    if (( ! rollback_failed )) && [[ -n "$release" && "$release" == "$base/releases/"* && $(readlink -f "$base/current") != "$release" ]]; then
-      rm -rf -- "$release"
+    if (( ! rollback_failed )) && [[ -n "$new_release" && "$new_release" == "$release" ]] && managed_release "$new_release"; then
+      # Failure to inspect protection must not abort the rest of EXIT cleanup.
+      if ( read_storage_protection && ! protects_path "$new_release" ); then rm -rf --one-file-system -- "$new_release"; fi
     fi
   fi
   if [[ -n "$scratch" && "$scratch" == /tmp/market-spread-install.* ]]; then rm -rf -- "$scratch"; fi
@@ -78,15 +197,18 @@ main() {
   base=/opt/market-spread-monitor
   config=/etc/market-spread-monitor.env
   unit=/etc/systemd/system/market-spread-monitor.service
-  local source_dir='' requested_port='' architecture node_name runtime release_id first_install=0 rebuild=0 dependency_key='' candidate='' reused=0
-  scratch='' release='' switching=0 old_current='' was_active=0
+  local source_dir='' requested_port='' architecture node_name runtime release_id first_install=0 rebuild=0 cleanup_only=0 dependency_key='' candidate='' reused=0
+  scratch='' release='' new_release='' switching=0 old_current='' was_active=0
+  storage_current='' storage_running='' storage_data_dir='' storage_free_kb=0 storage_free_inodes=0
+  build_required_kb=786432 build_required_inodes=15000
 
   while (( $# )); do
     case "$1" in
       --source-dir) [[ $# -ge 2 ]] || die '--source-dir 缺少目录'; source_dir=$(realpath "$2"); shift 2 ;;
       --port) [[ $# -ge 2 ]] || die '--port 缺少端口'; requested_port=$2; shift 2 ;;
       --rebuild) rebuild=1; shift ;;
-      --help|-h) printf '用法：bash install.sh [--port 3000] [--rebuild] [--source-dir /path/to/source]\n已有配置始终保留；--port 仅用于首次安装；--rebuild 强制重新安装依赖并构建。\n'; return ;;
+      --cleanup) cleanup_only=1; shift ;;
+      --help|-h) printf '用法：bash install.sh [--port 3000] [--rebuild] [--cleanup] [--source-dir /path/to/source]\n已有配置始终保留；--port 仅用于首次安装；--rebuild 强制重新安装依赖并构建；--cleanup 仅回收旧版和可重建缓存，不安装、不重启。\n'; return ;;
       *) die "未知参数：$1" ;;
     esac
   done
@@ -115,6 +237,17 @@ main() {
   mkdir -p /run/lock
   exec 9>/run/lock/market-spread-monitor-install.lock
   flock -n 9 || die '已有部署正在运行，请等待结束'
+  # Runs before mktemp/downloads, including when /tmp shares a full root filesystem.
+  prune_releases
+  read_storage_protection
+  if (( cleanup_only )); then
+    reclaim_caches
+    df -h -- /opt /tmp /var
+    df -i -- /opt /tmp /var
+    log '清理完成；当前服务、回退版本、配置和行情数据已保留。'
+    return
+  fi
+  require_space /tmp 16384 128
   scratch=$(mktemp -d /tmp/market-spread-install.XXXXXXXX)
   trap finish EXIT
   trap 'exit 130' INT
@@ -127,6 +260,7 @@ main() {
     [[ $(dpkg-query -W -f='${Status}' "$package" 2>/dev/null) == 'install ok installed' ]] || missing=1
   done
   if (( missing )); then
+    require_space /var 524288 5000
     apt-get update -qq
     apt-get install -y -qq ca-certificates curl xz-utils python3 util-linux passwd iproute2
   fi
@@ -140,12 +274,17 @@ main() {
     [[ "$release_id" =~ ^[0-9a-f]{40}$ ]] || die 'GitHub 未返回有效的提交号'
   else
     # Content-based identity: touching a file or running a previous build is not an upgrade.
+    local source_kb
+    source_kb=$(du -sk --exclude='.git' --exclude='node_modules' --exclude='.next' --exclude='dist' --exclude='.vinext' --exclude='.sites-runtime' --exclude='.wrangler' --exclude='.env*' --exclude='runtime-data' --exclude='.codex' --exclude='.agents' --exclude='output' --exclude='outputs' --exclude='.playwright-cli' --exclude='.runtime' --exclude='.install-*' --exclude='*.tsbuildinfo' -- "$source_dir" | awk '{print $1}')
+    require_space /tmp "$((source_kb + 16384))" 128
     tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf "$scratch/source.tar.gz" --exclude='./.git' --exclude='./node_modules' --exclude='./.next' --exclude='./dist' --exclude='./.vinext' --exclude='./.sites-runtime' --exclude='./.wrangler' --exclude='./.env*' --exclude='./runtime-data' --exclude='./.codex' --exclude='./.agents' --exclude='./output' --exclude='./outputs' --exclude='./.playwright-cli' --exclude='./.runtime' --exclude='./.install-*' --exclude='*.tsbuildinfo' -C "$source_dir" .
     release_id="local-$(digest "$scratch/source.tar.gz")"
   fi
 
   if [[ ! -x "$runtime/bin/node" ]]; then
     log '首次准备专用 Node.js，后续升级会复用。'
+    require_space "$base/runtimes" 524288 10000
+    require_space /tmp 393216 10000
     download "https://nodejs.org/dist/v24.15.0/$node_name.tar.xz" "$scratch/$node_name.tar.xz"
     download 'https://nodejs.org/dist/v24.15.0/SHASUMS256.txt' "$scratch/SHASUMS256.txt"
     (cd "$scratch"; awk -v archive="$node_name.tar.xz" '$2 == archive { print; found=1 } END { if (!found) exit 1 }' SHASUMS256.txt > selected.sha256; sha256sum --check selected.sha256)
@@ -194,10 +333,13 @@ main() {
   fi
 
   log '检测到需要部署的版本，正在准备源码；新版本准备完成后才会切换服务。'
+  check_build_space
   if [[ -z "$source_dir" ]]; then
     download "https://codeload.github.com/hxx344/market-spread-monitor/tar.gz/$release_id" "$scratch/source.tar.gz"
   fi
   release=$(mktemp -d "$base/releases/${release_id:0:12}-XXXXXXXX")
+  new_release=$release
+  touch "$release/.install-owned"
   chmod 0755 "$release"
   if [[ -z "$source_dir" ]]; then
     tar -xzf "$scratch/source.tar.gz" --strip-components=1 -C "$release"
@@ -212,9 +354,16 @@ main() {
     log '依赖未变，复用已安装依赖的独立副本。'
     if cp -a --reflink=auto "$candidate/node_modules" "$release/node_modules" && [[ -x "$release/node_modules/.bin/next" && -f "$release/node_modules/.package-lock.json" ]] && (cd "$release"; "$runtime/bin/node" -e "require('next'); require('react')"); then
       reused=1
-      if [[ -d "$candidate/.next/cache" ]]; then
-        mkdir -p "$release/.next"
-        cp -a --reflink=auto "$candidate/.next/cache" "$release/.next/cache" || rm -rf -- "$release/.next/cache"
+      # Compiler cache is optional; do not duplicate runtime caches or exhaust headroom.
+      if [[ -d "$candidate/.next/cache/webpack" && ! -L "$candidate/.next/cache/webpack" ]]; then
+        local cache_kb cache_inodes
+        cache_kb=$(du -sk -- "$candidate/.next/cache/webpack" | awk '{print $1}')
+        cache_inodes=$(du --inodes -s -- "$candidate/.next/cache/webpack" | awk '{print $1}')
+        storage_stats "$base/releases"
+        if (( storage_free_kb >= cache_kb + build_required_kb + 262144 )) && { [[ "$storage_free_inodes" == - ]] || (( storage_free_inodes >= cache_inodes + build_required_inodes )); }; then
+          mkdir -p "$release/.next/cache"
+          cp -a --reflink=auto "$candidate/.next/cache/webpack" "$release/.next/cache/webpack" || rm -rf -- "$release/.next/cache/webpack"
+        else log '剩余空间较少，跳过可选编译缓存副本。'; fi
       fi
     else
       log '依赖副本不完整，自动重新安装。'
@@ -222,6 +371,7 @@ main() {
     fi
   fi
   chown -R spread-monitor:spread-monitor "$release"
+  require_space "$base/releases" "$build_required_kb" "$build_required_inodes"
   (
     cd "$release"
     if (( ! reused )); then
@@ -258,6 +408,7 @@ main() {
   systemctl enable market-spread-monitor.service
   switching=0
   record_success
+  prune_releases
 
   log '部署完成，已启用开机启动和原油与海力士后台告警检查。'
   describe_install

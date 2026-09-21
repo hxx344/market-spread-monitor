@@ -22,12 +22,12 @@ const timings = [];
 async function run(command, args) {
   return exec(command, args, { timeout: 600_000, maxBuffer: 8_000_000 });
 }
-async function install(source, succeeds = true) {
+async function install(source, succeeds = true, { script = installer, cleanup = false } = {}) {
   const started = Date.now();
   let result, failed = false;
   try {
     // Exercise the documented pipe form and automatic sudo elevation, not just bash file.sh.
-    result = await run("bash", ["-o", "pipefail", "-c", 'cat "$1" | bash -s -- --source-dir "$2" --port 31877', "installer-test", installer, source]);
+    result = await run("bash", ["-o", "pipefail", "-c", 'cat "$1" | bash -s -- --source-dir "$2" --port 31877 "${@:3}"', "installer-test", script, source, ...(cleanup ? ["--cleanup"] : [])]);
   } catch (error) { result = error; failed = true; }
   const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.replace(/登录密码：[^\r\n]*/g, "登录密码：[redacted]");
   assert.equal(failed, !succeeds, output.slice(-6000));
@@ -78,6 +78,22 @@ async function copySource(name) {
   const target = join(scratch, name);
   await run("mkdir", ["-p", target]);
   await run("bash", ["-o", "pipefail", "-c", 'tar --exclude=./.git --exclude=./node_modules --exclude=./.next --exclude=./.sites-runtime -C "$1" -cf - . | tar -xf - -C "$2"', "copy-source", root, target]);
+  return target;
+}
+async function exhaustedStorageInstaller(kind) {
+  // Mock only capacity reporting. Run the real installer and cleanup on this empty CI VM;
+  // do not fill the disk, consume inodes or alter global commands to induce the failure.
+  const target = join(scratch, `installer-no-${kind}.sh`);
+  const available = kind === "space" ? 0 : 1_000_000_000;
+  const inodes = kind === "inodes" ? 0 : 1_000_000_000;
+  await writeFile(target, `df() {
+  if [[ "$*" == *-Pi* ]]; then
+    printf 'Filesystem Inodes IUsed IFree IUse%% Mounted\\040on\\nfixture 2000000000 1 ${inodes} 1%% /\\n'
+  else
+    printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\040on\\nfixture 2000000000 1 ${available} 1%% /\\n'
+  fi
+}
+${await readFile(installer, "utf8")}`);
   return target;
 }
 try {
@@ -195,6 +211,45 @@ else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/n
   const releaseSet = await releases();
   assert.equal(await databaseMarker(), 'persisted', 'Source upgrade preserves the existing SQLite database');
 
+  console.log("Installer: cleanup reclaims stale managed releases without restarting or deleting outside targets");
+  const oldSuccess = "/opt/market-spread-monitor/releases/aaaaaaaaaaaa-OLD00001";
+  const interrupted = "/opt/market-spread-monitor/releases/bbbbbbbbbbbb-FAIL0001";
+  const externalTarget = join(scratch, "outside-release-root");
+  const externalMarker = join(externalTarget, "preserve.txt");
+  await run("mkdir", ["-p", externalTarget]);
+  await writeFile(externalMarker, "outside installation releases");
+  for (const path of [oldSuccess, interrupted]) {
+    await run("sudo", ["mkdir", "-p", path]);
+    await run("sudo", ["install", "-m", "0644", "/dev/null", join(path, ".install-owned")]);
+  }
+  await run("sudo", ["install", "-m", "0644", "/dev/null", join(oldSuccess, ".install-ready")]);
+  await run("sudo", ["touch", "-d", "2000-01-01T00:00:00Z", join(oldSuccess, ".install-ready")]);
+  await run("sudo", ["ln", "-s", externalTarget, "/opt/market-spread-monitor/releases/cccccccccccc-LINK0001"]);
+  const beforeCleanupPid = await pid();
+  const beforeCleanupBuilds = await buildCount();
+  await install(baseline, true, { cleanup: true });
+  assert.deepEqual(await releases(), releaseSet, "Cleanup retains current and the latest successful rollback release");
+  assert.equal(await current(), secondRelease);
+  assert.equal(await pid(), beforeCleanupPid);
+  assert.equal(await buildCount(), beforeCleanupBuilds);
+  assert.equal(await readFile(externalMarker, "utf8"), "outside installation releases", "Cleanup must not follow release symlinks");
+  assert.equal(await config(), expectedConfig);
+  assert.equal(await databaseMarker(), 'persisted', 'Cleanup preserves the existing SQLite database');
+
+  console.log("Installer: insufficient disk space or inodes fails before build and preserves the running release");
+  await writeFile(join(baseline, "install-fixture-mode"), "fail-build");
+  for (const kind of ["space", "inodes"]) {
+    const output = await install(baseline, false, { script: await exhaustedStorageInstaller(kind) });
+    assert.match(output, kind === "space" ? /空间不足/ : /inode\s*不足/);
+    assert.equal(await current(), secondRelease);
+    assert.equal(await pid(), beforeCleanupPid);
+    assert.equal(await buildCount(), beforeCleanupBuilds, "Capacity rejection must happen before building");
+    assert.deepEqual(await releases(), releaseSet, "Capacity rejection leaves no incomplete release");
+    assert.equal(await config(), expectedConfig);
+    assert.equal(await databaseMarker(), 'persisted', 'Capacity rejection preserves the existing SQLite database');
+    await active();
+  }
+
   console.log("Installer: build failure keeps the old process running");
   await writeFile(join(baseline, "install-fixture-mode"), "fail-build");
   const pidBefore = await pid();
@@ -202,6 +257,7 @@ else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/n
   assert.ok(!failedBuildOutput.includes("正在安装依赖"));
   assert.equal(await current(), secondRelease);
   assert.equal(await pid(), pidBefore);
+  assert.deepEqual(await releases(), releaseSet, "Build failure removes the incomplete candidate without removing the rollback release");
   assert.equal(existsSync(join(secondRelease, "node_modules/.isolation-probe")), false);
   await active();
   assert.equal(await config(), expectedConfig);
@@ -227,6 +283,7 @@ else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/n
   await rm(join(baseline, "install-fixture-mode"));
   await writeFile(join(baseline, ".npmrc"), "audit=false\n");
   const changedDependencies = await install(baseline);
+  const thirdRelease = await current();
   assert.match(changedDependencies, /正在安装依赖/);
   assert.ok(!changedDependencies.includes("依赖未变"));
   assert.notEqual(await readFile(join(await current(), ".install-dependencies"), "utf8"), await readFile(join(secondRelease, ".install-dependencies"), "utf8"));
@@ -235,9 +292,11 @@ else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/n
   assert.equal(await config(), expectedConfig);
   assert.deepEqual((await state()).config.rules, rules);
   assert.deepEqual((await oilState()).config, oilConfig);
+  assert.deepEqual(await releases(), [secondRelease, thirdRelease].sort(), "Only the current release and one successful rollback release may remain");
+  assert.equal(existsSync(firstRelease), false, "The oldest successful release is reclaimed after the next successful upgrade");
   console.log("Installer timings:", JSON.stringify(timings));
   assert.deepEqual(await sharedState(), sharedConfig);
-  console.log("Installer smoke passed: no-op, cache reuse, config-only restart, recovery, rollback and shared Feishu persistence; no Feishu messages sent.");
+  console.log("Installer smoke passed: no-op, cache reuse, storage reclamation, space/inode preflight, config-only restart, recovery, rollback and shared Feishu persistence; no Feishu messages sent.");
   assert.equal(await databaseMarker(), 'persisted', 'Dependency rebuild preserves the existing SQLite database');
 } finally {
   await run("sudo", ["systemctl", "stop", "market-spread-monitor.service"]).catch(() => {});
