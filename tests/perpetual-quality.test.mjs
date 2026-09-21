@@ -15,12 +15,13 @@ const snapshot = (quotes, now = NOW) => ({ schemaVersion: 1, monitorId: 'perpetu
 const pair = (patch = {}) => ({ base: 'BTC', long: quote('binance'), short: quote('gate', { bid: 101, ask: 102 }), buyPrice: 100, sellPrice: 101, spreadPercent: 1, fundingSpread8h: 0.0001, updatedAt: NOW, crossCurrency: false, ...patch });
 const stats = (patch = {}) => ({ samples: 60, expectedSamples: 60, coverage: 1, firstAt: NOW - 59 * 60_000, lastAt: NOW, mean: 1, stddev: 0, positiveRatio: 1, signChanges: 0, ...patch });
 const ratio = (exchange, patch = {}) => ({ exchange, symbol: 'BTCUSDT', longRatio: 0.5, shortRatio: 0.5, kind: 'accounts', scope: 'all', source: 'official', observedAt: NOW, ...patch });
+const convergence = (patch = {}) => ({ method: 'non-overlapping-quoted-halving-v1', windowMs: 86400000, sampleIntervalMs: 300000, targetFraction: 0.5, minEntrySpreadPercent: 0.05, samples: 288, lastAt: NOW, horizons: [1, 4, 8].map(hours => ({ hours, completed: Math.floor(24 / hours) - 1, successful: Math.floor(24 / hours) - 1, incomplete: 0, pending: 1, successRatio: 1, medianMinutesToTarget: 30, maxAdverseExpansionPercent: 0 })), ...patch });
 function report(row = pair()) {
   return {
     schemaVersion: 1, generatedAt: NOW, sampleIntervalMs: 60_000, priceWindowMs: 3_600_000, fundingWindowMs: 86_400_000,
     assets: { BTC: { coinId: 'bitcoin', name: 'Bitcoin', marketCapUsd: 10e9, fdvUsd: 10e9, circulatingSupply: 10, totalSupply: 10, maxSupply: null, updatedAt: NOW, source: 'coingecko' } },
     assetErrors: {}, positioning: { 'binance:BTCUSDT': ratio('binance'), 'gate:BTCUSDT': ratio('gate') }, positioningErrors: {},
-    pairs: { [qualityPairKey(row)]: { base: row.base, longKey: `${row.long.exchange}:${row.long.symbol}`, shortKey: `${row.short.exchange}:${row.short.symbol}`, spread: stats(), funding: stats({ samples: 288, expectedSamples: 288, firstAt: NOW - 287 * 300_000, mean: 0.01, longStddev: 0, shortStddev: 0 }) } },
+    pairs: { [qualityPairKey(row)]: { base: row.base, longKey: `${row.long.exchange}:${row.long.symbol}`, shortKey: `${row.short.exchange}:${row.short.symbol}`, spread: stats(), funding: stats({ samples: 288, expectedSamples: 288, firstAt: NOW - 287 * 300_000, mean: 0.01, longStddev: 0, shortStddev: 0 }), convergence: convergence() } },
   };
 }
 const dimension = (result, id) => result.dimensions.find(item => item.id === id).score;
@@ -100,7 +101,7 @@ test('quality crowding uses the proposed long and short directions and does not 
   data.positioning['gate:BTCUSDT'].kind = 'positions';
   const mixed = evaluateOpportunityQuality(row, data, NOW);
   assert.equal(dimension(mixed, 'positioning'), null);
-  assert.equal(mixed.coverage, 85);
+  assert.equal(mixed.coverage, 90);
   assert.notEqual(mixed.grade, 'strong');
 });
 
@@ -128,12 +129,12 @@ test('returning after three minutes retains evidence according to each source li
   const row = pair(), data = report(row);
   const returnedAt = NOW + 181_000;
   const result = evaluateOpportunityQuality({ ...row, updatedAt: returnedAt }, data, returnedAt);
-  assert.equal(result.coverage, 70, 'Only the three-minute spread evidence has expired');
+  assert.equal(result.coverage, 90, 'Only the three-minute spread evidence has expired');
   assert.equal(dimension(result, 'spread'), null);
   for (const id of ['marketCap', 'fdv', 'positioning', 'funding']) assert.notEqual(dimension(result, id), null, id);
   for (const [elapsed, coverage] of [
-    [180_000, 100], [180_001, 70], [600_000, 70], [600_001, 50],
-    [900_000, 50], [900_001, 35], [3_600_000, 35], [3_600_001, 0],
+    [180_000, 100], [180_001, 90], [600_000, 90], [600_001, 30],
+    [900_000, 30], [900_001, 20], [3_600_000, 20], [3_600_001, 0],
   ]) {
     const now = NOW + elapsed;
     assert.equal(evaluateOpportunityQuality({ ...row, updatedAt: now }, data, now).coverage, coverage, `Elapsed ${elapsed} ms`);
@@ -159,7 +160,7 @@ test('source observations cannot postdate their report beyond the clock-skew all
     data.generatedAt = at;
     data.assets.BTC.updatedAt = at;
     for (const ratio of Object.values(data.positioning)) ratio.observedAt = at;
-    for (const history of Object.values(data.pairs)) { history.spread.lastAt = at; history.funding.lastAt = at; }
+    for (const history of Object.values(data.pairs)) { history.spread.lastAt = at; history.funding.lastAt = at; history.convergence.lastAt = at; }
     return data;
   }
   for (const [id, update] of [
@@ -167,6 +168,7 @@ test('source observations cannot postdate their report beyond the clock-skew all
     ['positioning', (data, value) => { data.positioning['binance:BTCUSDT'].observedAt = value; }],
     ['spread', (data, value) => { data.pairs[qualityPairKey(row)].spread.lastAt = value; }],
     ['funding', (data, value) => { data.pairs[qualityPairKey(row)].funding.lastAt = value; }],
+    ['convergence', (data, value) => { data.pairs[qualityPairKey(row)].convergence.lastAt = value; }],
   ]) {
     const data = coherentReport();
     update(data, at + 5_000);
@@ -197,8 +199,9 @@ test('quality does not score insufficient or expired history and limits grades o
   delete limited.assets.BTC;
   delete limited.positioning['gate:BTCUSDT'];
   const sparse = evaluateOpportunityQuality(row, limited, NOW);
-  assert.equal(sparse.coverage, 50);
-  assert.equal(sparse.score, null);
+  assert.equal(sparse.coverage, 70);
+  assert.equal(sparse.score, 100);
+  assert.equal(sparse.grade, 'watch');
 });
 
 test('quality never gives a constant negative spread a high stability score', () => {
@@ -396,7 +399,7 @@ test('quality history rolls one-hour prices and twenty-four-hour funding windows
   assert.equal(values.spread.firstAt, NOW - QUALITY_PRICE_WINDOW_MS + QUALITY_SAMPLE_MS);
   assert.equal(values.funding.samples, 288);
   assert.equal(values.funding.firstAt, NOW - QUALITY_FUNDING_WINDOW_MS + 300_000);
-  assert.deepEqual(history.metrics(), { trackedPairs: 1, pricePoints: 60, fundingPoints: 288 });
+  assert.deepEqual(history.metrics(), { trackedPairs: 1, pricePoints: 60, fundingPoints: 288, convergencePoints: 288 });
   const expired = readPair(history, NOW + QUALITY_FUNDING_WINDOW_MS);
   assert.equal(expired.spread.samples, 0);
   assert.equal(expired.funding.samples, 0);
@@ -450,4 +453,137 @@ test('quality samples survive restart, prune beyond a day and retain corrupt buc
     assert.ok(resolve(directory).startsWith(resolve(tmpdir()) + sep + 'perpetual-quality-'));
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+const CONVERGENCE_END = Math.floor(NOW / (8 * 3_600_000)) * 8 * 3_600_000;
+function convergenceHistory(end = CONVERGENCE_END, { skip = new Set(), constant = false } = {}) {
+  const history = createQualityHistory();
+  for (let index = 287; index >= 0; index--) {
+    const at = end - index * 300_000;
+    if (skip.has(at)) continue;
+    const spread = !constant && at % 3_600_000 === 1_800_000 ? 0.4 : 1;
+    history.ingest(at, [historyRow(spread)], end);
+  }
+  return history;
+}
+
+test('quoted narrowing uses disjoint complete UTC windows rather than every overlapping starting point', () => {
+  const history = convergenceHistory();
+  const evidence = readPair(history, CONVERGENCE_END).convergence;
+  assert.equal(evidence.samples, 288);
+  assert.equal(evidence.method, 'non-overlapping-quoted-halving-v1');
+  for (const [index, expected] of [[0, 23], [1, 5], [2, 2]]) {
+    const item = evidence.horizons[index];
+    assert.equal(item.completed, expected);
+    assert.equal(item.successful, expected);
+    assert.equal(item.pending, 1);
+    assert.equal(item.incomplete, 0);
+    assert.equal(item.successRatio, 1);
+    assert.equal(item.medianMinutesToTarget, 30);
+    assert.equal(item.maxAdverseExpansionPercent, 0);
+  }
+});
+
+test('a missing five-minute quote invalidates its whole window and is never silently interpolated', () => {
+  const history = convergenceHistory(CONVERGENCE_END, { skip: new Set([CONVERGENCE_END - 15 * 60_000]) });
+  const evidence = readPair(history, CONVERGENCE_END).convergence;
+  for (const [index, expected] of [[0, 22], [1, 4], [2, 1]]) {
+    const item = evidence.horizons[index];
+    assert.equal(item.completed, expected);
+    assert.equal(item.successful, expected, 'The earlier target hit cannot rescue an incomplete window');
+    assert.equal(item.incomplete, 1);
+  }
+});
+
+test('early narrowing in an unfinished window remains pending until the full horizon has elapsed', () => {
+  const history = createQualityHistory(), start = CONVERGENCE_END;
+  for (let index = 0; index <= 12; index++) history.ingest(start + index * 300_000, [historyRow(index === 0 ? 1 : 0.4)], start + 3_600_000);
+  const open = readPair(history, start + 30 * 60_000).convergence.horizons[0];
+  assert.equal(open.pending, 1);
+  assert.equal(open.completed, 0);
+  assert.equal(open.successful, 0);
+  assert.equal(open.successRatio, null);
+  const closed = readPair(history, start + 3_600_000).convergence.horizons[0];
+  assert.equal(closed.completed, 1);
+  assert.equal(closed.successful, 1);
+  assert.equal(closed.medianMinutesToTarget, 5);
+});
+
+test('a missing window boundary is reported as a gap on both adjacent observed windows', () => {
+  const history = convergenceHistory(CONVERGENCE_END, { skip: new Set([CONVERGENCE_END - 4 * 3_600_000]) });
+  const evidence = readPair(history, CONVERGENCE_END).convergence;
+  for (const [index, expected, gaps] of [[0, 21, 2], [1, 3, 2], [2, 1, 1]]) {
+    assert.equal(evidence.horizons[index].completed, expected);
+    assert.equal(evidence.horizons[index].incomplete, gaps);
+  }
+});
+
+test('narrowing records adverse expansion in percentage points and ignores negative or tiny initial edges', () => {
+  for (const initial of [-1, 0, 0.049, 1]) {
+    const history = createQualityHistory(), start = CONVERGENCE_END;
+    for (let index = 0; index <= 12; index++) history.ingest(start + index * 300_000, [historyRow(index === 0 ? initial : index < 6 ? 1.4 : 0.4)], start + 3_600_000);
+    const item = readPair(history, start + 3_600_000).convergence.horizons[0];
+    assert.equal(item.completed, initial === 1 ? 1 : 0);
+    assert.equal(item.successful, initial === 1 ? 1 : 0);
+    if (initial === 1) assert.ok(Math.abs(item.maxAdverseExpansionPercent - 0.4) < 1e-12);
+    else assert.equal(item.maxAdverseExpansionPercent, null);
+  }
+});
+
+test('a permanently positive stable quote gap does not masquerade as evidence of convergence', () => {
+  const row = pair(), data = report(row);
+  data.pairs[qualityPairKey(row)].convergence = readPair(convergenceHistory(NOW, { constant: true })).convergence;
+  const result = evaluateOpportunityQuality(row, data, NOW);
+  assert.equal(dimension(result, 'spread'), 100);
+  assert.equal(dimension(result, 'convergence'), 0);
+  assert.equal(result.profiles.persistence.status, 'positive');
+  assert.equal(result.profiles.convergence.status, 'negative');
+  assert.notEqual(result.grade, 'strong');
+});
+
+test('small, sparse, expired or missing convergence studies cannot establish an aggregate quality grade', () => {
+  for (const edit of [
+    data => { delete data.convergence; },
+    data => { data.convergence.samples = 144; },
+    data => { data.convergence.lastAt = NOW - 600_001; },
+    data => { data.convergence.horizons[0].completed = 5; },
+    data => { data.convergence.horizons[0].incomplete = 8; },
+  ]) {
+    const row = pair(), data = report(row);
+    edit(data.pairs[qualityPairKey(row)]);
+    const result = evaluateOpportunityQuality(row, data, NOW);
+    assert.equal(dimension(result, 'convergence'), null);
+    assert.equal(result.profiles.convergence.status, 'insufficient');
+    assert.equal(result.score, null);
+    assert.equal(result.grade, 'insufficient');
+    assert.equal(result.coverage, 60, 'Other evidence remains visible even when the convergence study is unavailable');
+  }
+});
+
+test('stable historical funding expenses and currently reversed carry cannot receive the strongest grade', () => {
+  const row = pair(), data = report(row);
+  Object.assign(data.pairs[qualityPairKey(row)].funding, { mean: -0.01, positiveRatio: 0 });
+  const expense = evaluateOpportunityQuality(row, data, NOW);
+  assert.equal(dimension(expense, 'funding'), 0);
+  assert.equal(expense.profiles.funding.status, 'negative');
+  assert.notEqual(expense.grade, 'strong');
+  const reversed = pair({ long: quote('binance', { fundingRate: 0.0003 }), short: quote('gate', { fundingRate: 0 }) });
+  const currentExpense = evaluateOpportunityQuality(reversed, report(reversed), NOW);
+  assert.equal(currentExpense.profiles.funding.label, '历史收入／当前支出');
+  assert.notEqual(currentExpense.grade, 'strong');
+});
+
+test('narrowing rings expire without new ingestion and preserve bounded legacy seven-field storage', () => {
+  const history = convergenceHistory();
+  assert.equal(history.metrics().convergencePoints, 288);
+  const expired = readPair(history, CONVERGENCE_END + QUALITY_FUNDING_WINDOW_MS).convergence;
+  assert.equal(expired.samples, 0);
+  assert.equal(expired.lastAt, null);
+  assert.ok(expired.horizons.every(item => item.completed === 0 && item.successful === 0));
+  const live = createQualityHistory();
+  const sample = live.sample(livePair(NOW), NOW);
+  assert.equal(sample.rows[0].length, 7, 'The new in-memory study does not add disk fields or extra writes');
+  const restored = createQualityHistory();
+  restored.ingest(sample.bucket, sample.rows, NOW);
+  assert.deepEqual(readPair(restored).convergence, readPair(live).convergence);
 });

@@ -7,7 +7,7 @@ const key = row => JSON.stringify([row.base, row.longKey, row.shortKey]);
 function report(row, at = 10000) {
   return {
     schemaVersion: 1, generatedAt: at, sampleIntervalMs: 60000, priceWindowMs: 3600000, fundingWindowMs: 86400000,
-    pairs: { [key(row)]: { ...row, identity: row.base, spread: { lastAt: at, samples: 60 }, funding: { lastAt: at, samples: 288 }, priceSeries: [[at, 1]] } },
+    pairs: { [key(row)]: { ...row, identity: row.base, spread: { lastAt: at, samples: 60 }, funding: { lastAt: at, samples: 288 }, convergence: { lastAt: at, samples: 288 }, priceSeries: [[at, 1]] } },
     assets: { [row.base]: { updatedAt: at, marketCapUsd: 100 } }, assetErrors: {},
     positioning: { [row.longKey]: { observedAt: at, longRatio: 0 }, [row.shortKey]: { observedAt: at, longRatio: .5 }, [`c:${row.base}`]: { observedAt: at, longRatio: .4 } },
     positioningErrors: {}, positioningOverview: { [row.base]: { observedAt: at, constituents: [{ key: `c:${row.base}` }] } },
@@ -24,6 +24,7 @@ test('visiting another page retains the first page without renewing any source t
   assert.equal(second.positioning[btc.longKey].longRatio, 0);
   assert.equal(second.positioningOverview.BTC.observedAt, 10000);
   assert.deepEqual(second.pairs[key(btc)].priceSeries, [[10000, 1]]);
+  assert.equal(second.pairs[key(btc)].convergence.lastAt, 10000);
   assert.deepEqual(Object.keys(first.pairs), [key(btc)], 'Previous React snapshots remain immutable');
 });
 
@@ -86,6 +87,7 @@ test('another page cannot rehabilitate observations that were ahead of their own
   invalid.positioningOverview.BTC.observedAt = 20000;
   invalid.pairs[key(btc)].spread.lastAt = 20000;
   invalid.pairs[key(btc)].funding.lastAt = 20000;
+  invalid.pairs[key(btc)].convergence.lastAt = 20000;
   cache.accept(invalid, [btc]);
   const result = cache.accept(report(eth, 16000), [eth]);
   assert.equal(result.assets.BTC.updatedAt, null);
@@ -93,6 +95,36 @@ test('another page cannot rehabilitate observations that were ahead of their own
   assert.equal(result.positioningOverview.BTC, undefined);
   assert.equal(result.pairs[key(btc)].spread.lastAt, null);
   assert.equal(result.pairs[key(btc)].funding.lastAt, null);
+  assert.equal(result.pairs[key(btc)].convergence.lastAt, null);
   assert.equal(result.pairs[key(btc)].priceSeries, undefined);
   assert.equal(invalid.assets.BTC.updatedAt, 20000, 'The incoming report remains immutable');
+});
+
+test('invalid original report times cannot be laundered by later cache merges', () => {
+  for (const generatedAt of [undefined, null, NaN, Infinity, 0, -1, '10000', 15001]) {
+    const cache = createPerpetualQualityCache(), btc = pair(), eth = pair('ETH');
+    const invalid = { ...report(btc, 10000), generatedAt };
+    cache.accept(invalid, [btc], 10000);
+    const next = cache.accept(report(eth, 20000), [eth], 20000);
+    assert.equal(next.pairs[key(btc)].spread.lastAt, null, String(generatedAt));
+    assert.equal(next.pairs[key(btc)].funding.lastAt, null, String(generatedAt));
+    assert.equal(next.pairs[key(btc)].convergence.lastAt, null, String(generatedAt));
+    assert.equal(next.pairs[key(btc)].priceSeries, undefined, String(generatedAt));
+    assert.equal(next.assets.BTC.updatedAt, null, String(generatedAt));
+    assert.equal(next.positioning[btc.longKey].observedAt, 0, String(generatedAt));
+    assert.equal(next.positioningOverview.BTC, undefined, String(generatedAt));
+    assert.equal(invalid.pairs[key(btc)].convergence.lastAt, 10000, 'Incoming evidence is immutable');
+  }
+});
+
+test('convergence freshness uses its own observation time and the permitted original report skew', () => {
+  const cache = createPerpetualQualityCache(), btc = pair(), eth = pair('ETH');
+  const data = report(btc, 10000);
+  data.pairs[key(btc)].convergence.lastAt = 15000;
+  const accepted = cache.accept(data, [btc], 10000);
+  assert.equal(accepted.pairs[key(btc)].convergence.lastAt, 15000);
+  const merged = cache.accept(report(eth, 900000), [eth], 900000);
+  assert.equal(merged.pairs[key(btc)].convergence.lastAt, 15000, 'Reading another page never renews convergence evidence');
+  const legacy = report(btc, 950000); delete legacy.pairs[key(btc)].convergence;
+  assert.equal(cache.accept(legacy, [btc], 950000).pairs[key(btc)].convergence, undefined, 'A legacy response cannot revive the previous study');
 });

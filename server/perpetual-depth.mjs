@@ -1,5 +1,7 @@
 import { PerpetualWebSocket } from './perpetual-socket.mjs';
 import { quoteCurrencyFx } from '../lib/perpetual-fx.ts';
+import { pairTakerFees } from '../lib/perpetual-fees.ts';
+import { calculatePerpetualExitPnl, perpetualContractIdentity, perpetualExitIdentity, validatePerpetualExitPosition } from '../lib/perpetual-exit.ts';
 
 // One-shot public depth inspection only: no full-market subscriptions or history.
 // Official formats verified 2026-09-21:
@@ -98,6 +100,62 @@ export function estimateDepthPair(longBook, shortBook, notional, fx, now = Date.
   return base;
 }
 
+/** Same-asset, linear USDT close: sell the long into bids, buy the short from asks. */
+export function estimateExitPair(longBook, shortBook, input, quotes, now = Date.now()) {
+  validatePerpetualExitPosition(input);
+  const { quantity, entryLongPrice, entryShortPrice, entryFeePaid, settledFunding, capital } = input;
+  const position = { quantity, entryLongPrice, entryShortPrice, entryFeePaid, settledFunding, capital };
+  const fees = pairTakerFees({ long: quotes[0], short: quotes[1] }, input.takerOverrides ?? {}, now);
+  const result = { kind: 'exit', identity: perpetualExitIdentity(quotes[0], quotes[1]), base: quotes[0].base, currency: 'USDT', position,
+    generatedAt: now, staleAfterMs: MAX_BOOK_AGE, bookComplete: false, complete: false,
+    entryLongNotional: quantity * entryLongPrice, entryShortNotional: quantity * entryShortPrice, entryNotional: quantity * entryLongPrice,
+    longPnl: null, shortPnl: null, rawPnl: null, entryFeePaid, closeFeePaid: null, settledFunding, netPnl: null, notionalReturnPercent: null, capitalReturnPercent: null,
+    fees, long: null, short: null, reasons: [] };
+  if (input.identity !== undefined && input.identity !== result.identity) { result.reasons.push('合约身份或数量单位已变化，请重新确认持仓'); return result; }
+  if (quotes[0].base !== quotes[1].base || quotes[0].exchange === quotes[1].exchange || quotes.some(quote => quote.comparable === false)) {
+    result.reasons.push('两腿需为可比较的相同标的、不同交易所'); return result;
+  }
+  if (quotes.some(quote => quote.quoteCurrency !== 'USDT' || (quote.collateralCurrency != null && quote.collateralCurrency !== 'USDT'))) {
+    result.reasons.push('平仓测算当前仅支持两腿均以 USDT 计价及结算的线性合约，跨币种资金流暂不估算'); return result;
+  }
+  for (const [index, book] of [longBook, shortBook].entries()) {
+    const name = index === 0 ? '做多' : '做空', quote = quotes[index];
+    if (!book || book.reason) result.reasons.push(`${name}腿：${book?.reason || '盘口缺失'}`);
+    else if (book.exchange !== quote.exchange || book.symbol !== quote.symbol || book.base !== quote.base || book.quoteCurrency !== 'USDT') result.reasons.push(`${name}腿：盘口合约与持仓身份不符`);
+    else if (!validTime(book.sourceTime, now) || !validTime(book.receivedAt, now) || now - book.sourceTime > MAX_BOOK_AGE || now - book.receivedAt > MAX_BOOK_AGE) result.reasons.push(`${name}腿：盘口时间缺失或超过 10 秒`);
+    else if (![book.asks, book.bids].every(levels => Array.isArray(levels) && levels.length > 0 && levels.every(row => Array.isArray(row) && positive(row[0]) && positive(row[1]))) || book.bids[0][0] > book.asks[0][0]) result.reasons.push(`${name}腿：盘口为空或买卖价格倒挂`);
+  }
+  if (result.reasons.length) return result;
+  if (Math.abs(longBook.sourceTime - shortBook.sourceTime) > MAX_SKEW) { result.reasons.push('两腿盘口时间相差超过 5 秒，请重新校验'); return result; }
+  const fill = (book, levels, action, fee, entryPrice) => {
+    let remaining = quantity, filledQuantity = 0, filledNotional = 0;
+    for (const [price, size] of levels) {
+      const used = Math.min(remaining, size); filledQuantity += used; filledNotional += used * price; remaining = Math.max(0, remaining - used);
+      if (remaining <= quantity * 1e-10) break;
+    }
+    const complete = remaining <= quantity * 1e-8;
+    return { exchange: book.exchange, symbol: book.symbol, quoteCurrency: 'USDT', sourceTime: book.sourceTime, receivedAt: book.receivedAt, transport: book.transport, source: book.source,
+      levels: levels.length, complete, filledQuantity, filledNotional, vwap: filledQuantity > 0 ? filledNotional / filledQuantity : null,
+      capacityQuantity: levels.reduce((sum, row) => sum + row[1], 0), capacityNotional: levels.reduce((sum, row) => sum + row[0] * row[1], 0),
+      action, fee, pnl: complete ? (action === 'sell' ? filledNotional - quantity * entryPrice : quantity * entryPrice - filledNotional) : null,
+      closeFee: complete && fee.percent !== null ? filledNotional * fee.percent / 100 : null };
+  };
+  result.long = fill(longBook, longBook.bids, 'sell', fees.long, entryLongPrice);
+  result.short = fill(shortBook, shortBook.asks, 'buy', fees.short, entryShortPrice);
+  result.longPnl = result.long.pnl; result.shortPnl = result.short.pnl;
+  for (const [name, leg] of [['做多', result.long], ['做空', result.short]]) {
+    if (!leg.complete) result.reasons.push(`${name}腿公开 ${leg.levels} 档盘口不足以全部平仓，已显示部分容量`);
+    if (leg.fee.percent === null) result.reasons.push(`${name}腿：${leg.fee.detail}`);
+  }
+  result.bookComplete = result.long.complete && result.short.complete;
+  if (result.bookComplete) {
+    Object.assign(result, calculatePerpetualExitPnl(position, result.long.vwap, result.short.vwap, fees));
+    result.complete = result.netPnl !== null;
+  }
+  if (quotes.some(quote => quote.delistingAt && quote.delistingAt <= now)) result.reasons.push('合约已到公告下架时间；此处仅为盘口估值，请核实平台是否仍允许平仓');
+  return result;
+}
+
 export function createPerpetualExecutionService({ getQuote, getMarket = () => null, fetchImpl = fetch, clock = Date.now, WebSocketImpl = PerpetualWebSocket, budget: suppliedBudget, maxMarkets = 10, cacheMs = 5_000 } = {}) {
   const budget = suppliedBudget ?? createInspectionBudget({ clock });
   const books = new Map(), metadata = new Map(), controller = new AbortController();
@@ -121,7 +179,8 @@ export function createPerpetualExecutionService({ getQuote, getMarket = () => nu
   async function contractSize(quote) {
     if (!['gate', 'okx'].includes(quote.exchange)) return 1;
     const key = `${quote.exchange}:${quote.symbol}`, cached = metadata.get(key);
-    if (cached && clock() - cached.at < 300_000) return cached.value;
+    const identity = perpetualContractIdentity(quote);
+    if (cached && cached.identity === identity && clock() - cached.at < 300_000) return cached.value;
     let value;
     if (quote.exchange === 'gate') {
       const row = await json(`https://api.gateio.ws/api/v4/futures/usdt/contracts/${encodeURIComponent(quote.symbol)}`);
@@ -136,7 +195,7 @@ export function createPerpetualExecutionService({ getQuote, getMarket = () => nu
     }
     if (!value) throw failure('合约数量乘数缺失');
     if (metadata.size >= maxMarkets && !metadata.has(key)) metadata.delete(metadata.keys().next().value);
-    metadata.set(key, { value, at: clock() }); return value;
+    metadata.set(key, { value, identity, at: clock() }); return value;
   }
   function lighterSnapshot(quote, market) {
     if (!Number.isInteger(market?.marketId)) return Promise.reject(failure('合约目录缺少 Lighter market_id'));
@@ -198,14 +257,15 @@ export function createPerpetualExecutionService({ getQuote, getMarket = () => nu
       asks: normalizeDepthLevels(asks, { multiplier: positive(market?.multiplier ?? quote.multiplier) ?? 1, contractSize: unit, side: 'asks' }) };
   }
   function book(quote) {
-    const key = `${quote.exchange}:${quote.symbol}`, cached = books.get(key), now = clock();
-    if (cached?.flight) return cached.flight;
-    if (cached?.value && now - cached.at < (cached.value.reason ? 10_000 : cacheMs)) return Promise.resolve(cached.value);
+    const key = `${quote.exchange}:${quote.symbol}`, cached = books.get(key), now = clock(), market = getMarket(quote.exchange, quote.symbol);
+    const identity = JSON.stringify([perpetualContractIdentity(quote), market?.marketId ?? null, market?.multiplier ?? quote.multiplier ?? 1]);
+    if (cached?.identity === identity && cached.flight) return cached.flight;
+    if (cached?.identity === identity && cached.value && now - cached.at < (cached.value.reason ? 10_000 : cacheMs)) return Promise.resolve(cached.value);
     // Active market leases prevent many browsers cycling through the whole market.
     for (const [id, item] of books) if (!item.flight && now - item.at > 30_000) books.delete(id);
     if (!books.has(key) && books.size >= maxMarkets) return Promise.resolve({ reason: '全站最多同时校验 10 个合约，请 30 秒后重试' });
-    const entry = { at: now, value: null, flight: null };
-    entry.flight = loadBook(quote, getMarket(quote.exchange, quote.symbol)).catch(error => ({ reason: error.message })).then(value => { entry.value = value; entry.at = clock(); entry.flight = null; return value; });
+    const entry = { at: now, identity, value: null, flight: null };
+    entry.flight = loadBook(quote, market).catch(error => ({ reason: error.message })).then(value => { entry.value = value; entry.at = clock(); entry.flight = null; return value; });
     books.set(key, entry); return entry.flight;
   }
   async function fx() {
@@ -234,18 +294,33 @@ export function createPerpetualExecutionService({ getQuote, getMarket = () => nu
     })().finally(() => { fxFlight = null; });
     return fxFlight;
   }
-  return {
-    fx,
-    async depth(input) {
+  function selectLegs(input, closing = false) {
       const legs = ['long', 'short'].map(side => {
         const leg = input?.[side];
         if (!leg || !IDS.has(leg.exchange) || typeof leg.symbol !== 'string' || !/^[A-Za-z0-9:_.-]{1,100}$/.test(leg.symbol)) throw failure('请选择有效的交易所与合约');
         const quote = getQuote?.(leg.exchange, leg.symbol);
         if (!quote || quote.comparable === false) throw failure('合约不在当前可比较目录中');
-        if (quote.delistingAt && quote.delistingAt <= clock()) throw failure('该合约已到下架时间');
-        return quote;
+        if (!closing && quote.delistingAt && quote.delistingAt <= clock()) throw failure('该合约已到下架时间');
+        return { ...quote };
       });
       if (legs[0].base !== legs[1].base || legs[0].exchange === legs[1].exchange) throw failure('两腿需为相同标的、不同交易所');
+      return legs;
+  }
+  return {
+    fx,
+    async exit(input) {
+      try { validatePerpetualExitPosition(input); } catch (error) { throw failure(error.message); }
+      const legs = selectLegs(input, true), identity = perpetualExitIdentity(legs[0], legs[1]);
+      if (input.identity !== undefined && (typeof input.identity !== 'string' || input.identity !== identity)) throw failure('合约身份或数量单位已变化，请重新确认持仓', 409);
+      if (legs.some(quote => quote.quoteCurrency !== 'USDT' || (quote.collateralCurrency != null && quote.collateralCurrency !== 'USDT'))) throw failure('平仓测算当前仅支持两腿均以 USDT 计价及结算的线性合约，跨币种资金流暂不估算');
+      if (input.takerOverrides !== undefined && (!input.takerOverrides || typeof input.takerOverrides !== 'object' || Array.isArray(input.takerOverrides))) throw failure('账户手续费设置格式无效');
+      const [longBook, shortBook] = await Promise.all(legs.map(book));
+      const latest = selectLegs(input, true);
+      if (identity !== perpetualExitIdentity(latest[0], latest[1])) throw failure('查询期间合约身份或数量单位已变化，请重新确认持仓', 409);
+      return estimateExitPair(longBook, shortBook, input, latest, clock());
+    },
+    async depth(input) {
+      const legs = selectLegs(input);
       const notional = positive(input?.notional);
       if (!notional || notional > 10_000_000) throw failure('单腿目标金额需大于 0 且不超过 10,000,000 USDT');
       // Obtain FX first: depth must not age while waiting for extra FX requests.

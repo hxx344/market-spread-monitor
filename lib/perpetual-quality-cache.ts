@@ -9,8 +9,11 @@ export function createPerpetualQualityCache(limit = 120) {
   const tracked = new Map<string, QualityPairRequest>();
   let previous: PerpetualQualityReport | null = null;
   return {
-    accept(report: PerpetualQualityReport, requested: QualityPairRequest[]): PerpetualQualityReport {
-      const aheadOfReport = (at: number | null) => at !== null && at > report.generatedAt + 5_000;
+    accept(report: PerpetualQualityReport, requested: QualityPairRequest[], now = Date.now()): PerpetualQualityReport {
+      const validReportTime = typeof report.generatedAt === 'number' && Number.isFinite(report.generatedAt) && report.generatedAt > 0 && report.generatedAt <= now + 5_000;
+      // Quarantine invalid source times when first received; another page's newer
+      // report timestamp must never make those old observations trustworthy.
+      const aheadOfReport = (at: number | null) => !validReportTime || at !== null && at > report.generatedAt + 5_000;
       const next: PerpetualQualityReport = {
         ...report,
         pairs: { ...previous?.pairs }, assets: { ...previous?.assets }, assetErrors: { ...previous?.assetErrors },
@@ -26,10 +29,12 @@ export function createPerpetualQualityCache(limit = 120) {
         const history = report.pairs[key];
         if (history) {
           const badSpread = aheadOfReport(history.spread.lastAt), badFunding = aheadOfReport(history.funding.lastAt);
-          next.pairs[key] = badSpread || badFunding ? {
+          const badConvergence = history.convergence && aheadOfReport(history.convergence.lastAt);
+          next.pairs[key] = badSpread || badFunding || badConvergence ? {
             ...history,
             spread: badSpread ? { ...history.spread, lastAt: null } : history.spread,
             funding: badFunding ? { ...history.funding, lastAt: null } : history.funding,
+            ...(badConvergence ? { convergence: { ...history.convergence!, lastAt: null } } : {}),
             ...(badSpread ? { priceSeries: undefined } : {}),
           } : history;
         }

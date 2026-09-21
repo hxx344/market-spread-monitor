@@ -19,7 +19,9 @@ const PerpetualAlerts = dynamic(() => import("./perpetual-alerts"));
 const PerpetualExecution = dynamic(() => import("./perpetual-execution").then(module => module.PerpetualExecution));
 const PerpetualHolding = dynamic(() => import("./perpetual-holding"));
 const PerpetualTrend = dynamic(() => import("./perpetual-trend"));
-type DetailTab = "execution" | "quality" | "quotes";
+const PerpetualExit = dynamic(() => import("./perpetual-exit"));
+const PerpetualPaper = dynamic(() => import("./perpetual-paper"));
+type DetailTab = "execution" | "quality" | "exit" | "quotes";
 
 const preferencesKey = "market-monitor:perpetual:v1";
 const qualityBudgetKey = "market-monitor:perpetual-quality-budget:v1";
@@ -66,6 +68,7 @@ function QualityCell({ quality, pairLabel, onInspect }: { quality: OpportunityQu
   return <button type="button" className={`perp-quality-grade ${quality.grade}`} aria-label={`查看 ${pairLabel} 聚合质量依据：${quality.label}${quality.score === null ? "" : `，${quality.score} 分`}，数据覆盖 ${quality.coverage}%`} onClick={onInspect}>
     <strong>{quality.label}<b>{quality.score === null ? "—" : quality.score}<small>{quality.score === null ? "" : "/100"}</small></b></strong>
     <span>数据覆盖 {quality.coverage}%</span>
+    <span className="perp-quality-signals">{Object.entries(quality.profiles).map(([key, profile]) => <span key={key} className={profile.status} title={profile.detail}>{profile.label}</span>)}</span>
   </button>;
 }
 
@@ -100,6 +103,8 @@ function QualityEvidence({ row, report, quality, venues, now, slippagePercent }:
   const legs = [{ label: "做多腿", quote: row.long }, { label: "做空腿", quote: row.short }];
   return <div className="perp-quality-evidence">
     <div className="perp-quality-evidence-heading"><strong>聚合质量依据 <span>{quality.label}{quality.score === null ? "" : ` · ${quality.score} / 100`}</span></strong><span>{report ? `${reportDelayed ? "上次读取" : "最近读取"} ${stamp(report.generatedAt)} 北京时间` : "资料采集中"}</span></div>
+    <div className="perp-quality-profiles">{Object.entries(quality.profiles).map(([key, profile]) => <section key={key} className={profile.status}><small>{key === "persistence" ? "价差持续性" : key === "convergence" ? "报价收窄证据" : "资金费收支方向"}</small><h4>{profile.label}</h4><p>{profile.detail}</p></section>)}</div>
+    <section className="perp-convergence" aria-label="报价收窄历史"><h4>报价价差减半记录 <small>近 24h · 每 5 分钟真实采样</small></h4><p>以固定 UTC 时段的起点为基准，起始价差至少 0.05%；观察是否曾降至一半。各持有时长分别使用互不重叠的窗口；报价缺口整窗排除，尚未结束的窗口不计结果。</p>{history?.convergence ? <><div className="perp-convergence-scroll"><table><thead><tr><th>窗口</th><th>曾减半 / 完整窗口</th><th>减半占比</th><th>中位耗时</th><th>最大反向扩大</th><th>缺口 / 未结束</th></tr></thead><tbody>{history.convergence.horizons.map(item => <tr key={item.hours}><th>{item.hours}h</th><td>{item.successful} / {item.completed}</td><td>{share(item.successRatio)}</td><td>{item.medianMinutesToTarget === null ? "—" : `${item.medianMinutesToTarget} 分钟`}</td><td>{deviation(item.maxAdverseExpansionPercent)}</td><td>{item.incomplete} / {item.pending}</td></tr>)}</tbody></table></div><p>{history.convergence.samples} / 288 个样本 · 最近 {stamp(history.convergence.lastAt)}{history.convergence.lastAt && now - history.convergence.lastAt > 600_000 ? " · 已过期" : ""}。4h / 8h 窗口样本较少，仅展示记录。</p></> : <p>正在积累收窄历史；至少需要 12 小时采样与 6 个完整的 1h 窗口才参与评分。</p>}<p className="perp-quality-warning">这里衡量开仓报价的历史变化，未计退出买卖价、费用和成交容量，不是回测收益或盈利概率。</p></section>
     <PositioningOverviewCard base={row.base} report={report} venues={venues} now={now}/>
     <div className="perp-quality-grid">
       <section><h4>市值与 FDV <small>USD</small></h4><dl><div><dt>市值</dt><dd>{usd(asset?.marketCapUsd)}</dd></div><div><dt>完全稀释估值 / FDV</dt><dd>{usd(asset?.fdvUsd)}</dd></div><div><dt>市值 / FDV</dt><dd>{share(dilution)}</dd></div></dl><p>{asset ? <><a href={`https://www.coingecko.com/en/coins/${encodeURIComponent(asset.coinId)}`} target="_blank" rel="noopener noreferrer">{asset.name}</a> · CoinGecko · {stamp(asset.updatedAt)}</> : report?.assetErrors[row.base] || "市值资料采集中"}</p>{asset && (!asset.updatedAt || now - asset.updatedAt > 3_600_000) ? <p className="perp-quality-warning">市值资料已过期，未计入评分</p> : null}</section>
@@ -142,11 +147,13 @@ function QuoteDetails({ quotes, venues, mode, now, staleAfterMs, standalone = fa
 }
 
 function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: boolean }) {
+  const [workspace, setWorkspace] = useState<"opportunities" | "positions">("opportunities");
+  const opportunitiesActive = active && workspace === "opportunities";
   const [inspection, setInspection] = useState<{ key: string; base: string; snapshot: PerpetualSnapshot; ranking: PerpetualSpread[]; page: number } | null>(null);
   // Leaving this monitor releases the captured view before its next activation.
   if (!active && inspection) setInspection(null);
-  const paused = active && inspection !== null;
-  const { data: liveData, connection, error, now, refresh } = usePerpetualFeed(active, paused);
+  const paused = opportunitiesActive && inspection !== null;
+  const { data: liveData, connection, error, now, refresh } = usePerpetualFeed(opportunitiesActive, paused);
   const data = paused ? inspection.snapshot : liveData;
   const [filters, setFilters] = useState<PerpetualFilters>(defaultPerpetualFilters);
   const [preferencesReady, setPreferencesReady] = useState(false);
@@ -170,30 +177,30 @@ function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: 
   const selected = useMemo(() => filters.exchanges === null ? null : new Set(filters.exchanges), [filters.exchanges]);
   const favorites = useMemo(() => new Set(filters.favorites), [filters.favorites]);
   const favoritePairs = useMemo(() => new Set(filters.favoritePairs ?? []), [filters.favoritePairs]);
-  const { data: fx, error: fxError } = usePerpetualFx(active && filters.crossCurrency && !paused);
+  const { data: fx, error: fxError } = usePerpetualFx(opportunitiesActive && filters.crossCurrency && !paused);
   const netSort = filters.sortBy === "net";
   const selectRanking = useMemo(() => createPerpetualRankingSelector(), []);
   const selectQuotes = useMemo(() => createPerpetualQuoteSelector(), []);
   const rankingFilters = useMemo(() => ({ ...filters, search }), [filters, search]);
-  const ranking = useMemo(() => paused ? inspection.ranking : active && view === "rank" && data && now ? selectRanking(data, rankingFilters, now, qualityBudget, fx) : emptySpreads, [paused, inspection, active, view, data, rankingFilters, now, selectRanking, qualityBudget, fx]);
+  const ranking = useMemo(() => paused ? inspection.ranking : opportunitiesActive && view === "rank" && data && now ? selectRanking(data, rankingFilters, now, qualityBudget, fx) : emptySpreads, [paused, inspection, opportunitiesActive, view, data, rankingFilters, now, selectRanking, qualityBudget, fx]);
   const quoteSelection = useMemo(() => selectQuotes(quotes, rankingFilters), [quotes, rankingFilters, selectQuotes]);
   const availableBases = quoteSelection.baseCount;
   const liveExchanges = exchanges.filter(exchange => exchange.status === "live").length;
   const quoteQuality = useMemo(() => {
     const counts = { stale: 0, unavailable: 0 };
-    if (!active || !now) return counts;
+    if (!opportunitiesActive || !now) return counts;
     for (const key of quoteSelection.keys) {
       const status = classifyPerpetualQuote(quoteSelection.byKey.get(key)!, filters.priceMode, now, data?.staleAfterMs ?? 30_000);
       if (status !== "fresh") counts[status]++;
     }
     return counts;
-  }, [active, quoteSelection, filters.priceMode, now, data?.staleAfterMs]);
+  }, [opportunitiesActive, quoteSelection, filters.priceMode, now, data?.staleAfterMs]);
   const totalItems = view === "rank" ? ranking.length : quoteSelection.keys.length;
   const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
   const visiblePage = paused ? inspection.page : Math.min(page, totalPages);
   const rows = useMemo(() => ranking.slice((visiblePage - 1) * pageSize, visiblePage * pageSize), [ranking, visiblePage]);
   const qualityPairs = useMemo(() => rows.map(row => ({ base: row.base, longKey: `${row.long.exchange}:${row.long.symbol}`, shortKey: `${row.short.exchange}:${row.short.symbol}`, ...(perpetualSpreadKey(row) === expanded ? { includeSeries: true } : {}) })), [rows, expanded]);
-  const { report: qualityReport, loading: qualityLoading, error: qualityError } = usePerpetualQuality(qualityPairs, active && view === "rank");
+  const { report: qualityReport, loading: qualityLoading, error: qualityError } = usePerpetualQuality(qualityPairs, opportunitiesActive && view === "rank");
   const qualities = useMemo(() => new Map(rows.map(row => [qualityPairKey(row), evaluateOpportunityQuality(row, qualityReport, now, qualityBudget, filters.priceMode)])), [rows, qualityReport, now, qualityBudget, filters.priceMode]);
   const quoteRows = view === "quotes" ? quoteSelection.keys.slice((visiblePage - 1) * pageSize, visiblePage * pageSize).map(key => quoteSelection.byKey.get(key)!) : emptyQuotes;
   const detailQuotes = useMemo(() => expandedBase ? quotes.filter(quote => quote.base === expandedBase && (!selected || selected.has(quote.exchange))) : [], [quotes, expandedBase, selected]);
@@ -276,7 +283,9 @@ function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: 
   const emptyMessage = !data ? "正在获取交易所与合约报价…" : data.status === "unavailable" ? "采集服务启动后，这里会显示实时合约价差。" : quotes.length === 0 ? "交易所正在连接，收到首批有效报价后自动更新。" : selected && selected.size < 2 ? "请至少选择两家交易所。" : filters.favoritesOnly && favorites.size + favoritePairs.size === 0 ? "点击组合旁的星标加入自选，再回来查看。" : netSort && filters.priceMode === "mark" ? "标记价仅供参考。切换买卖盘口可查看净价差排名。" : netSort ? "没有达到净价差阈值的组合；费用或汇率缺失的组合不计入。可降低阈值或切换毛价差核对。" : "当前筛选下没有有效价差。可以降低阈值、增加平台或切换报价口径。";
 
   return <section className="perpetual-panel" aria-label="CEX 与 DEX 合约价差监控">
-    <header className="perp-heading"><div><h2>合约价差</h2><p>发现组合，核对成本与成交条件</p></div><div className="perp-heading-actions"><button className="perp-refresh" type="button" aria-expanded={healthOpen} onClick={() => setHealthOpen(value => !value)}><Activity size={15}/>报价健康</button><button className="perp-refresh" type="button" aria-expanded={alertsOpen} onClick={() => { setAlertsVisited(true); setAlertsOpen(value => !value); }}><Bell size={15}/>机会提醒</button><button className="perp-refresh" type="button" onClick={() => paused ? setInspection(null) : refresh()} disabled={!paused && connection === "paused"}><RefreshCw size={15}/>{paused ? "收起并恢复" : "刷新"}</button></div></header>
+    <header className="perp-heading"><div><h2>合约价差</h2><p>发现组合，核对成本与成交条件</p></div><div className="perp-heading-actions" hidden={workspace === "positions"}><button className="perp-refresh" type="button" aria-expanded={healthOpen} onClick={() => setHealthOpen(value => !value)}><Activity size={15}/>报价健康</button><button className="perp-refresh" type="button" aria-expanded={alertsOpen} onClick={() => { setAlertsVisited(true); setAlertsOpen(value => !value); }}><Bell size={15}/>机会提醒</button><button className="perp-refresh" type="button" onClick={() => paused ? setInspection(null) : refresh()} disabled={!paused && connection === "paused"}><RefreshCw size={15}/>{paused ? "收起并恢复" : "刷新"}</button></div></header>
+    <nav className="perp-workspace-nav" aria-label="合约价差工作区"><button type="button" aria-current={workspace === "opportunities" ? "page" : undefined} onClick={() => setWorkspace("opportunities")}>发现机会</button><button id="perp-positions-tab" type="button" aria-current={workspace === "positions" ? "page" : undefined} onClick={() => { setInspection(null); setWorkspace("positions"); }}>持仓跟踪</button></nav>
+    {workspace === "positions" ? <PerpetualPaper active={active}/> : <>
     <div className="perp-health"><div className={`perp-connection ${expired || error || data?.status === "unavailable" ? "is-warning" : ""}`} role="status"><i aria-hidden="true"/>{statusText}<span>{transportText}</span></div><span>覆盖 <b>{data ? availableBases : "—"}</b> 币种 <span className="perp-health-divider">/</span> {expired ? "上次状态：" : ""}<b>{liveExchanges}</b> / {exchanges.length || "—"} 平台在线</span></div>
     {problem ? <div className="perp-notice" role="status">{problem}</div> : null}
     {data?.storageError ? <div className="perp-notice" role="status">快照保存异常：{data.storageError}</div> : null}
@@ -307,7 +316,7 @@ function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: 
     <div className="perp-basis"><span>WS 优先 · 快照补充</span><span>{filters.crossCurrency ? "跨计价币 · 现货买卖价换算至 USDT" : "仅比较相同计价币"}</span><span>{filters.priceMode === "book" ? "毛价差未扣手续费与滑点" : "标记价仅供估值参考，不代表可成交价格"}</span>{quoteQuality.stale ? <button type="button" className="perp-stale-count perp-inline-button" onClick={() => setHealthOpen(true)}>{quoteQuality.stale} 条报价过期 · 查看原因</button> : null}{quoteQuality.unavailable ? <span>{quoteQuality.unavailable} 条{filters.priceMode === "book" ? "暂无有效盘口" : "暂无标记价"}</span> : null}</div>
     {view === "rank" ? <>
       <PerpetualFeeSettings budget={qualityBudget} onChange={next => { setInspection(null); setQualityBudget(next); }}/>
-      <div className="perp-quality-caption"><span>聚合质量：市值 / FDV、官方多空比与历史稳定度</span><span>{qualityLoading ? "质量资料更新中 · 保留已获取资料" : qualityReport ? `最近读取 ${stamp(qualityReport.generatedAt)} · 各项按来源时间判断有效性` : "质量资料采集中"}</span></div>
+      <div className="perp-quality-caption"><span>分别核对：价差持续性、报价收窄证据与资金费收支</span><span>{qualityLoading ? "质量资料更新中 · 保留已获取资料" : qualityReport ? `最近读取 ${stamp(qualityReport.generatedAt)} · 各项按来源时间判断有效性` : "质量资料采集中"}</span></div>
       {qualityError || qualityReport?.error ? <p className="perp-quality-notice" role="status">{qualityError || qualityReport?.error}</p> : null}
     </> : null}
     {filters.crossCurrency ? <p className="perp-currency-warning">{fxError || (fx ? `汇率快照 ${stamp(fx.generatedAt)} · 仅纳入有新鲜买卖汇率的组合；USD 等缺失汇率不假定等于 1。换汇手续费另计。` : "正在读取现货汇率，缺失汇率的跨币组合暂不参与排名。")}</p> : null}
@@ -335,16 +344,17 @@ function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: 
           <td className="perp-expand-cell"><button type="button" aria-label={`${isExpanded ? "收起" : "展开"} ${pairLabel} 质量依据与各平台报价`} aria-expanded={isExpanded} aria-controls={detailId} onClick={() => inspect(row, true)}><ChevronDown size={17}/></button></td>
         </tr>{isExpanded ? <tr className="perp-detail-row" id={detailId}><td colSpan={8}>
           <div className="perp-inspection-bar"><p role="status"><strong>行情已暂停</strong> · 保留 {stamp(data?.generatedAt)} 的排名与报价{expired ? " · 已过期，仅供核对" : ""}</p><button type="button" onClick={() => setInspection(null)}>收起并恢复</button></div>
-          <div className="perp-detail-navigation"><div role="tablist" aria-label="组合详情" onKeyDown={event => { const tabs: DetailTab[] = ["execution", "quality", "quotes"]; const index = tabs.indexOf(detailTab); const next = event.key === "ArrowRight" ? tabs[(index + 1) % 3] : event.key === "ArrowLeft" ? tabs[(index + 2) % 3] : event.key === "Home" ? tabs[0] : event.key === "End" ? tabs[2] : null; if (next) { event.preventDefault(); setDetailTab(next); document.getElementById(`${detailId}-tab-${next}`)?.focus(); } }}>{([{ id: "execution", label: "成交与持有" }, { id: "quality", label: "质量依据" }, { id: "quotes", label: "各平台报价" }] as const).map(tab => <button type="button" role="tab" key={tab.id} id={`${detailId}-tab-${tab.id}`} aria-selected={detailTab === tab.id} tabIndex={detailTab === tab.id ? 0 : -1} aria-controls={`${detailId}-content`} onClick={() => setDetailTab(tab.id)}>{tab.label}</button>)}</div><div className="perp-detail-actions"><button type="button" onClick={() => configureAlert(row)}><Bell size={13}/>设置提醒</button><button type="button" onClick={() => blockPair(row)}><X size={13}/>屏蔽组合</button></div></div>
+          <div className="perp-detail-navigation"><div role="tablist" aria-label="组合详情" onKeyDown={event => { const tabs: DetailTab[] = ["execution", "quality", "exit", "quotes"]; const index = tabs.indexOf(detailTab); const next = event.key === "ArrowRight" ? tabs[(index + 1) % tabs.length] : event.key === "ArrowLeft" ? tabs[(index + tabs.length - 1) % tabs.length] : event.key === "Home" ? tabs[0] : event.key === "End" ? tabs[tabs.length - 1] : null; if (next) { event.preventDefault(); setDetailTab(next); document.getElementById(`${detailId}-tab-${next}`)?.focus(); } }}>{([{ id: "execution", label: "成交与持有" }, { id: "quality", label: "质量依据" }, { id: "exit", label: "平仓与跟踪" }, { id: "quotes", label: "各平台报价" }] as const).map(tab => <button type="button" role="tab" key={tab.id} id={`${detailId}-tab-${tab.id}`} aria-selected={detailTab === tab.id} tabIndex={detailTab === tab.id ? 0 : -1} aria-controls={`${detailId}-content`} onClick={() => setDetailTab(tab.id)}>{tab.label}</button>)}</div><div className="perp-detail-actions"><button type="button" onClick={() => configureAlert(row)}><Bell size={13}/>设置提醒</button><button type="button" onClick={() => blockPair(row)}><X size={13}/>屏蔽组合</button></div></div>
           <div role="tabpanel" id={`${detailId}-content`} aria-labelledby={`${detailId}-tab-${detailTab}`} className="perp-detail-content">
-            {detailTab === "execution" ? <><PerpetualExecution long={row.long} short={row.short} active={active} now={now}/><PerpetualHolding row={row} budget={qualityBudget} now={now} mode={filters.priceMode}/><PerpetualTrend history={history} now={now} crossCurrency={row.crossCurrency}/></> : detailTab === "quality" ? <QualityEvidence row={row} report={qualityReport} quality={quality} venues={venues} now={now} slippagePercent={qualityBudget.slippagePercent}/> : <QuoteDetails quotes={detailQuotes} venues={venues} mode={filters.priceMode} now={now} staleAfterMs={data?.staleAfterMs ?? 30_000}/>}
+            {detailTab === "execution" ? <><PerpetualExecution long={row.long} short={row.short} active={active} now={now}/><PerpetualHolding row={row} budget={qualityBudget} now={now} mode={filters.priceMode}/><PerpetualTrend history={history} now={now} crossCurrency={row.crossCurrency}/></> : detailTab === "quality" ? <QualityEvidence row={row} report={qualityReport} quality={quality} venues={venues} now={now} slippagePercent={qualityBudget.slippagePercent}/> : detailTab === "exit" ? <PerpetualExit long={row.long} short={row.short} budget={qualityBudget} active={opportunitiesActive} now={now} onRegistered={() => { setInspection(null); setWorkspace("positions"); document.getElementById("perp-positions-tab")?.focus(); }}/> : <QuoteDetails quotes={detailQuotes} venues={venues} mode={filters.priceMode} now={now} staleAfterMs={data?.staleAfterMs ?? 30_000}/>}
           </div>
         </td></tr> : null}</Fragment>;
       })}</tbody></table>
       {!rows.length ? <div className="perp-empty"><span aria-hidden="true">—</span><strong>{!data || data.status === "connecting" ? "等待实时报价" : "暂无符合条件的价差"}</strong><p>{emptyMessage}</p>{quotes.length > 0 ? <button type="button" onClick={resetFilters}>重置筛选</button> : null}</div> : null}
     </div>}
     <div className="perp-pagination"><span>{totalItems ? `${(visiblePage - 1) * pageSize + 1}–${Math.min(visiblePage * pageSize, totalItems)} / ${totalItems} ${view === "rank" ? "组合" : "报价"}` : `0 ${view === "rank" ? "组合" : "报价"}`}<small>每页 {pageSize} 条</small></span><div><button type="button" aria-label="上一页" disabled={visiblePage <= 1} onClick={() => changePage(visiblePage - 1)}><ChevronLeft size={16}/></button><span>{visiblePage} / {totalPages}</span><button type="button" aria-label="下一页" disabled={visiblePage >= totalPages} onClick={() => changePage(visiblePage + 1)}><ChevronRight size={16}/></button></div></div>
-    <details className="perp-method"><summary>计算口径与数据时间</summary><p>毛价差 =（做空平台价格 ÷ 做多平台价格 − 1）× 100%。买卖盘口取买入卖一、卖出买一；标记价格取两平台标记价。做多与做空必须来自不同在线平台，两腿价格时间相差不超过 5 秒；同一币种的所有有效平台与合约组合分别参与排名，按所选毛价差或净价差从高到低排列。净价差扣除双腿 taker 往返费与滑点预算，尚未计持有期资金费和退出价差；缺失费率的组合不参与净排序。</p><p>资金费差 = 做空腿费率 × 8 ÷ 该腿周期小时数 − 做多腿费率 × 8 ÷ 该腿周期小时数。正值表示按当前费率估算的净收入，负值为净支出；不是已结算收益。资金费或实际周期缺失、超过 5 分钟未更新时显示「—」。</p><p>价格超过 {(data?.staleAfterMs ?? 30_000) / 1000} 秒未更新会退出排名，成交价不会代替缺失盘口。报价时间取两腿较早的价格时间，所有时钟均为北京时间。毛价差未计手续费、滑点、深度和资金费；跨平台对冲仍存在成交差异。</p><p>聚合质量权重：市值 20%、市值 / FDV 15%、官方多空拥挤度 15%、近 1 小时盘口价差稳定度 30%、近 24 小时预估资金费稳定度 20%。只使用真实采样，缺失项不补零；资料不足时暂不评分，分数不代表盈利概率。质量、手续费和资金费差均对应当前行的做多与做空合约组合；净排序依据为扣费后的估算价差，质量分不代表成交容量。1h 历史偏离仅在至少 30 个有效样本、覆盖不低于 50% 时展示，1 bp = 0.01 个百分点。</p><p>每 5 分钟核对交易所公开合约目录；未标记不代表尚未公告，公开接口信息可能不完整。</p><p>最近快照 {stamp(data?.generatedAt)}。展开详情时保留当前列表、页码、平台组合及报价，并暂停本页行情接收；来源时间继续计时，过期值仅供核对。收起、翻页或修改筛选后恢复，后台采集与低频质量资料查询继续运行。页面隐藏或切换监控后暂停接收，返回立即刷新；实时推送中断时自动切换为每 5 秒快照，并尝试恢复推送。</p></details>
+    <details className="perp-method"><summary>计算口径与数据时间</summary><p>毛价差 =（做空平台价格 ÷ 做多平台价格 − 1）× 100%。买卖盘口取买入卖一、卖出买一；标记价格取两平台标记价。做多与做空必须来自不同在线平台，两腿价格时间相差不超过 5 秒；同一币种的所有有效平台与合约组合分别参与排名，按所选毛价差或净价差从高到低排列。净价差扣除双腿 taker 往返费与滑点预算，尚未计持有期资金费和退出价差；缺失费率的组合不参与净排序。</p><p>资金费差 = 做空腿费率 × 8 ÷ 该腿周期小时数 − 做多腿费率 × 8 ÷ 该腿周期小时数。正值表示按当前费率估算的净收入，负值为净支出；不是已结算收益。资金费或实际周期缺失、超过 5 分钟未更新时显示「—」。</p><p>价格超过 {(data?.staleAfterMs ?? 30_000) / 1000} 秒未更新会退出排名，成交价不会代替缺失盘口。报价时间取两腿较早的价格时间，所有时钟均为北京时间。毛价差未计手续费、滑点、深度和资金费；跨平台对冲仍存在成交差异。</p><p>筛选分权重：市值、市值 / FDV、官方多空拥挤度各 10%，近 1 小时价差持续性 10%，近 24 小时报价收窄证据 40%，资金费收入方向 20%。价差持续存在不代表会收窄；冷启动收窄统计至少积累 12 小时，且需 6 个完整 1h 窗口。只使用真实采样，缺失项不补零；资料不足时暂不评分，分数不代表盈利概率。质量、手续费和资金费差均对应当前行的做多与做空合约组合；净排序依据为扣费后的估算价差，质量分不代表成交容量。1h 历史偏离仅在至少 30 个有效样本、覆盖不低于 50% 时展示，1 bp = 0.01 个百分点。</p><p>每 5 分钟核对交易所公开合约目录；未标记不代表尚未公告，公开接口信息可能不完整。</p><p>最近快照 {stamp(data?.generatedAt)}。展开详情时保留当前列表、页码、平台组合及报价，并暂停本页行情接收；来源时间继续计时，过期值仅供核对。收起、翻页或修改筛选后恢复，后台采集与低频质量资料查询继续运行。页面隐藏或切换监控后暂停接收，返回立即刷新；实时推送中断时自动切换为每 5 秒快照，并尝试恢复推送。</p></details>
+    </>}
   </section>;
 }
 
