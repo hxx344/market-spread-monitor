@@ -49,7 +49,9 @@ async function sharedState() {
   assert.equal(response.status, 200); return response.json();
 }
 async function databaseMarker(write = false) {
+  // The installed collector is live; give its short write transaction time to finish.
   const script = `import { DatabaseSync } from 'node:sqlite'; const db=new DatabaseSync('/var/lib/market-spread-monitor/market.sqlite');
+    db.exec('PRAGMA busy_timeout=5000');
     if(process.argv[1]==='write') db.prepare('INSERT OR IGNORE INTO market_observations(dataset,time,payload,source_ms) VALUES (?,?,?,?)').run('install/retention',1,'persisted',1);
     console.log(db.prepare('SELECT payload FROM market_observations WHERE dataset=? AND time=?').get('install/retention',1)?.payload); db.close();`;
   return (await run('sudo', [process.execPath, '--input-type=module', '-e', script, write ? 'write' : 'read'])).stdout.trim();
