@@ -31,14 +31,19 @@ async function request(url, options, fetchImpl, signal) {
   return response.json();
 }
 
-export async function discoverAdditionalMarkets(exchangeId, { fetchImpl = fetch, signal } = {}) {
+export async function discoverAdditionalMarkets(exchangeId, { fetchImpl = fetch, signal, now = Date.now() } = {}) {
   if (exchangeId === 'rh-lighter') {
     const data = await request(`${RH_API}/api/v1/orderBookDetails`, {}, fetchImpl, signal);
     if (data.code !== 200 || !Array.isArray(data.order_book_details)) throw new Error('rh-Lighter 合约目录格式异常');
     return data.order_book_details.filter(item => item.market_type === 'perp' && item.status === 'active' && Number.isInteger(item.market_id) && typeof item.symbol === 'string' && item.symbol.length > 0).map(item => {
       const share = RH_EQUITIES.has(item.symbol), crypto = RH_CRYPTO.has(item.symbol), preipo = RH_PREIPO.has(item.symbol);
       const base = share ? `EQUITY:${item.symbol}` : crypto ? item.symbol : `RH-LIGHTER:${item.symbol}:${preipo ? 'PREIPO' : 'CONTRACT'}`;
-      return { id: `rh-lighter:${item.symbol}`, exchange: 'rh-lighter', symbol: item.symbol, base, displayBase: item.symbol, quoteCurrency: 'USDG', collateralCurrency: 'USDG', multiplier: 1, fundingIntervalHours: 1, marketId: item.market_id, contractUnit: share ? '每股' : crypto ? '每枚' : preipo ? '平台独立 Pre-IPO 规格' : 'rh-Lighter 独立合约规格', comparable: share || crypto };
+      // The public directory reports percentage units for the Standard tier.
+      // Premium/Plus account fees are different and require an account override.
+      // https://apidocs.rh.lighter.xyz/reference/orderbooks
+      const feePercent = finite(item.taker_fee);
+      const takerFeeRate = feePercent !== null && feePercent >= 0 && feePercent <= 10 ? feePercent / 100 : null;
+      return { id: `rh-lighter:${item.symbol}`, exchange: 'rh-lighter', symbol: item.symbol, base, displayBase: item.symbol, quoteCurrency: 'USDG', collateralCurrency: 'USDG', multiplier: 1, fundingIntervalHours: 1, marketId: item.market_id, contractUnit: share ? '每股' : crypto ? '每枚' : preipo ? '平台独立 Pre-IPO 规格' : 'rh-Lighter 独立合约规格', comparable: share || crypto, takerFeeRate, takerFeeAt: takerFeeRate === null ? null : now, takerFeeSource: takerFeeRate === null ? null : 'rh-lighter-standard' };
     });
   }
   if (exchangeId === 'entropy') {
@@ -46,9 +51,16 @@ export async function discoverAdditionalMarkets(exchangeId, { fetchImpl = fetch,
     if (!Array.isArray(data.universe) || data.collateralToken !== 0) throw new Error('Entropy 合约目录或抵押资产发生变化');
     return data.universe.filter(item => !item.isDelisted && typeof item.name === 'string' && /^io:[A-Za-z0-9._-]+$/.test(item.name)).map(item => {
       const symbol = item.name, displayBase = symbol.slice(3), share = ENTROPY_EQUITIES.has(displayBase), preipo = ['OAI', 'ANTH'].includes(displayBase);
+      // Tier-0 API fees on USDC collateral; market-specific deployer and growth
+      // multipliers are read from the existing directory, never assumed.
+      // https://hyperliquid.gitbook.io/hyperliquid-docs/trading/fees
+      const deployerScale = finite(item.deployerFeeScale);
+      const knownGrowth = item.growthMode === 'enabled' || item.growthMode === 'disabled';
+      const takerFeeRate = deployerScale !== null && deployerScale >= 0 && deployerScale <= 3 && knownGrowth
+        ? 0.00045 * (deployerScale < 1 ? 1 + deployerScale : 2 * deployerScale) * (item.growthMode === 'enabled' ? 0.1 : 1) : null;
       // New markets and market-cap contracts must not collide with unrelated CEX
       // tokens or similarly named per-share products. Review their specs first.
-      return { id: `entropy:${symbol}`, exchange: 'entropy', symbol, base: share ? `EQUITY:${displayBase}` : `ENTROPY:${displayBase}:${preipo ? 'MARKETCAP' : 'CONTRACT'}`, displayBase, quoteCurrency: 'USDC', collateralCurrency: 'USDC', multiplier: 1, fundingIntervalHours: 1, dex: 'io', contractUnit: share ? '每股' : preipo ? '每 1 美元报价代表 10 亿美元市值' : 'Entropy 独立合约规格', comparable: share };
+      return { id: `entropy:${symbol}`, exchange: 'entropy', symbol, base: share ? `EQUITY:${displayBase}` : `ENTROPY:${displayBase}:${preipo ? 'MARKETCAP' : 'CONTRACT'}`, displayBase, quoteCurrency: 'USDC', collateralCurrency: 'USDC', multiplier: 1, fundingIntervalHours: 1, dex: 'io', contractUnit: share ? '每股' : preipo ? '每 1 美元报价代表 10 亿美元市值' : 'Entropy 独立合约规格', comparable: share, takerFeeRate, takerFeeAt: takerFeeRate === null ? null : now, takerFeeSource: takerFeeRate === null ? null : 'entropy-standard' };
     });
   }
   throw new Error(`不支持的合约平台: ${exchangeId}`);

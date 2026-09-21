@@ -9,7 +9,9 @@ export const PERPETUAL_STALE_MS = 30_000;
 const MAX_FUTURE_MS = 5_000;
 const fields = ['bid', 'ask', 'mark', 'last', 'fundingRate', 'fundingIntervalHours', 'nextFundingAt'];
 const priceFields = new Set(['bid', 'ask', 'mark', 'last']);
-const streamValueFields = [...fields, 'base', 'quoteCurrency', 'multiplier', 'displayBase', 'contractUnit', 'collateralCurrency', 'comparable', 'transport', 'delisting', 'delistingAt'];
+const feeFields = ['takerFeeRate', 'takerFeeAt', 'takerFeeSource'];
+const catalogFields = new Set(['delisting', 'delistingAt', ...feeFields]);
+const streamValueFields = [...fields, 'base', 'quoteCurrency', 'multiplier', 'displayBase', 'contractUnit', 'collateralCurrency', 'comparable', 'transport', ...catalogFields];
 const streamTimeFields = ['bidAt', 'askAt', 'bidAskAt', 'markAt', 'lastAt', 'fundingAt', 'fundingIntervalHoursUpdatedAt', 'nextFundingAtUpdatedAt', 'receivedAt', 'sourceTime'];
 
 /** Only changed fields cross the wire. The retained baseline is exactly what readers received. */
@@ -95,10 +97,19 @@ export function mergePerpetualQuote(previous, update, now = Date.now()) {
   return next;
 }
 
-function withLifecycle(quote, market) {
+function withMarketMetadata(quote, market) {
   const delisting = market?.delisting === true;
   const delistingAt = delisting && Number.isSafeInteger(market.delistingAt) && market.delistingAt > 0 && market.delistingAt <= 8.64e15 ? market.delistingAt : null;
-  return quote.delisting === delisting && quote.delistingAt === delistingAt ? quote : { ...quote, delisting, delistingAt };
+  const sameLifecycle = quote.delisting === delisting && quote.delistingAt === delistingAt;
+  // Fee metadata has its own age. It must propagate without a new ticker and
+  // never confirm an old book. The normal per-tick path allocates nothing.
+  if (market?.takerFeeRate === undefined && market?.takerFeeAt === undefined && market?.takerFeeSource === undefined
+    && quote.takerFeeRate === undefined && quote.takerFeeAt === undefined && quote.takerFeeSource === undefined) return sameLifecycle ? quote : { ...quote, delisting, delistingAt };
+  const takerFeeRate = Number.isFinite(market?.takerFeeRate) && market.takerFeeRate >= 0 && market.takerFeeRate <= 0.1 ? market.takerFeeRate : null;
+  const takerFeeAt = takerFeeRate !== null && Number.isSafeInteger(market?.takerFeeAt) && market.takerFeeAt > 0 && market.takerFeeAt <= 8.64e15 ? market.takerFeeAt : null;
+  const takerFeeSource = typeof market?.takerFeeSource === 'string' ? market.takerFeeSource : null;
+  return sameLifecycle && quote.takerFeeRate === takerFeeRate && quote.takerFeeAt === takerFeeAt && quote.takerFeeSource === takerFeeSource
+    ? quote : { ...quote, delisting, delistingAt, takerFeeRate, takerFeeAt, takerFeeSource };
 }
 
 export function createPerpetualService({ store, exchanges = EXCHANGES, discover = discoverMarkets, subscriptions = createSubscriptions, parse = parseMessage, control = getControlResponse, WebSocketImpl = PerpetualWebSocket, clock = Date.now, staleAfterMs = PERPETUAL_STALE_MS, retryMs = 5_000, discoveryIntervalMs = 5 * 60_000, saveIntervalMs = 15_000, broadcastIntervalMs = 1_000, watchdogIntervalMs = 10_000, quoteTimeoutMs = 45_000, qualityOptions } = {}) {
@@ -173,7 +184,7 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
         }
         const key = `${exchange}:${update.symbol}`, previous = quotes.get(key), next = mergePerpetualQuote(previous, transport === 'rest' ? { ...update, transport } : update, now);
         if (next && next !== previous) {
-          const current = withLifecycle(next, state.markets?.get(update.symbol));
+          const current = withMarketMetadata(next, state.markets?.get(update.symbol));
           metrics.updates++; quotes.set(key, current); dirty.set(key, current);
           if (transport === 'ws') connection.lastQuoteAt = now;
           state.lastMessageAt = now; state.error = null; attempt = 0;
@@ -278,14 +289,14 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
         if (!specs.length) throw new Error('No subscriptions');
         state.marketCount = markets.length;
         // Funding intervals, contract multipliers and channel IDs may change while symbols stay the same.
-        // Lifecycle notices must reach readers even without a new price, and
+        // Lifecycle and fee metadata must reach readers even without a new price, and
         // must not tear down subscriptions or refresh the original price times.
         const identities = new Map(markets.map(market => [market.symbol, market]));
-        const signature = JSON.stringify([...markets].sort((left, right) => left.symbol.localeCompare(right.symbol)), (key, value) => key === 'delisting' || key === 'delistingAt' ? undefined : value);
+        const signature = JSON.stringify([...markets].sort((left, right) => left.symbol.localeCompare(right.symbol)), (key, value) => catalogFields.has(key) ? undefined : value);
         state.markets = identities;
         for (const [key, quote] of quotes) {
           if (quote.exchange !== exchange || !identities.has(quote.symbol)) continue;
-          const current = withLifecycle(quote, identities.get(quote.symbol));
+          const current = withMarketMetadata(quote, identities.get(quote.symbol));
           if (current !== quote) { quotes.set(key, current); dirty.set(key, current); }
         }
         if (signature === state.signature) return;

@@ -229,6 +229,62 @@ test('lifecycle discovery updates, persists and clears notices without reconnect
   assert.equal(cleared.delisting, false); assert.equal(cleared.delistingAt, null);
 });
 
+test('catalog taker fees update per contract and clear independently without reconnecting or confirming old prices', async t => {
+  let now = 1000, fail = false, attempts = 0;
+  let catalog = { takerFeeRate: 0.0006, takerFeeAt: now, takerFeeSource: 'bitget-contract' };
+  const { service, sockets, saved } = setup({ clock: () => now, discoveryIntervalMs: 20,
+    discover: async () => {
+      attempts++; if (fail) throw Error('offline');
+      return [{ ...update(), ...catalog }, update({ symbol: 'ETHUSDT', base: 'ETH', takerFeeRate: 0, takerFeeAt: 1000, takerFeeSource: 'bitget-contract' }), update({ symbol: 'UNKNOWNUSDT', base: 'UNKNOWN' })];
+    },
+  });
+  t.after(() => service.stop()); service.start(); await until(() => sockets.length === 1);
+  sockets[0].open(); sockets[0].message([update(), update({ symbol: 'ETHUSDT', base: 'ETH' }), update({ symbol: 'UNKNOWNUSDT', base: 'UNKNOWN' })]);
+  const original = service.snapshot().quotes[0];
+  assert.equal(original.takerFeeRate, 0.0006);
+  assert.equal(service.snapshot().quotes[1].takerFeeRate, 0, 'An explicit zero is a real published fee');
+  assert.equal(Object.hasOwn(service.snapshot().quotes[2], 'takerFeeRate'), false, 'Unrelated venues need no empty fee fields');
+  const baseline = new Map([['test:BTCUSDT', original]]), deltaBaseline = new Map(baseline);
+
+  now = 32000; catalog = { ...catalog, takerFeeRate: 0.0008, takerFeeAt: now };
+  await until(() => service.snapshot().quotes[0].takerFeeRate === 0.0008);
+  const changed = service.snapshot().quotes[0];
+  assert.equal(changed.bidAskAt, original.bidAskAt); assert.equal(changed.receivedAt, original.receivedAt);
+  assert.equal(changed.sourceTime, original.sourceTime);
+  assert.equal(service.snapshot().exchanges[0].status, 'stale');
+  assert.equal(sockets.length, 1);
+  const patch = createPerpetualPatch(service.snapshot(), baseline).patches.find(([key]) => key === 'test:BTCUSDT')[1];
+  assert.equal(patch.takerFeeRate, 0.0008); assert.equal(patch.takerFeeAt, now);
+  assert.equal(Object.hasOwn(patch, 'bidAskAt'), false);
+  assert.equal(createPerpetualDelta(service.snapshot(), deltaBaseline).updates.find(quote => quote.symbol === 'BTCUSDT').takerFeeRate, 0.0008);
+  await until(() => saved.some(quote => quote.symbol === 'BTCUSDT' && quote.takerFeeRate === 0.0008));
+
+  // Rechecking the same fee confirms only its own timestamp.
+  now++; catalog = { ...catalog, takerFeeAt: now };
+  await until(() => service.snapshot().quotes[0].takerFeeAt === now);
+  const timePatch = createPerpetualPatch(service.snapshot(), baseline).patches.find(([key]) => key === 'test:BTCUSDT')[1];
+  assert.deepEqual(timePatch, { takerFeeAt: now, receivedAt: 1000 });
+  assert.equal(createPerpetualDelta(service.snapshot(), deltaBaseline).updates.find(quote => quote.symbol === 'BTCUSDT').takerFeeAt, now);
+  assert.equal(sockets.length, 1);
+
+  sockets[0].message([update({ sourceTime: now, takerFeeRate: 0.1, takerFeeAt: now + 1000 })]);
+  assert.equal(service.snapshot().quotes[0].takerFeeRate, 0.0008, 'Old subscription contexts cannot override the current catalog');
+  fail = true; const before = attempts;
+  await until(() => attempts > before);
+  assert.equal(service.snapshot().quotes[0].takerFeeAt, now, 'An unavailable directory cannot confirm a cached fee');
+
+  fail = false; catalog = { takerFeeRate: null, takerFeeAt: null, takerFeeSource: 'bitget-contract' };
+  await until(() => service.snapshot().quotes[0].takerFeeRate === null);
+  const cleared = createPerpetualPatch(service.snapshot(), baseline).patches.find(([key]) => key === 'test:BTCUSDT')[1];
+  assert.equal(cleared.takerFeeRate, null); assert.equal(cleared.takerFeeAt, null);
+  assert.equal(sockets.length, 1);
+
+  catalog = {};
+  await until(() => service.snapshot().quotes[0].takerFeeSource === null);
+  assert.equal(service.snapshot().quotes[0].takerFeeRate, null);
+  assert.equal(sockets.length, 1, 'Removing all fee fields is also a metadata-only change');
+});
+
 test('slow SSE clients resynchronize with a full frame after missing a delta', async t => {
   let now = 1000;
   const { service, sockets } = setup({ clock: () => now });

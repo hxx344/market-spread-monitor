@@ -50,6 +50,24 @@ function market(exchange, symbol, rawBase, quoteCurrency, extra = {}) {
   return { id: `${exchange}:${symbol}`, exchange, symbol, rawBase, ...normalizeUnderlying(rawBase, exchange), quoteCurrency, delisting: false, delistingAt: null, ...extra };
 }
 
+function takerMetadata(value, source, now, scale = 1) {
+  const parsed = number(value);
+  const takerFeeRate = parsed !== null && parsed >= 0 && parsed / scale <= 0.1 ? parsed / scale : null;
+  return { takerFeeRate, takerFeeAt: takerFeeRate === null ? null : now, takerFeeSource: source };
+}
+
+/** Retail VIP0 rates; fee-group-info contains Pro/MM schedules instead.
+ * Innovation contracts have a separate schedule, e.g. AKEUSDT. TradFi and
+ * unknown categories must not silently inherit the normal crypto fee.
+ * https://www.bybit.com/en/help-center/article/Trading-Fee-Structure
+ * https://bybit-exchange.github.io/docs/v5/market/instrument
+ */
+function bybitTakerMetadata(row, now) {
+  const type = String(row.symbolType ?? '').toLowerCase();
+  const rate = type === 'innovation' ? 0.0011 : ['', 'crypto'].includes(type) ? 0.00055 : null;
+  return takerMetadata(rate, 'bybit-standard', now);
+}
+
 /** Explicit perpetual delisting metadata from the existing bulk directories.
  * Missing metadata means no published signal in this feed, not a guarantee.
  * Binance/Aster deliveryDate is milliseconds; 4133404800000 is their exact
@@ -151,7 +169,7 @@ async function request(url, { fetchImpl, signal }, body) {
 
 /** Dynamic discovery includes active, stablecoin quoted perpetual contracts only. */
 export async function discoverMarkets(exchangeId, { fetchImpl = fetch, signal, now = Date.now() } = {}) {
-  const options = { fetchImpl, signal };
+  const options = { fetchImpl, signal, now };
   if (ADDITIONAL_IDS.has(exchangeId)) return discoverAdditionalMarkets(exchangeId, options);
   let rows;
   if (exchangeId === 'binance' || exchangeId === 'aster') {
@@ -164,13 +182,19 @@ export async function discoverMarkets(exchangeId, { fetchImpl = fetch, signal, n
     const fundingBySymbol = new Map((funding || []).map(row => [row.symbol, number(row.fundingIntervalHours, true)]));
     rows = assertArray(symbolsResult.value.symbols, exchangeId)
       .filter(row => row.status === 'TRADING' && row.contractType === 'PERPETUAL' && STABLE_QUOTES.has(row.quoteAsset) && row.marginAsset === row.quoteAsset)
-      .map(row => market(exchangeId, row.symbol, row.baseAsset, row.quoteAsset, {
-        ...classifyMarketIdentity(exchangeId, row.baseAsset, row),
-        ...delistingMetadata(exchangeId, row),
-        // Binance fundingInfo lists adjusted intervals; unlisted contracts use 8h.
-        // On a failed metadata read, keep the interval unknown.
-        fundingIntervalHours: fundingBySymbol.get(row.symbol) ?? (exchangeId === 'binance' && funding ? 8 : null),
-      }));
+      .map(row => {
+        const identity = classifyMarketIdentity(exchangeId, row.baseAsset, row);
+        // Aster's published schedules distinguish RWA and USD1 contracts.
+        // https://docs.asterdex.com/trading/perpetuals/fees-and-specs/fees
+        const asterRate = identity.assetClass === 'rwa' ? 0.00009 : identity.assetClass === 'crypto' ? row.quoteAsset === 'USDT' ? 0.0004 : row.quoteAsset === 'USD1' ? 0.00005 : null : null;
+        return market(exchangeId, row.symbol, row.baseAsset, row.quoteAsset, {
+          ...identity, ...delistingMetadata(exchangeId, row),
+          ...(exchangeId === 'aster' ? takerMetadata(asterRate, 'aster-standard', now) : {}),
+          // Binance fundingInfo lists adjusted intervals; unlisted contracts use 8h.
+          // On a failed metadata read, keep the interval unknown.
+          fundingIntervalHours: fundingBySymbol.get(row.symbol) ?? (exchangeId === 'binance' && funding ? 8 : null),
+        });
+      });
   } else if (exchangeId === 'bybit') {
     rows = [];
     let cursor = '';
@@ -179,7 +203,7 @@ export async function discoverMarkets(exchangeId, { fetchImpl = fetch, signal, n
       const data = await request(`https://api.bybit.com/v5/market/instruments-info?category=linear&limit=1000${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, options);
       rows.push(...assertArray(data.result?.list, exchangeId)
         .filter(row => row.status === 'Trading' && row.contractType === 'LinearPerpetual' && !row.isPreListing && STABLE_QUOTES.has(row.quoteCoin) && row.settleCoin === row.quoteCoin)
-        .map(row => market(exchangeId, row.symbol, row.baseCoin, row.quoteCoin, { ...classifyMarketIdentity(exchangeId, row.baseCoin, row), ...delistingMetadata(exchangeId, row), fundingIntervalHours: number(row.fundingInterval, true) === null ? null : Number(row.fundingInterval) / 60 })));
+        .map(row => market(exchangeId, row.symbol, row.baseCoin, row.quoteCoin, { ...classifyMarketIdentity(exchangeId, row.baseCoin, row), ...delistingMetadata(exchangeId, row), ...bybitTakerMetadata(row, now), fundingIntervalHours: number(row.fundingInterval, true) === null ? null : Number(row.fundingInterval) / 60 })));
       cursor = data.result.nextPageCursor || '';
       if (cursor && seen.has(cursor)) throw new Error('Bybit: repeated pagination cursor');
       seen.add(cursor);
@@ -189,13 +213,17 @@ export async function discoverMarkets(exchangeId, { fetchImpl = fetch, signal, n
     const data = await request('https://www.okx.com/api/v5/public/instruments?instType=SWAP', options);
     rows = assertArray(data.data, exchangeId)
       .filter(row => row.state === 'live' && row.instType === 'SWAP' && row.ctType === 'linear' && STABLE_QUOTES.has(row.settleCcy) && row.instId.endsWith(`-${row.settleCcy}-SWAP`))
-      .map(row => market(exchangeId, row.instId, row.ctValCcy || row.instId.split('-')[0], row.settleCcy, { ...classifyMarketIdentity(exchangeId, row.ctValCcy || row.instId.split('-')[0], row), ...delistingMetadata(exchangeId, row) }));
+      .map(row => {
+        const rawBase = row.ctValCcy || row.instId.split('-')[0], identity = classifyMarketIdentity(exchangeId, rawBase, row);
+        const rate = identity.assetClass === 'crypto' && ['4', '5'].includes(String(row.groupId)) ? 0.0005 : null;
+        return market(exchangeId, row.instId, rawBase, row.settleCcy, { ...identity, ...delistingMetadata(exchangeId, row), ...takerMetadata(rate, 'okx-standard', now) });
+      });
   } else if (exchangeId === 'bitget') {
     const results = await Promise.allSettled(['USDT-FUTURES', 'USDC-FUTURES'].map(async productType => {
       const data = await request(`https://api.bitget.com/api/v2/mix/market/contracts?productType=${productType}`, options);
       return assertArray(data.data, exchangeId)
         .filter(row => row.symbolStatus === 'normal' && row.symbolType === 'perpetual' && row.isRwa !== 'YES' && STABLE_QUOTES.has(row.quoteCoin))
-        .map(row => market(exchangeId, row.symbol, row.baseCoin, row.quoteCoin, { productType, ...delistingMetadata(exchangeId, row), fundingIntervalHours: number(row.fundInterval, true) }));
+        .map(row => market(exchangeId, row.symbol, row.baseCoin, row.quoteCoin, { productType, ...delistingMetadata(exchangeId, row), ...takerMetadata(row.takerFeeRate, 'bitget-contract', now), fundingIntervalHours: number(row.fundInterval, true) }));
     }));
     if (results.every(result => result.status === 'rejected')) throw results[0].reason;
     rows = results.flatMap(result => result.status === 'fulfilled' ? result.value : []);
@@ -215,7 +243,9 @@ export async function discoverMarkets(exchangeId, { fetchImpl = fetch, signal, n
     const data = await request('https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails', options);
     rows = assertArray(data.order_book_details, exchangeId)
       .filter(row => row.status === 'active' && row.market_type === 'perp' && Number.isInteger(row.market_id))
-      .map(row => market(exchangeId, row.symbol, row.symbol, 'USDC', { ...classifyMarketIdentity(exchangeId, row.symbol, row), marketId: row.market_id, fundingIntervalHours: 1 }));
+      // Lighter's public market fee fields are percentages, not fractions.
+      // https://apidocs.lighter.xyz/reference/orderbooks
+      .map(row => market(exchangeId, row.symbol, row.symbol, 'USDC', { ...classifyMarketIdentity(exchangeId, row.symbol, row), ...takerMetadata(row.taker_fee, 'lighter-standard', now, 100), marketId: row.market_id, fundingIntervalHours: 1 }));
   } else {
     throw new Error(`Unsupported exchange: ${exchangeId}`);
   }

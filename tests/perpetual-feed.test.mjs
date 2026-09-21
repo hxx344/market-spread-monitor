@@ -18,6 +18,18 @@ test('lifecycle field patches add and remove notices without changing quote ages
   assert.equal(cleared.bid, 100); assert.equal(cleared.bidAskAt, 1000);
 });
 
+test('taker fee metadata patches reach the browser without confirming the quote age', () => {
+  const merge = createPerpetualSnapshotAccumulator();
+  merge({ ...snapshot(1000), streamId: 'fee-test', sequence: 0, quotes: [{ exchange: 'test', symbol: 'BTCUSDT', base: 'BTC', quoteCurrency: 'USDT', bid: 100, bidAskAt: 1000, receivedAt: 1000 }] });
+  const frame = { ...snapshot(32000), type: 'patch', streamId: 'fee-test', baseSequence: 0, sequence: 1, removed: [], patches: [['test:BTCUSDT', { takerFeeRate: 0.0006, takerFeeAt: 32000, takerFeeSource: 'bitget-contract' }]] };
+  const current = merge(frame).quotes[0];
+  assert.equal(current.takerFeeRate, 0.0006); assert.equal(current.takerFeeAt, 32000); assert.equal(current.takerFeeSource, 'bitget-contract');
+  assert.equal(current.bidAskAt, 1000); assert.equal(current.receivedAt, 1000);
+  const cleared = merge({ ...frame, baseSequence: 1, sequence: 2, patches: [['test:BTCUSDT', { takerFeeRate: null, takerFeeAt: null, takerFeeSource: null }]] }).quotes[0];
+  assert.equal(cleared.takerFeeRate, null); assert.equal(cleared.takerFeeAt, null); assert.equal(cleared.takerFeeSource, null);
+  assert.equal(cleared.bid, 100); assert.equal(cleared.bidAskAt, 1000);
+});
+
 function fixture(fetchSnapshot = async () => snapshot(1), options = {}) {
   const streams = [], timers = new Map(), data = [], statuses = [], errors = [];
   let id = 0;

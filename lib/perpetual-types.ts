@@ -42,6 +42,10 @@ export interface PerpetualQuote {
   /** Official venue lifecycle metadata, independent of price freshness. */
   delisting?: boolean;
   delistingAt?: number | null;
+  /** Public ordinary-account taker metadata; not personal commission rates. */
+  takerFeeRate?: number | null;
+  takerFeeAt?: number | null;
+  takerFeeSource?: string | null;
 }
 
 export interface PerpetualSnapshot {

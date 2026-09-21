@@ -12,23 +12,23 @@ const NOW = Math.floor(1_790_000_000_000 / 300_000) * 300_000;
 const quote = (exchange, patch = {}) => ({ exchange, symbol: 'BTCUSDT', base: 'BTC', quoteCurrency: 'USDT', bid: 99, ask: 100, mark: 100, last: 100, fundingRate: 0.0001, fundingIntervalHours: 8, nextFundingAt: NOW + 3_600_000, sourceTime: NOW, receivedAt: NOW, transport: 'ws', bidAskAt: NOW, markAt: NOW, fundingAt: NOW, ...patch });
 const venue = id => ({ id, name: id, kind: 'cex', status: 'live', marketCount: 1, quoteCount: 1, lastMessageAt: NOW, error: null });
 const snapshot = (quotes, now = NOW) => ({ schemaVersion: 1, monitorId: 'perpetual', status: 'live', generatedAt: now, staleAfterMs: 30_000, exchanges: [...new Set(quotes.map(item => item.exchange))].map(venue), quotes });
-const pair = (patch = {}) => ({ base: 'BTC', long: quote('a'), short: quote('b', { bid: 101, ask: 102 }), buyPrice: 100, sellPrice: 101, spreadPercent: 1, fundingSpread8h: 0.0001, updatedAt: NOW, crossCurrency: false, ...patch });
+const pair = (patch = {}) => ({ base: 'BTC', long: quote('binance'), short: quote('gate', { bid: 101, ask: 102 }), buyPrice: 100, sellPrice: 101, spreadPercent: 1, fundingSpread8h: 0.0001, updatedAt: NOW, crossCurrency: false, ...patch });
 const stats = (patch = {}) => ({ samples: 60, expectedSamples: 60, coverage: 1, firstAt: NOW - 59 * 60_000, lastAt: NOW, mean: 1, stddev: 0, positiveRatio: 1, signChanges: 0, ...patch });
 const ratio = (exchange, patch = {}) => ({ exchange, symbol: 'BTCUSDT', longRatio: 0.5, shortRatio: 0.5, kind: 'accounts', scope: 'all', source: 'official', observedAt: NOW, ...patch });
 function report(row = pair()) {
   return {
     schemaVersion: 1, generatedAt: NOW, sampleIntervalMs: 60_000, priceWindowMs: 3_600_000, fundingWindowMs: 86_400_000,
     assets: { BTC: { coinId: 'bitcoin', name: 'Bitcoin', marketCapUsd: 10e9, fdvUsd: 10e9, circulatingSupply: 10, totalSupply: 10, maxSupply: null, updatedAt: NOW, source: 'coingecko' } },
-    assetErrors: {}, positioning: { 'a:BTCUSDT': ratio('a'), 'b:BTCUSDT': ratio('b') }, positioningErrors: {},
+    assetErrors: {}, positioning: { 'binance:BTCUSDT': ratio('binance'), 'gate:BTCUSDT': ratio('gate') }, positioningErrors: {},
     pairs: { [qualityPairKey(row)]: { base: row.base, longKey: `${row.long.exchange}:${row.long.symbol}`, shortKey: `${row.short.exchange}:${row.short.symbol}`, spread: stats(), funding: stats({ samples: 288, expectedSamples: 288, firstAt: NOW - 287 * 300_000, mean: 0.01, longStddev: 0, shortStddev: 0 }) } },
   };
 }
 const dimension = (result, id) => result.dimensions.find(item => item.id === id).score;
-const historyRow = (spread, long = 0.01, short = 0.02, patch = {}) => [patch.base ?? 'BTC', patch.longKey ?? 'a:BTCUSDT', patch.shortKey ?? 'b:BTCUSDT', patch.identity ?? 'same-contract', spread, long, short];
-const readPair = (history, now = NOW) => history.get('BTC', 'a:BTCUSDT', 'b:BTCUSDT', now);
+const historyRow = (spread, long = 0.01, short = 0.02, patch = {}) => [patch.base ?? 'BTC', patch.longKey ?? 'binance:BTCUSDT', patch.shortKey ?? 'gate:BTCUSDT', patch.identity ?? 'same-contract', spread, long, short];
+const readPair = (history, now = NOW) => history.get('BTC', 'binance:BTCUSDT', 'gate:BTCUSDT', now);
 function livePair(now, longPatch = {}, shortPatch = {}) {
   const time = { bidAskAt: now, fundingAt: now, receivedAt: now, sourceTime: now };
-  return snapshot([quote('a', { ...time, ...longPatch }), quote('b', { bid: 101, ask: 102, ...time, ...shortPatch })], now);
+  return snapshot([quote('binance', { ...time, ...longPatch }), quote('gate', { bid: 101, ask: 102, ...time, ...shortPatch })], now);
 }
 
 test('quality separates market size from market-cap to FDV ratio without assuming maximum supply', () => {
@@ -53,12 +53,12 @@ test('quality separates market size from market-cap to FDV ratio without assumin
 
 test('quality crowding uses the proposed long and short directions and does not mix accounts with positions', () => {
   const row = pair(), data = report(row);
-  data.positioning['a:BTCUSDT'] = ratio('a', { longRatio: 0.9, shortRatio: 0.1 });
-  data.positioning['b:BTCUSDT'] = ratio('b', { longRatio: 0.1, shortRatio: 0.9 });
+  data.positioning['binance:BTCUSDT'] = ratio('binance', { longRatio: 0.9, shortRatio: 0.1 });
+  data.positioning['gate:BTCUSDT'] = ratio('gate', { longRatio: 0.1, shortRatio: 0.9 });
   assert.equal(dimension(evaluateOpportunityQuality(row, data, NOW), 'positioning'), 20);
   const reversed = pair({ long: row.short, short: row.long });
   assert.equal(dimension(evaluateOpportunityQuality(reversed, data, NOW), 'positioning'), 100);
-  data.positioning['b:BTCUSDT'].kind = 'positions';
+  data.positioning['gate:BTCUSDT'].kind = 'positions';
   const mixed = evaluateOpportunityQuality(row, data, NOW);
   assert.equal(dimension(mixed, 'positioning'), null);
   assert.equal(mixed.coverage, 85);
@@ -80,7 +80,7 @@ test('quality leaves missing, stale and malformed evidence unscored rather than 
     assert.notEqual(result.grade, 'strong');
   }
   for (const patch of [{ observedAt: NOW - 900_001 }, { observedAt: NOW + 5001 }, { longRatio: 0.9, shortRatio: 0.9 }, { longRatio: NaN }, { shortRatio: -0.1 }]) {
-    const data = report(row); Object.assign(data.positioning['a:BTCUSDT'], patch);
+    const data = report(row); Object.assign(data.positioning['binance:BTCUSDT'], patch);
     assert.equal(dimension(evaluateOpportunityQuality(row, data, NOW), 'positioning'), null);
   }
   const stale = report(row); stale.generatedAt = NOW - 180_001;
@@ -109,7 +109,7 @@ test('quality does not score insufficient or expired history and limits grades o
   assert.equal(dimension(result, 'funding'), 100);
   assert.equal(result.grade, 'watch', 'One hour of funding samples cannot establish twelve-hour quality');
   delete limited.assets.BTC;
-  delete limited.positioning['b:BTCUSDT'];
+  delete limited.positioning['gate:BTCUSDT'];
   const sparse = evaluateOpportunityQuality(row, limited, NOW);
   assert.equal(sparse.coverage, 50);
   assert.equal(sparse.score, null);
@@ -150,21 +150,38 @@ test('quality keeps mark mode, cross-currency prices and stale current quotes as
 
 test('quality cost budgets remain an auxiliary calculation and notices or adverse carry constrain the grade', () => {
   const row = pair(), data = report(row);
-  const cost = evaluateOpportunityQuality(row, data, NOW, { feePercent: 0.6, slippagePercent: 0.5 });
+  const cost = evaluateOpportunityQuality(row, data, NOW, { takerOverrides: { binance: 0.1, gate: 0.2 }, slippagePercent: 0.5 });
   assert.equal(cost.score, 100, 'Cost settings do not rewrite the fundamental and historical evidence');
   assert.ok(Math.abs(cost.netSpreadPercent + 0.1) < 1e-10);
   assert.equal(cost.grade, 'weak');
-  const delisting = pair({ long: quote('a', { delisting: true, delistingAt: null }) });
+  const delisting = pair({ long: quote('binance', { delisting: true, delistingAt: null }) });
   assert.equal(evaluateOpportunityQuality(delisting, data, NOW).grade, 'weak');
   data.pairs[qualityPairKey(row)].funding.mean = -1;
   assert.equal(evaluateOpportunityQuality(row, data, NOW).grade, 'weak');
 });
 
-test('quality parses versioned cost preferences without coercing invalid values or replacing valid zero budgets', () => {
-  for (const input of [null, '', '{broken', JSON.stringify({ version: 2, feePercent: 0 })]) assert.deepEqual(parseQualityBudget(input), defaultQualityBudget);
-  assert.deepEqual(parseQualityBudget(JSON.stringify({ version: 1, feePercent: 0, slippagePercent: 0 })), { feePercent: 0, slippagePercent: 0 });
+test('quality migrates old aggregate fee budgets to public taker without losing the slippage setting', () => {
+  for (const input of [null, '', '{broken', JSON.stringify({ version: 3, feePercent: 0 })]) assert.deepEqual(parseQualityBudget(input), defaultQualityBudget);
+  assert.deepEqual(parseQualityBudget(JSON.stringify({ version: 1, feePercent: 0, slippagePercent: 0 })), { takerOverrides: {}, slippagePercent: 0 });
   assert.deepEqual(parseQualityBudget(JSON.stringify({ version: 1, feePercent: '0.1', slippagePercent: -1 })), defaultQualityBudget);
-  assert.deepEqual(parseQualityBudget(JSON.stringify({ version: 1, feePercent: 10.1, slippagePercent: 0.3 })), { feePercent: 0.24, slippagePercent: 0.3 });
+  assert.deepEqual(parseQualityBudget(JSON.stringify({ version: 1, feePercent: 10.1, slippagePercent: 0.3 })), { takerOverrides: {}, slippagePercent: 0.3 });
+});
+
+test('unknown taker cost cannot appear free or promote an otherwise strong opportunity', () => {
+  const row = pair(), data = report(row);
+  const known = evaluateOpportunityQuality(row, data, NOW);
+  assert.equal(known.fees.roundTripPercent, 0.2);
+  assert.ok(Math.abs(known.netSpreadPercent - 0.7) < 1e-12);
+  // A newly unsupported fee category must preserve the evidence score, but not its strong label.
+  row.short.base = 'GATE:UNVERIFIED:BTC';
+  const missing = evaluateOpportunityQuality(row, data, NOW);
+  assert.equal(missing.score, known.score);
+  assert.equal(missing.fees.roundTripPercent, null);
+  assert.equal(missing.netSpreadPercent, null);
+  assert.equal(missing.grade, 'watch');
+  assert.ok(missing.reasons.some(reason => reason.includes('taker')));
+  const covered = evaluateOpportunityQuality(row, data, NOW, { ...defaultQualityBudget, takerOverrides: { gate: 0.04 } });
+  assert.equal(covered.grade, 'strong');
 });
 
 test('quality history samples a minute once and leaves offline gaps empty', () => {
@@ -201,17 +218,17 @@ test('quality history normalizes each funding interval and retains true zero and
 
 test('quality history keeps venue combinations and trading directions separate when the best pair changes', () => {
   const history = createQualityHistory();
-  history.sample(snapshot([quote('a'), quote('b', { bid: 101, ask: 102 }), quote('c', { bid: 103, ask: 104 })]), NOW);
+  history.sample(snapshot([quote('binance'), quote('gate', { bid: 101, ask: 102 }), quote('c', { bid: 103, ask: 104 })]), NOW);
   const next = NOW + 60_000;
   history.sample(snapshot([
-    quote('a', { bidAskAt: next, receivedAt: next }),
-    quote('b', { bid: 101, ask: 102, bidAskAt: next, receivedAt: next }),
+    quote('binance', { bidAskAt: next, receivedAt: next }),
+    quote('gate', { bid: 101, ask: 102, bidAskAt: next, receivedAt: next }),
     quote('c', { bid: 99, ask: 100, bidAskAt: next, receivedAt: next }),
   ], next), next);
-  assert.equal(history.get('BTC', 'a:BTCUSDT', 'c:BTCUSDT', next).spread.samples, 2);
-  assert.equal(history.get('BTC', 'a:BTCUSDT', 'b:BTCUSDT', next).spread.samples, 1);
-  assert.equal(history.get('BTC', 'b:BTCUSDT', 'a:BTCUSDT', next).spread.samples, 0);
-  const forward = qualityPairKey(pair()), reverse = qualityPairKey(pair({ long: quote('b'), short: quote('a') }));
+  assert.equal(history.get('BTC', 'binance:BTCUSDT', 'c:BTCUSDT', next).spread.samples, 2);
+  assert.equal(history.get('BTC', 'binance:BTCUSDT', 'gate:BTCUSDT', next).spread.samples, 1);
+  assert.equal(history.get('BTC', 'gate:BTCUSDT', 'binance:BTCUSDT', next).spread.samples, 0);
+  const forward = qualityPairKey(pair()), reverse = qualityPairKey(pair({ long: quote('gate'), short: quote('binance') }));
   assert.notEqual(forward, reverse);
 });
 
@@ -234,7 +251,7 @@ test('quality history resets changed units, multipliers, collateral and quote cu
   changedBase.sample(livePair(NOW), NOW);
   changedBase.sample(livePair(NOW + 60_000, { base: 'OTHER' }, { base: 'OTHER' }), NOW + 60_000);
   assert.equal(readPair(changedBase, NOW + 60_000).spread.samples, 0);
-  assert.equal(changedBase.get('OTHER', 'a:BTCUSDT', 'b:BTCUSDT', NOW + 60_000).spread.samples, 1);
+  assert.equal(changedBase.get('OTHER', 'binance:BTCUSDT', 'gate:BTCUSDT', NOW + 60_000).spread.samples, 1);
 });
 
 test('quality history rolls one-hour prices and twenty-four-hour funding windows at their exact boundaries', () => {

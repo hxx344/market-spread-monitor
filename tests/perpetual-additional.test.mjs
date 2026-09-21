@@ -39,6 +39,62 @@ test('additional discovery uses separate production venues and isolates nonstand
   await assert.rejects(discoverAdditionalMarkets('rh-lighter', { fetchImpl: response({ code: 500 }) }), /目录/);
 });
 
+test('rh-Lighter directory fees preserve zero, convert percent units and reject missing values', async () => {
+  const now = 1789999999000;
+  const values = ['0.0000', '0.0350', 0.005, undefined, null, '', ' ', 'invalid', -0.01, Infinity, 11, false];
+  let requests = 0;
+  const markets = await discoverAdditionalMarkets('rh-lighter', { now, fetchImpl: async () => {
+    requests++;
+    return { ok: true, json: async () => ({ code: 200, order_book_details: values.map((taker_fee, market_id) => ({ symbol: `C${market_id}`, market_id, market_type: 'perp', status: 'active', taker_fee })) }) };
+  } });
+  assert.equal(requests, 1, 'fee metadata reuses the market directory request');
+  assert.equal(markets[0].takerFeeRate, 0);
+  assert.ok(Math.abs(markets[1].takerFeeRate - 0.00035) < 1e-12);
+  assert.equal(markets[2].takerFeeRate, 0.00005);
+  for (const market of markets.slice(0, 3)) {
+    assert.equal(market.takerFeeAt, now);
+    assert.equal(market.takerFeeSource, 'rh-lighter-standard');
+  }
+  for (const market of markets.slice(3)) {
+    assert.equal(market.takerFeeRate, null);
+    assert.equal(market.takerFeeAt, null);
+    assert.equal(market.takerFeeSource, null);
+  }
+});
+
+test('Entropy directory applies per-market HIP-3 fees without guessing omitted multipliers', async () => {
+  const now = 1789999999000;
+  const variants = [
+    { deployerFeeScale: '1.0', growthMode: 'enabled' },
+    { deployerFeeScale: '1.0', growthMode: 'disabled' },
+    { deployerFeeScale: '0.5', growthMode: 'enabled' },
+    { deployerFeeScale: '2', growthMode: 'disabled' },
+    { deployerFeeScale: '0', growthMode: 'enabled' },
+    {}, { deployerFeeScale: '1' }, { growthMode: 'enabled' },
+    { deployerFeeScale: null, growthMode: 'enabled' },
+    { deployerFeeScale: '', growthMode: 'enabled' },
+    { deployerFeeScale: '-1', growthMode: 'enabled' },
+    { deployerFeeScale: '4', growthMode: 'enabled' },
+    { deployerFeeScale: '1', growthMode: 'unknown' },
+  ];
+  let requests = 0;
+  const markets = await discoverAdditionalMarkets('entropy', { now, fetchImpl: async () => {
+    requests++;
+    return { ok: true, json: async () => ({ collateralToken: 0, universe: variants.map((fields, i) => ({ name: `io:C${i}`, ...fields })) }) };
+  } });
+  assert.equal(requests, 1);
+  for (const [index, expected] of [0.00009, 0.0009, 0.0000675, 0.0018, 0.000045].entries()) {
+    assert.ok(Math.abs(markets[index].takerFeeRate - expected) < 1e-12);
+    assert.equal(markets[index].takerFeeAt, now);
+    assert.equal(markets[index].takerFeeSource, 'entropy-standard');
+  }
+  for (const market of markets.slice(5)) {
+    assert.equal(market.takerFeeRate, null);
+    assert.equal(market.takerFeeAt, null);
+    assert.equal(market.takerFeeSource, null);
+  }
+});
+
 test('subscriptions use BBO streams, bounded batches, heartbeat and correct market namespaces', async () => {
   const rh = await discoverAdditionalMarkets('rh-lighter', { fetchImpl: response(rhData) });
   const entropy = await discoverAdditionalMarkets('entropy', { fetchImpl: response(entropyData) });

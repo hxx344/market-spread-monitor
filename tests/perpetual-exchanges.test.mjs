@@ -33,6 +33,76 @@ function directoryFixture(exchange, changes) {
   }) };
 }
 
+test('Bitget bulk directories retain per-contract taker rates including explicit zero without extra reads', async () => {
+  const fixture = directoryFixture('bitget', [{ takerFeeRate: '0.0006' }, { takerFeeRate: '0.0008' }, { takerFeeRate: '0' }]);
+  const rows = await discoverMarkets('bitget', { fetchImpl: fixture.fetchImpl, now: NOW });
+  assert.deepEqual(rows.map(row => row.takerFeeRate), [0.0006, 0.0008, 0]);
+  assert.ok(rows.every(row => row.takerFeeAt === NOW && row.takerFeeSource === 'bitget-contract'));
+  assert.equal(fixture.calls.length, 2, 'Fees reuse the two existing product directories');
+});
+
+test('missing or malformed public contract fees remain unknown instead of becoming zero', async () => {
+  const values = [undefined, null, '', ' ', 'NaN', 'Infinity', -0.0006, '0.6', false, [], {}];
+  const fixture = directoryFixture('bitget', values.map(takerFeeRate => ({ takerFeeRate })));
+  const rows = await discoverMarkets('bitget', { fetchImpl: fixture.fetchImpl, now: NOW });
+  assert.equal(rows.length, values.length);
+  for (const row of rows) { assert.equal(row.takerFeeRate, null); assert.equal(row.takerFeeAt, null); }
+});
+
+test('Bybit retail taker schedules distinguish innovation contracts and leave other categories unknown', async () => {
+  const fixture = directoryFixture('bybit', [{ symbolType: '' }, { symbolType: 'crypto' }, { symbolType: 'innovation' }, { symbolType: 'stock' }, { symbolType: 'unknown-category' }, { symbolType: 'innovation', isPreListing: true }]);
+  const rows = await discoverMarkets('bybit', { fetchImpl: fixture.fetchImpl, now: NOW });
+  const byBase = new Map(rows.map(row => [row.rawBase, row]));
+  assert.deepEqual(['COIN0', 'COIN1', 'COIN2', 'COIN3', 'COIN4'].map(base => byBase.get(base).takerFeeRate), [0.00055, 0.00055, 0.0011, null, null]);
+  assert.ok(rows.every(row => row.takerFeeSource === 'bybit-standard'));
+  assert.equal(byBase.get('COIN2').takerFeeAt, NOW);
+  assert.equal(byBase.get('COIN3').takerFeeAt, null);
+  assert.equal(rows.length, 5, 'Prelisting remains outside the supported market scope');
+  assert.equal(fixture.calls.length, 1, 'No private or Pro/MM fee endpoint is needed');
+});
+
+test('Gate point-deduction contract fee fields are not exposed as retail VIP0 fees', async () => {
+  const fixture = directoryFixture('gate', [{ taker_fee_rate: '0.00075' }]);
+  const [row] = await discoverMarkets('gate', { fetchImpl: fixture.fetchImpl, now: NOW });
+  assert.equal(Object.hasOwn(row, 'takerFeeRate'), false);
+});
+
+test('OKX retail schedules apply only to identified normal crypto fee groups', async () => {
+  const fixture = directoryFixture('okx', [{ groupId: '4', instCategory: '1' }, { groupId: '5', instCategory: '2' }, { groupId: '6', instCategory: '1' }, { groupId: '4', instCategory: '3' }, { groupId: '4', ruleType: 'pre_market' }, {}]);
+  const rows = await discoverMarkets('okx', { fetchImpl: fixture.fetchImpl, now: NOW });
+  const byBase = new Map(rows.map(row => [row.rawBase, row]));
+  assert.deepEqual(Array.from({ length: 6 }, (_, i) => byBase.get(`COIN${i}`).takerFeeRate), [0.0005, 0.0005, null, null, null, null]);
+  assert.ok(rows.every(row => row.takerFeeSource === 'okx-standard'));
+  assert.equal(fixture.calls.length, 1);
+});
+
+test('Aster retail schedules distinguish USDT, USD1 and RWA without applying crypto rates to unknown scopes', async () => {
+  const fixture = directoryFixture('aster', [
+    {}, { quoteAsset: 'USD1', marginAsset: 'USD1' }, { quoteAsset: 'USDC', marginAsset: 'USDC' },
+    { underlyingSubType: ['stock'] }, { underlyingSubType: ['commodities'], quoteAsset: 'USD1', marginAsset: 'USD1' }, { underlyingSubType: ['pre-market'] },
+  ]);
+  const rows = await discoverMarkets('aster', { fetchImpl: fixture.fetchImpl, now: NOW });
+  const byBase = new Map(rows.map(row => [row.rawBase, row]));
+  assert.deepEqual(Array.from({ length: 6 }, (_, i) => byBase.get(`COIN${i}`).takerFeeRate), [0.0004, 0.00005, null, 0.00009, 0.00009, null]);
+  assert.ok(rows.every(row => row.takerFeeSource === 'aster-standard'));
+  assert.equal(fixture.calls.length, 2);
+});
+
+test('Lighter standard market fee percentages are normalized once and missing fees stay unknown', async () => {
+  const values = ['0', '0.028', '', null, '-0.1', 'Infinity'];
+  let calls = 0;
+  const rows = await discoverMarkets('lighter', { now: NOW, fetchImpl: reader(() => {
+    calls++;
+    return { order_book_details: values.map((taker_fee, i) => ({ symbol: `COIN${i}`, market_id: i, market_type: 'perp', status: 'active', funding_premium_multiplier: 100, taker_fee })) };
+  }) });
+  assert.equal(rows[0].takerFeeRate, 0);
+  assert.ok(Math.abs(rows[1].takerFeeRate - 0.00028) < 1e-12);
+  assert.ok(rows.slice(2).every(row => row.takerFeeRate === null));
+  assert.deepEqual(rows.map(row => row.takerFeeAt), [NOW, NOW, null, null, null, null]);
+  assert.ok(rows.every(row => row.takerFeeSource === 'lighter-standard'));
+  assert.equal(calls, 1);
+});
+
 test('bulk directories expose scheduled delistings as UTC milliseconds without extra requests', async () => {
   const deadline = Date.parse('2026-09-22T15:00:00+08:00');
   const fields = { binance: 'deliveryDate', aster: 'deliveryDate', bybit: 'deliveryTime', okx: 'expTime', bitget: 'offTime', gate: 'delisted_time' };

@@ -1,4 +1,6 @@
 import type { PerpetualSpread } from './perpetual-spreads.ts';
+import { defaultQualityBudget, pairTakerFees, validFeePercent, type PairTakerFees, type QualityBudget } from './perpetual-fees.ts';
+export { defaultQualityBudget, parseQualityBudget, type QualityBudget } from './perpetual-fees.ts';
 
 export interface TokenFundamentals {
   coinId: string; name: string; marketCapUsd: number | null; fdvUsd: number | null;
@@ -40,27 +42,17 @@ export interface PerpetualQualityReport {
   positioningOverview?: Record<string, PositioningOverview>;
   error?: string | null;
 }
-export interface QualityBudget { feePercent: number; slippagePercent: number }
-export const defaultQualityBudget: QualityBudget = { feePercent: 0.24, slippagePercent: 0.10 };
 export interface QualityDimension { id: string; label: string; weight: number; score: number | null; detail: string }
 export interface OpportunityQuality {
   grade: 'strong' | 'watch' | 'weak' | 'insufficient' | 'reference'; label: string;
   score: number | null; coverage: number; dimensions: QualityDimension[]; reasons: string[];
   netSpreadPercent: number | null;
+  fees: PairTakerFees;
 }
 export const qualityPairKey = (row: Pick<PerpetualSpread, 'base' | 'long' | 'short'>) => JSON.stringify([row.base, `${row.long.exchange}:${row.long.symbol}`, `${row.short.exchange}:${row.short.symbol}`]);
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 const fresh = (at: unknown, now: number, age: number) => finite(at) && at > 0 && at <= now + 5_000 && now - at <= age;
 const clamp = (value: number) => Math.max(0, Math.min(100, value));
-
-export function parseQualityBudget(value: string | null): QualityBudget {
-  try {
-    const input = value ? JSON.parse(value) : null;
-    if (input?.version !== 1) return { ...defaultQualityBudget };
-    const read = (value: unknown, fallback: number) => finite(value) && value >= 0 && value <= 10 ? value : fallback;
-    return { feePercent: read(input.feePercent, 0.24), slippagePercent: read(input.slippagePercent, 0.10) };
-  } catch { return { ...defaultQualityBudget }; }
-}
 
 /** A transparent screening rubric, not a probability of profit. Missing evidence stays unscored. */
 export function evaluateOpportunityQuality(row: PerpetualSpread, report: PerpetualQualityReport | null | undefined, now: number, budget: QualityBudget = defaultQualityBudget, mode: 'book' | 'mark' = 'book'): OpportunityQuality {
@@ -93,18 +85,21 @@ export function evaluateOpportunityQuality(row: PerpetualSpread, report: Perpetu
   for (const item of dimensions) if (item.score !== null) item.score = Math.round(item.score);
   const coverage = dimensions.reduce((sum, item) => sum + (item.score === null ? 0 : item.weight), 0);
   const rawScore = coverage ? Math.round(dimensions.reduce((sum, item) => sum + (item.score ?? 0) * item.weight, 0) / coverage) : null;
-  const validBudget = finite(budget.feePercent) && budget.feePercent >= 0 && finite(budget.slippagePercent) && budget.slippagePercent >= 0;
+  const fees = pairTakerFees(row, budget.takerOverrides, now);
+  const validBudget = fees.roundTripPercent !== null && validFeePercent(budget.slippagePercent);
   const reference = mode === 'mark' || row.crossCurrency || !fresh(row.updatedAt, now, 30_000);
-  const netSpreadPercent = !reference && validBudget ? row.spreadPercent - budget.feePercent - budget.slippagePercent : null;
+  const netSpreadPercent = !reference && validBudget ? row.spreadPercent - fees.roundTripPercent! - budget.slippagePercent : null;
+  if (fees.roundTripPercent === null) reasons.push('两腿 taker 费率尚未齐全，暂不计算扣费价差，等级不评为较好');
+  if (!validFeePercent(budget.slippagePercent)) reasons.push('滑点预算无效，暂不计算扣费价差');
   if (reference) reasons.push(mode === 'mark' ? '标记价不能用于判断可成交套利质量' : row.crossCurrency ? '跨计价币尚未换汇，仅供参考' : '当前两腿价格已过期');
   if (!spreadReady || !fundingReady) reasons.push('历史正在积累，未用回填或模拟数据补齐');
   if (fundingReady && funding.coverage < 0.5) reasons.push('资金费历史不足12小时，等级暂不评为较好');
   if (coverage < 100) reasons.push(`可评分数据覆盖${coverage}%，缺失项未计为零分`);
   const constrained = row.long.delisting === true || row.short.delisting === true || (netSpreadPercent !== null && netSpreadPercent <= 0) || (fundingReady && funding.mean! < 0 && netSpreadPercent !== null && -funding.mean! >= Math.max(0, netSpreadPercent));
   if (row.long.delisting || row.short.delisting) reasons.push('组合含已公告下架的合约');
-  if (netSpreadPercent !== null && netSpreadPercent <= 0) reasons.push('当前毛价差不足覆盖设定的往返成本预算');
+  if (netSpreadPercent !== null && netSpreadPercent <= 0) reasons.push('当前毛价差不足覆盖双腿 taker 往返手续费与滑点预算');
   if (fundingReady && funding.mean! < 0) reasons.push('历史平均资金费差为净支出，需结合持有时间判断');
   const score = reference || coverage < 60 || !spreadReady ? null : rawScore;
-  const grade = reference ? 'reference' : score === null ? 'insufficient' : constrained || score < 50 ? 'weak' : score >= 75 && coverage === 100 && fundingReady && funding.coverage >= 0.5 ? 'strong' : 'watch';
-  return { grade, label: ({ strong: '较好', watch: '观察', weak: '谨慎', insufficient: '资料不足', reference: '仅供参考' })[grade], score, coverage, dimensions, reasons, netSpreadPercent };
+  const grade = reference ? 'reference' : score === null ? 'insufficient' : constrained || score < 50 ? 'weak' : score >= 75 && coverage === 100 && fundingReady && funding.coverage >= 0.5 && validBudget ? 'strong' : 'watch';
+  return { grade, label: ({ strong: '较好', watch: '观察', weak: '谨慎', insufficient: '资料不足', reference: '仅供参考' })[grade], score, coverage, dimensions, reasons, netSpreadPercent, fees };
 }
