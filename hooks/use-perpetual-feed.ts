@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createPerpetualClock, startPerpetualFeed, type PerpetualConnection } from "../lib/perpetual-feed";
 import type { PerpetualSnapshot } from "../lib/perpetual-types";
 
-export function usePerpetualFeed(active: boolean) {
+export function usePerpetualFeed(active: boolean, paused = false) {
   const [data, setData] = useState<PerpetualSnapshot | null>(null);
   const [connection, setConnection] = useState<PerpetualConnection>("connecting");
   const [error, setError] = useState("");
@@ -24,6 +24,9 @@ export function usePerpetualFeed(active: boolean) {
       };
       updateClock();
       clock = setInterval(updateClock, 1_000);
+      // Inspection stops network work, but source time must still age so a
+      // retained quote cannot stay "fresh" indefinitely while the user reads it.
+      if (paused) { setConnection("paused"); return; }
       if (!navigator.onLine) {
         setConnection("error");
         setError("网络已断开，恢复连接后自动更新。");
@@ -62,7 +65,7 @@ export function usePerpetualFeed(active: boolean) {
       clearInterval(clock);
       controls.current?.stop(); controls.current = null;
     };
-  }, [active, sourceClock]);
+  }, [active, paused, sourceClock]);
 
   const refresh = useCallback(() => controls.current?.refresh(), []);
   return { data, connection, error, now, refresh };
