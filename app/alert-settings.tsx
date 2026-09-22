@@ -1,4 +1,5 @@
 "use client";
+import { hubChanged } from "../lib/hub-bridge";
 
 import { memo, useEffect, useRef, useState, type FormEvent } from "react";
 import { Bell, ChevronDown, Plus, Save, Trash2 } from "lucide-react";
@@ -71,6 +72,7 @@ function AlertSettings({ monitorId, title, adapter, active = true }: { monitorId
         setView(next); apply(next); setLoadError("");
       } else {
         const next = await adapter.save(draft, revision, signal);
+        hubChanged();
         if (controller.signal.aborted) return;
         apply(next); setView(current => current ? { ...current, ...next } : current); setLoadError("");
         setMessage("配置已保存，下一轮后台检查时生效。");

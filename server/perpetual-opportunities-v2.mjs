@@ -4,6 +4,19 @@ import { quoteCurrencyFx } from '../lib/perpetual-fx.ts';
 import { CROSS_EX_MAX_QUOTES, CROSS_EX_MAX_SIGNALS, CROSS_EX_STALE_MS } from '../lib/perpetual-opportunities.ts';
 
 export const CROSSEX_VENUES = Object.freeze(['binance', 'bybit', 'okx', 'gate', 'kraken', 'hyperliquid', 'lighter']);
+
+/** Reuse projections only for an unchanged source revision; expiry always uses original source time. */
+export function createOpportunitiesV2Reader(project = createPerpetualOpportunitiesV2) {
+  let previous;
+  return (snapshot, now, getMarket, fx, sourceVersion) => {
+    const key = JSON.stringify([sourceVersion, fx, snapshot.storageError ?? null, snapshot.exchanges.map(x => [x.id, x.status])]);
+    if (!previous || previous.key !== key || now < previous.at || now - previous.at >= 10_000) previous = { key, at: now, value: project(snapshot, now, getMarket, fx) };
+    const value = previous.value;
+    return { ...value, generatedAt: now, status: value.errorCode ? value.status : snapshot.status,
+      exchanges: snapshot.exchanges.filter(x => CROSSEX_VENUES.includes(x.id)),
+      signals: value.signals.filter(signal => signal.expiresAt >= now && [signal.long, signal.short].every(q => snapshot.exchanges.some(x => x.id === q.exchange && x.status === 'live'))) };
+  };
+}
 const filters = { search: '', exchanges: CROSSEX_VENUES, pairMode: 'all', priceMode: 'book', crossCurrency: true, minSpreadPercent: 0, favoritesOnly: false, favorites: [], sortBy: 'gross' };
 const currencies = new Set(['USDT', 'USDC', 'USD']);
 

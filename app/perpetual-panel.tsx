@@ -1,5 +1,6 @@
 "use client";
 
+import { hubNavigate, cleanHubQuery } from "../lib/hub-bridge";
 import { Fragment, memo, useDeferredValue, useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import { Activity, ArrowDown, Bell, ChevronDown, ChevronLeft, ChevronRight, RefreshCw, Search, SlidersHorizontal, Star, X } from "lucide-react";
@@ -146,7 +147,7 @@ function QuoteDetails({ quotes, venues, mode, now, staleAfterMs, standalone = fa
   </div>;
 }
 
-function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: boolean }) {
+function PerpetualPanel({ active = true, onSummary, hubConnected = false }: SummaryProps & { active?: boolean; hubConnected?: boolean }) {
   const [workspace, setWorkspace] = useState<"opportunities" | "positions">("opportunities");
   const opportunitiesActive = active && workspace === "opportunities";
   const [inspection, setInspection] = useState<{ key: string; base: string; snapshot: PerpetualSnapshot; ranking: PerpetualSpread[]; page: number } | null>(null);
@@ -159,6 +160,7 @@ function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: 
   const [preferencesReady, setPreferencesReady] = useState(false);
   const [qualityBudget, setQualityBudget] = useState(defaultQualityBudget);
   const [qualityBudgetReady, setQualityBudgetReady] = useState(false);
+  const [hubPair, setHubPair] = useState<{ longExchange?: string; shortExchange?: string }>({});
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [healthOpen, setHealthOpen] = useState(false);
   const [alertsOpen, setAlertsOpen] = useState(false);
@@ -169,6 +171,19 @@ function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: 
   const expandedBase = paused ? inspection.base : null;
   const [page, setPage] = useState(1);
   const [view, setView] = useState<"rank" | "quotes">("rank");
+  useEffect(() => {
+    const restore = () => {
+      const params = new URL(window.location.href).searchParams;
+      const input = Object.fromEntries(['symbol', 'longExchange', 'shortExchange'].flatMap(key => params.has(key) ? [[key, params.get(key)!]] : []));
+      const query = cleanHubQuery(input); if (!query) return;
+      if (query.symbol) { setFilters(previous => ({ ...previous, search: query.symbol!, favoritesOnly: false, minSpreadPercent: 0 })); setInspection(null); setWorkspace('opportunities'); setView('rank'); setPage(1); }
+      setHubPair({ longExchange: query.longExchange, shortExchange: query.shortExchange });
+    };
+    // Preference hydration runs first; URL selection has priority.
+    const timer = setTimeout(restore, 0); window.addEventListener('popstate', restore);
+    return () => { clearTimeout(timer); window.removeEventListener('popstate', restore); };
+  }, []);
+
   const search = useDeferredValue(filters.search);
   const quotes = data?.quotes ?? emptyQuotes;
   const exchanges = data?.exchanges ?? emptyExchanges;
@@ -182,7 +197,8 @@ function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: 
   const selectRanking = useMemo(() => createPerpetualRankingSelector(), []);
   const selectQuotes = useMemo(() => createPerpetualQuoteSelector(), []);
   const rankingFilters = useMemo(() => ({ ...filters, search }), [filters, search]);
-  const ranking = useMemo(() => paused ? inspection.ranking : opportunitiesActive && view === "rank" && data && now ? selectRanking(data, rankingFilters, now, qualityBudget, fx) : emptySpreads, [paused, inspection, opportunitiesActive, view, data, rankingFilters, now, selectRanking, qualityBudget, fx]);
+  const fullRanking = useMemo(() => paused ? inspection.ranking : opportunitiesActive && view === "rank" && data && now ? selectRanking(data, rankingFilters, now, qualityBudget, fx) : emptySpreads, [paused, inspection, opportunitiesActive, view, data, rankingFilters, now, selectRanking, qualityBudget, fx]);
+  const ranking = useMemo(() => fullRanking.filter(row => (!hubPair.longExchange || row.long.exchange === hubPair.longExchange) && (!hubPair.shortExchange || row.short.exchange === hubPair.shortExchange)), [fullRanking, hubPair]);
   const quoteSelection = useMemo(() => selectQuotes(quotes, rankingFilters), [quotes, rankingFilters, selectQuotes]);
   const availableBases = quoteSelection.baseCount;
   const liveExchanges = exchanges.filter(exchange => exchange.status === "live").length;
@@ -270,7 +286,7 @@ function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: 
     const key = perpetualSpreadKey(row);
     setFilters(previous => ({ ...previous, favoritePairs: (previous.favoritePairs ?? []).includes(key) ? previous.favoritePairs!.filter(item => item !== key) : [...(previous.favoritePairs ?? []), key].slice(-1000) }));
   }
-  function resetFilters() { updateFilters({ ...defaultPerpetualFilters, favorites: filters.favorites, favoritePairs: filters.favoritePairs, blockedPairs: filters.blockedPairs }); }
+  function resetFilters() { setHubPair({}); updateFilters({ ...defaultPerpetualFilters, favorites: filters.favorites, favoritePairs: filters.favoritePairs, blockedPairs: filters.blockedPairs }); }
   function blockPair(row: PerpetualSpread) { updateFilters({ blockedPairs: [...new Set([...(filters.blockedPairs ?? []), perpetualSpreadKey(row)])].slice(-1000) }); }
   function configureAlert(row: PerpetualSpread) {
     setAlertPair(row); setAlertsVisited(true); setAlertsOpen(true);
@@ -345,7 +361,7 @@ function PerpetualPanel({ active = true, onSummary }: SummaryProps & { active?: 
           <td className="perp-expand-cell"><button type="button" aria-label={`${isExpanded ? "收起" : "展开"} ${pairLabel} 质量依据与各平台报价`} aria-expanded={isExpanded} aria-controls={detailId} onClick={() => inspect(row, true)}><ChevronDown size={17}/></button></td>
         </tr>{isExpanded ? <tr className="perp-detail-row" id={detailId}><td colSpan={8}>
           <div className="perp-inspection-bar"><p role="status"><strong>行情已暂停</strong> · 保留 {stamp(data?.generatedAt)} 的排名与报价{expired ? " · 已过期，仅供核对" : ""}</p><button type="button" onClick={() => setInspection(null)}>收起并恢复</button></div>
-          <div className="perp-detail-navigation"><div role="tablist" aria-label="组合详情" onKeyDown={event => { const tabs: DetailTab[] = ["execution", "quality", "exit", "quotes"]; const index = tabs.indexOf(detailTab); const next = event.key === "ArrowRight" ? tabs[(index + 1) % tabs.length] : event.key === "ArrowLeft" ? tabs[(index + tabs.length - 1) % tabs.length] : event.key === "Home" ? tabs[0] : event.key === "End" ? tabs[tabs.length - 1] : null; if (next) { event.preventDefault(); setDetailTab(next); document.getElementById(`${detailId}-tab-${next}`)?.focus(); } }}>{([{ id: "execution", label: "成交与持有" }, { id: "quality", label: "质量依据" }, { id: "exit", label: "平仓与跟踪" }, { id: "quotes", label: "各平台报价" }] as const).map(tab => <button type="button" role="tab" key={tab.id} id={`${detailId}-tab-${tab.id}`} aria-selected={detailTab === tab.id} tabIndex={detailTab === tab.id ? 0 : -1} aria-controls={`${detailId}-content`} onClick={() => setDetailTab(tab.id)}>{tab.label}</button>)}</div><div className="perp-detail-actions"><button type="button" onClick={() => configureAlert(row)}><Bell size={13}/>设置提醒</button><button type="button" onClick={() => blockPair(row)}><X size={13}/>屏蔽组合</button></div></div>
+          <div className="perp-detail-navigation"><div role="tablist" aria-label="组合详情" onKeyDown={event => { const tabs: DetailTab[] = ["execution", "quality", "exit", "quotes"]; const index = tabs.indexOf(detailTab); const next = event.key === "ArrowRight" ? tabs[(index + 1) % tabs.length] : event.key === "ArrowLeft" ? tabs[(index + tabs.length - 1) % tabs.length] : event.key === "Home" ? tabs[0] : event.key === "End" ? tabs[tabs.length - 1] : null; if (next) { event.preventDefault(); setDetailTab(next); document.getElementById(`${detailId}-tab-${next}`)?.focus(); } }}>{([{ id: "execution", label: "成交与持有" }, { id: "quality", label: "质量依据" }, { id: "exit", label: "平仓与跟踪" }, { id: "quotes", label: "各平台报价" }] as const).map(tab => <button type="button" role="tab" key={tab.id} id={`${detailId}-tab-${tab.id}`} aria-selected={detailTab === tab.id} tabIndex={detailTab === tab.id ? 0 : -1} aria-controls={`${detailId}-content`} onClick={() => setDetailTab(tab.id)}>{tab.label}</button>)}</div><div className="perp-detail-actions">{hubConnected && [row.long.exchange, row.short.exchange].every(id => ["binance", "bybit", "okx", "gate", "kraken", "hyperliquid", "lighter"].includes(id)) && <button type="button" onClick={() => hubNavigate("crossex", { symbol: row.base, longExchange: row.long.exchange, shortExchange: row.short.exchange })}>在 CrossEx 查看</button>}<button type="button" onClick={() => configureAlert(row)}><Bell size={13}/>设置提醒</button><button type="button" onClick={() => blockPair(row)}><X size={13}/>屏蔽组合</button></div></div>
           <div role="tabpanel" id={`${detailId}-content`} aria-labelledby={`${detailId}-tab-${detailTab}`} className="perp-detail-content">
             {detailTab === "execution" ? <><PerpetualExecution long={row.long} short={row.short} active={active} now={now}/><PerpetualHolding row={row} budget={qualityBudget} now={now} mode={filters.priceMode}/><PerpetualTrend history={history} now={now} crossCurrency={row.crossCurrency}/></> : detailTab === "quality" ? <QualityEvidence row={row} report={qualityReport} quality={quality} venues={venues} now={now} slippagePercent={qualityBudget.slippagePercent}/> : detailTab === "exit" ? <PerpetualExit long={row.long} short={row.short} budget={qualityBudget} active={opportunitiesActive} now={now} onRegistered={() => { setInspection(null); setWorkspace("positions"); document.getElementById("perp-positions-tab")?.focus(); }}/> : <QuoteDetails quotes={detailQuotes} venues={venues} mode={filters.priceMode} now={now} staleAfterMs={data?.staleAfterMs ?? 30_000}/>}
           </div>

@@ -1,4 +1,5 @@
 "use client";
+import { hubChanged } from "../lib/hub-bridge";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Bell, ChevronDown, Save, Send } from "lucide-react";
@@ -6,7 +7,7 @@ import type { NotificationView } from "../lib/notification-types";
 import { startActivityPolling } from "../lib/polling";
 
 const endpoint = "/api/notifications/feishu";
-export default function NotificationSettings() {
+export default function NotificationSettings({ active = true }: { active?: boolean }) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<NotificationView | null>(null);
   const [revision, setRevision] = useState(0);
@@ -52,7 +53,7 @@ export default function NotificationSettings() {
     window.addEventListener("beforeunload", unload);
     return () => { controller.abort(); polling.stop(); activity.current = null; window.removeEventListener("open-feishu-settings", show); window.removeEventListener("feishu-settings-changed", reload); window.removeEventListener("beforeunload", unload); };
   }, []);
-  useEffect(() => { activity.current?.setActive(open); }, [open]);
+  useEffect(() => { activity.current?.setActive(open && active); }, [open, active]);
   async function mutate(testing: boolean) {
     if (busyRef.current) return;
     busyRef.current = true; generation.current++; setBusy(true); setError(""); setMessage("");
@@ -60,6 +61,7 @@ export default function NotificationSettings() {
       const response = await fetch(`${endpoint}${testing ? "/test" : ""}`, { method: testing ? "POST" : "PUT", headers: { "Content-Type": "application/json" }, signal: AbortSignal.timeout(45_000), body: testing ? "{}" : JSON.stringify({ revision, webhookUrl, signingSecret, clearWebhook, clearSigningSecret, migrationSource }) });
       const result = await response.json() as NotificationView & { error?: string };
       if (!response.ok) throw new Error(result.error || "操作失败，请重试。");
+      hubChanged();
       apply(result);
       setLoadError(""); setMessage(testing ? "测试消息已发送到共用的飞书机器人。" : "统一配置已保存，所有监控模块立即共用；无需重启。");
     } catch (error) { setError(error instanceof Error ? error.message : "操作失败，请重试。"); }

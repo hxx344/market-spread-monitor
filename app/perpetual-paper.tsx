@@ -1,4 +1,5 @@
 "use client";
+import { hubChanged } from "../lib/hub-bridge";
 
 import dynamic from 'next/dynamic';
 import { memo, useEffect, useId, useRef, useState, type FormEvent } from 'react';
@@ -106,6 +107,7 @@ function PaperWorkspace({ active }: { active: boolean }) {
       const response = await fetch('/api/monitors/perpetual/paper', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(20_000)]) });
       const result = await response.json() as PerpetualPaperView;
       if (!response.ok) { if (response.status === 409) edit({ ...current, conflict: true }); throw new Error(result.error || '保存失败，输入已保留'); }
+      hubChanged();
       if (!result.available || !Array.isArray(result.positions) || !Number.isSafeInteger(result.revision)) throw new Error('后台返回格式异常，请刷新核对保存结果');
       if (!controller.signal.aborted) { apply(result); edit(null); setMessage(current.kind === 'stop' ? '已停止观察，未登记平仓收益。' : current.kind === 'delete' ? '已删除记录。' : current.kind === 'close' ? '已保存手工登记的平仓结果。' : '持仓参数已保存。'); }
     } catch (cause) { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : '保存失败，输入已保留'); }

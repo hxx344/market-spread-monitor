@@ -1,4 +1,5 @@
 "use client";
+import { hubChanged } from "../lib/hub-bridge";
 
 import { memo, useEffect, useId, useRef, useState } from "react";
 import type { PerpetualQuote } from "../lib/perpetual-types";
@@ -90,6 +91,7 @@ function ExitWorkspace({ long, short, budget, active, now, onRegistered }: Props
       const saved = await fetch("/api/monitors/perpetual/paper", { method: "POST", headers: { "Content-Type": "application/json" }, signal, body: JSON.stringify({ revision: state.revision, action: "create", position: { ...input, mode, requestId: registration.current!.requestId, base: long.base, longKey: `${long.exchange}:${long.symbol}`, shortKey: `${short.exchange}:${short.symbol}`, openedAt, targetNetProfit: fields.targetNetProfit.trim() ? amount(fields.targetNetProfit) : null, maxHoldingHours: fields.maxHoldingHours.trim() ? amount(fields.maxHoldingHours) : null } }) });
       const body = await saved.json() as { error?: string } | null;
       if (!saved.ok) throw new Error(body?.error || "登记失败");
+      hubChanged();
       if (!controller.signal.aborted) onRegistered();
     } catch (cause) { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "登记失败"); }
     finally { if (pending.current === controller) { pending.current = null; setBusy(false); } }

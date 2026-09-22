@@ -1,4 +1,5 @@
 "use client";
+import { hubChanged } from "../lib/hub-bridge";
 
 import { memo, useEffect, useRef, useState, type FormEvent } from 'react';
 import { Bell, ChevronDown, Plus, Trash2 } from 'lucide-react';
@@ -56,6 +57,7 @@ function PerpetualAlerts({ active = true, defaultOpen = false, pair = null, budg
         body: discard ? undefined : JSON.stringify({ revision, ...draft }), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(20_000)]) });
       const result = await response.json() as PerpetualAlertView & { error?: string };
       if (!response.ok || !result.available) throw new Error(result.error || 'Linux 机会提醒后台未连接，草稿已保留');
+      if (!discard) hubChanged();
       if (result.revision < latestRevision.current) throw new Error('后台返回旧配置，草稿已保留，请稍后重试');
       if (controller.signal.aborted) return;
       apply(result); setMessage(discard ? '已重载后台配置。' : '规则已保存，后台从下一次观察开始检查。');

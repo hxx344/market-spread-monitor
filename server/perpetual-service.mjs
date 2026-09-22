@@ -8,7 +8,7 @@ import { createPerpetualAlertService } from './perpetual-alert-service.mjs';
 import { createPerpetualExecutionService } from './perpetual-depth.mjs';
 import { createPerpetualPaperService } from './perpetual-paper-service.mjs';
 import { createPerpetualOpportunities } from './perpetual-opportunities.mjs';
-import { createPerpetualOpportunitiesV2 } from './perpetual-opportunities-v2.mjs';
+import { createOpportunitiesV2Reader } from './perpetual-opportunities-v2.mjs';
 
 export const PERPETUAL_STALE_MS = 30_000;
 const MAX_FUTURE_MS = 5_000;
@@ -133,6 +133,8 @@ function withMarketMetadata(quote, market) {
 }
 
 export function createPerpetualService({ store, exchanges = EXCHANGES, discover = discoverMarkets, subscriptions = createSubscriptions, parse = parseMessage, control = getControlResponse, WebSocketImpl = PerpetualWebSocket, clock = Date.now, staleAfterMs = PERPETUAL_STALE_MS, retryMs = 5_000, discoveryIntervalMs = 5 * 60_000, saveIntervalMs = 15_000, broadcastIntervalMs = 1_000, watchdogIntervalMs = 10_000, quoteTimeoutMs = 45_000, qualityOptions, alertOptions, paperOptions, notifications, executionOptions, fxIntervalMs = exchanges === EXCHANGES ? 60000 : 0 } = {}) {
+  let sourceRevision = 0;
+  const readOpportunitiesV2 = createOpportunitiesV2Reader();
   const quotes = new Map(), dirty = new Map(), pendingPrunes = new Map(), connections = new Set(), clients = new Map(), timers = new Set(), discoveries = new Map(), publishedQuotes = new Map(), publishDirty = new Set(), pollBudgets = new Map();
   const states = new Map(exchanges.map(exchange => [exchange.id, { ...exchange, kind: exchange.kind ?? exchange.type, marketCount: 0, lastMessageAt: null, lastSourceLagMs: null, rejectedFuture: 0, error: null, discovering: false }]));
   let running = false, storageError = null, broadcastTimer, saveTimer, refreshTimer, metricsTimer, fxTimer, sequence = 0;
@@ -150,7 +152,7 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
     healthEvents.unshift({ id: ++healthEventId, exchange, kind, reason, at: now });
     healthEvents.length = Math.min(healthEvents.length, 60);
   }
-  function changedQuote(key, quote) { quotes.set(key, quote); dirty.set(key, quote); if (clients.size) publishDirty.add(key); }
+  function changedQuote(key, quote) { sourceRevision++; quotes.set(key, quote); dirty.set(key, quote); if (clients.size) publishDirty.add(key); }
   let cpuBaseline = process.cpuUsage(), sampledAt = performance.now(), sampledMessages = 0;
   for (const quote of store?.load() ?? []) if (states.has(quote.exchange)) quotes.set(`${quote.exchange}:${quote.symbol}`, quote);
   const later = (fn, ms) => {
@@ -326,7 +328,7 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
         // must not tear down subscriptions or refresh the original price times.
         const identities = new Map(markets.map(market => [market.symbol, market]));
         const signature = JSON.stringify([...markets].sort((left, right) => left.symbol.localeCompare(right.symbol)), (key, value) => catalogFields.has(key) ? undefined : value);
-        state.markets = identities;
+        state.markets = identities; sourceRevision++;
         for (const [key, quote] of quotes) {
           if (quote.exchange !== exchange || !identities.has(quote.symbol)) continue;
           const current = withMarketMetadata(quote, identities.get(quote.symbol));
@@ -339,7 +341,7 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
           if (quote.exchange !== exchange) continue;
           const market = identities.get(quote.symbol);
           if (!market || quote.base !== market.base || quote.quoteCurrency !== market.quoteCurrency || (quote.multiplier ?? 1) !== (market.multiplier ?? 1) || (market.contractUnit && market.contractUnit !== quote.contractUnit) || (market.comparable === false && quote.comparable !== false)) {
-            quotes.delete(key); dirty.delete(key); if (clients.size) publishDirty.add(key); keepStored.delete(quote.symbol);
+            quotes.delete(key); sourceRevision++; dirty.delete(key); if (clients.size) publishDirty.add(key); keepStored.delete(quote.symbol);
           }
         }
         pendingPrunes.set(exchange, keepStored);
@@ -419,10 +421,23 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
       execution.stop();
       flush(); store?.close();
     },
+    summary() {
+      const now = clock(), connected = new Set([...connections].filter(x => x.socket?.readyState === 1).map(x => x.exchange));
+      const freshVenues = new Set(); let fresh = 0;
+      for (const quote of quotes.values()) {
+        const at = quote.bidAskAt;
+        if (quote.bid > 0 && quote.ask >= quote.bid && Number.isFinite(at) && at <= now + MAX_FUTURE_MS && now - at <= staleAfterMs && connected.has(quote.exchange)) { fresh++; freshVenues.add(quote.exchange); }
+      }
+      const missing = [...states.keys()].filter(id => !freshVenues.has(id));
+      const times = [...states.values()].map(state => state.lastMessageAt);
+      const updatedAt = times.length && times.every(at => Number.isFinite(at) && at > 0 && at <= now + MAX_FUTURE_MS) ? Math.min(...times) : null;
+      return { state: !quotes.size ? 'offline' : !fresh ? 'stale' : storageError || missing.length || fresh < quotes.size ? 'partial' : 'online', updatedAt, quoteCount: quotes.size, exchangeCount: states.size, liveExchangeCount: freshVenues.size,
+        message: [storageError, missing.length ? '行情待更新：' + missing.join('、') : '', fresh < quotes.size ? (quotes.size - fresh) + ' 条盘口过期或缺失' : ''].filter(Boolean).join('；') };
+    },
     closeStreams, snapshot, healthy: () => !storageError && alerts.healthy(),
     metrics: () => ({ ...metrics, generatedAt: clock(), quotes: quotes.size, pendingWrites: dirty.size, connections: connections.size, clients: clients.size, rssMb: Number((process.memoryUsage.rss() / 1048576).toFixed(1)), storageError, events: healthEvents.filter(item => clock() - item.at <= 3_600_000), auxiliary: [...pollBudgets].map(([host, budget]) => ({ host, sentInWindow: budget.sent, retryAt: budget.blockedUntil })), venues: snapshot().exchanges.map(exchange => ({ ...exchange, sourceLagMs: states.get(exchange.id).lastSourceLagMs, sourceLagObservedAt: states.get(exchange.id).sourceLagObservedAt ?? null, rejectedFuture: states.get(exchange.id).rejectedFuture, reconnects: states.get(exchange.id).reconnects ?? 0, lastConnectedAt: states.get(exchange.id).lastConnectedAt ?? null, lastProtocolError: states.get(exchange.id).lastProtocolError ?? null })) }),
     actions: { quote: ['GET'], opportunities: ['GET'], 'opportunities-v2': ['GET'], stream: ['GET'], diagnostics: ['GET'], quality: ['POST'], alerts: ['GET', 'PUT'], depth: ['POST'], exit: ['POST'], paper: ['GET', 'POST'], fx: ['GET'] },
-    handle(action, method, input) { if (action === 'opportunities-v2') return createPerpetualOpportunitiesV2(snapshot(), clock(), (exchange, symbol) => states.get(exchange)?.markets?.get(symbol), execution.peekFx()); if (action === 'opportunities') return createPerpetualOpportunities(snapshot(), clock(), (exchange, symbol) => states.get(exchange)?.markets?.get(symbol)); if (action === 'quote') return snapshot(); if (action === 'diagnostics') return { ...this.metrics(), quality: quality?.metrics() ?? null, alerts: alerts.metrics(), execution: execution.metrics(), paper: paper.metrics() }; if (action === 'quality') { if (!quality) throw new Error('质量采集服务未就绪'); return quality.read(input); } if (action === 'alerts') return method === 'PUT' ? alerts.update(input) : alerts.view(); if (action === 'depth') return execution.depth(input); if (action === 'exit') return execution.exit(input); if (action === 'paper') return method === 'POST' ? paper.update(input) : paper.view(); if (action === 'fx') return execution.fx(); },
+    handle(action, method, input) { if (action === 'opportunities-v2') return readOpportunitiesV2(snapshot(), clock(), (exchange, symbol) => states.get(exchange)?.markets?.get(symbol), execution.peekFx(), `${streamId}:${sourceRevision}`); if (action === 'opportunities') return createPerpetualOpportunities(snapshot(), clock(), (exchange, symbol) => states.get(exchange)?.markets?.get(symbol)); if (action === 'quote') return snapshot(); if (action === 'diagnostics') return { ...this.metrics(), quality: quality?.metrics() ?? null, alerts: alerts.metrics(), execution: execution.metrics(), paper: paper.metrics() }; if (action === 'quality') { if (!quality) throw new Error('质量采集服务未就绪'); return quality.read(input); } if (action === 'alerts') return method === 'PUT' ? alerts.update(input) : alerts.view(); if (action === 'depth') return execution.depth(input); if (action === 'exit') return execution.exit(input); if (action === 'paper') return method === 'POST' ? paper.update(input) : paper.view(); if (action === 'fx') return execution.fx(); },
     stream(request, response) {
       const gzip = /(?:^|,)\s*gzip\s*(?:,|$)/i.test(request.headers['accept-encoding'] ?? '');
       response.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no', Vary: 'Accept-Encoding', ...(gzip ? { 'Content-Encoding': 'gzip' } : {}) });

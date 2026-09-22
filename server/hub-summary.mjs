@@ -1,0 +1,29 @@
+import { monitors } from '../lib/monitors.ts';
+const timestamp = value => { const at = typeof value === 'number' ? value : Date.parse(value); return Number.isFinite(at) && at > 0 ? at : null; };
+const finite = value => typeof value === 'number' && Number.isFinite(value) ? value : null;
+const metric = (key, label, value, unit) => ({ key, label, value, unit });
+
+/** Project only the selected module from resident caches; never fetch upstream or read history. */
+export async function readHubSummary(services, now = Date.now(), monitorId = 'oil') {
+  const entry = monitors.find(item => item.id === monitorId);
+  if (!entry) throw new Error('监控模块不存在');
+  const modules = metric('modules', '监控模块', monitors.length, '个');
+  if (monitorId === 'perpetual') {
+    const value = services.get('perpetual')?.summary?.() ?? { state: 'offline', updatedAt: null, message: '永续采集未就绪', quoteCount: 0, exchangeCount: 0, liveExchangeCount: 0 };
+    return { updatedAt: timestamp(value.updatedAt) ? new Date(value.updatedAt).toISOString() : null,
+      health: { state: value.state, message: value.message || '永续合约监控已连接；更新时间取启用交易所最早消息时间', staleAfterSeconds: 30 },
+      metrics: [metric('exchanges', '启用交易所', value.exchangeCount, '个'), metric('live_exchanges', '在线交易所', value.liveExchangeCount, '个'), metric('quotes', '报价合约', value.quoteCount, '个'), modules] };
+  }
+  let quote = null;
+  try { quote = await services.get(monitorId)?.handle('quote', 'GET') ?? null; } catch { /* A missing cache is explicitly offline. */ }
+  const at = timestamp(quote?.fetchedAt), staleAfterSeconds = monitorId === 'oil' ? 90 : 35;
+  const stale = quote && (!at || at > now + 1000 || now - at > staleAfterSeconds * 1000 || quote.status === 'snapshot' || quote.collection?.stale);
+  const partial = quote?.status === 'partial' || quote?.status === 'connecting' || Boolean(quote?.collection?.error) || monitorId === 'hynix' && Boolean(quote?.fundingError);
+  const state = !quote ? 'offline' : stale ? 'stale' : partial ? 'partial' : 'online';
+  const detail = quote?.collection?.error || (monitorId === 'hynix' ? quote?.fundingError : '') || (!quote ? '后台尚未取得报价' : stale ? '报价已过期，保留原采集时间' : '');
+  const brent = finite(quote?.brent?.markPx), wti = finite(quote?.wti?.markPx), annualized = finite(quote?.funding?.annualizedRate);
+  return { updatedAt: at ? new Date(at).toISOString() : null,
+    health: { state, message: entry.title + (detail ? '：' + detail : monitorId === 'oil' ? '监控已连接；Binance 标记价格，价差为布伦特减 WTI' : '监控已连接'), staleAfterSeconds },
+    metrics: monitorId === 'oil' ? [metric('brent', '布伦特原油', brent, 'USDT/桶'), metric('wti', 'WTI 原油', wti, 'USDT/桶'), metric('spread', '布伦特 − WTI', brent === null || wti === null ? null : brent - wti, 'USDT/桶'), modules]
+      : [metric('premium', 'ADR 溢价', finite(quote?.premium), '%'), metric('spread', 'ADR 与换算价格差', finite(quote?.spread), 'USD'), metric('funding', '资金费率年化', annualized === null ? null : annualized * 100, '%'), modules] };
+}
