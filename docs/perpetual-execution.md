@@ -25,6 +25,7 @@
 | OKX | 按需 REST `/api/v5/market/books` | 每侧 50 | 合约张数 × 目录 `ctVal` × 币种乘数；仅支持确认的 linear、标准 `ctMult=1` |
 | Bitget | 按需 REST `/api/v2/mix/market/merge-depth`，scale0 | 每侧 50 | 原始合约标的数量 × 币种乘数 |
 | Gate | 按需 REST `/api/v4/futures/usdt/order_book` | 每侧 50 | 合约张数 × `quanto_multiplier` × 币种乘数 |
+| Kraken | 单次公开 WS book_snapshot | 每侧保留 50 | qty × contractSize × 币种乘数，仅 flexible linear、非 tradfi 的有效 PF 合约 |
 | Hyperliquid | 按需 REST `info`，`l2Book` | 官方每侧最多 20 | `sz` × 币种乘数 |
 | Lighter | 单次 WS `order_book/{market_id}` 快照 | 每侧保留 50 | `size` × 币种乘数 |
 | rh-Lighter | 独立部署的单次 WS 同名通道 | 每侧保留 50 | `size` × 币种乘数 |
@@ -42,9 +43,9 @@
 
 ## 稳定币汇率
 
-`GET /api/monitors/perpetual/fx` 返回基准为 USDT 的买卖价快照。USDT=1 仅是计价单位定义；USDC、USD1、USDG 使用 Gate 公开现货 `币种_USDT` 盘口，并保留交易所快照时间、买价、卖价及来源 URL。USD 未接入可信直接盘口，明确缺失。缺失、倒挂、过期或无数量盘口不会用 1 补齐。
+`GET /api/monitors/perpetual/fx` 返回基准为 USDT 的买卖价快照。USDT=1 仅是计价单位定义；USDC、USD1、USDG 使用 Gate 公开现货 `币种_USDT` 盘口，并保留交易所快照时间、买价、卖价及来源 URL。USD 使用 Kraken USDT/USD 盘口反向换算，bid=1/原 ask，ask=1/原 bid，源时间取两侧最早时间。Gate 使用实际 order book update 时间，不用响应 current 刷新旧盘口。缺失、倒挂、过期或无数量盘口不会用 1 补齐。
 
-汇率按需刷新，60 秒共享缓存，最大有效期 180 秒。买入使用币种兑 USDT 的卖价，卖出使用买价，保留换汇买卖差。每条汇率独立判断新鲜度，不能用整包刷新时间替代。临时更新失败会沿用尚未过期的旧汇率，并保留旧源时间；超过有效期后排除。
+汇率后台每分钟刷新，按需请求共享 60 秒缓存，最大有效期 180 秒。买入使用币种兑 USDT 的卖价，卖出使用买价，保留换汇买卖差。每条汇率独立判断新鲜度，不能用整包刷新时间替代。临时更新失败或源时间倒退会沿用尚未过期的旧汇率，并保留旧源时间；超过有效期后排除。
 
 ## 接口与验证
 
@@ -59,3 +60,5 @@
 2026-09-21 对 10 家真实公开接口完成了小额名义本金的只读校验，确认 Lighter 两站 WS 快照、CEX 合约张数转换和 Hyperliquid/Entropy 20 档限制。单元测试覆盖等量匹配、部分成交、币种乘数、合约单位、汇率方向、新鲜度、错序增量帧、缓存合并、队列与市场数边界。真实接口结果会随流动性和上游可用性变化。
 
 官方格式参考：[Bybit](https://bybit-exchange.github.io/docs/v5/market/orderbook)、[OKX](https://www.okx.com/docs-v5/en/)、[Gate 合约](https://www.gate.com/docs/developers/apiv4/en/futures/)、[Hyperliquid](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint#l2-book-snapshot)、[Lighter](https://apidocs.lighter.xyz/docs/websocket-reference)、[Aster](https://asterdex.github.io/aster-api-website/futures/market-data/#order-book)。
+
+2026-09-22 增补 Kraken 的当前目录及单次 WS 深度，USD 反向汇率只读实测通过。Kraken 盘口每次使用前后复核当前合约身份，缓存也不能绕过撤销或下架状态。

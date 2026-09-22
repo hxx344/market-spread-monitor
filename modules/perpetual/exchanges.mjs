@@ -4,6 +4,7 @@
  * parseMessage returns PARTIAL updates. Missing fields must never refresh old BBOs.
  */
 import { ADDITIONAL_EXCHANGES, discoverAdditionalMarkets, createAdditionalSubscriptions, parseAdditionalMessage, getAdditionalControlResponse } from './additional-exchanges.mjs';
+import { KRAKEN_EXCHANGE, discoverKrakenMarkets, createKrakenSubscriptions, parseKrakenMessage } from './kraken.mjs';
 
 export const EXCHANGES = Object.freeze([
   { id: 'binance', name: 'Binance', type: 'cex', website: 'https://www.binance.com', docsUrl: 'https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/ws-streams/public' },
@@ -11,6 +12,7 @@ export const EXCHANGES = Object.freeze([
   { id: 'okx', name: 'OKX', type: 'cex', website: 'https://www.okx.com', docsUrl: 'https://www.okx.com/docs-v5/en/' },
   { id: 'bitget', name: 'Bitget', type: 'cex', website: 'https://www.bitget.com', docsUrl: 'https://www.bitget.com/api-doc/classic/contract/websocket/public/Tickers-Channel' },
   { id: 'gate', name: 'Gate', type: 'cex', website: 'https://www.gate.com', docsUrl: 'https://www.gate.com/docs/developers/futures/ws/en/' },
+  KRAKEN_EXCHANGE,
   { id: 'hyperliquid', name: 'Hyperliquid', type: 'dex', website: 'https://app.hyperliquid.xyz', docsUrl: 'https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/subscriptions' },
   { id: 'lighter', name: 'Lighter', type: 'dex', website: 'https://app.lighter.xyz', docsUrl: 'https://apidocs.lighter.xyz/docs/websocket-reference' },
   { id: 'aster', name: 'Aster', type: 'dex', website: 'https://www.asterdex.com', docsUrl: 'https://asterdex.github.io/aster-api-website/futures/websocket-market-streams/' },
@@ -173,6 +175,7 @@ async function request(url, { fetchImpl, signal }, body) {
 /** Dynamic discovery includes active, stablecoin quoted perpetual contracts only. */
 export async function discoverMarkets(exchangeId, { fetchImpl = fetch, signal, now = Date.now() } = {}) {
   const options = { fetchImpl, signal, now };
+  if (exchangeId === 'kraken') return discoverKrakenMarkets(options);
   if (ADDITIONAL_IDS.has(exchangeId)) return discoverAdditionalMarkets(exchangeId, options);
   let rows;
   if (exchangeId === 'binance' || exchangeId === 'aster') {
@@ -207,7 +210,7 @@ export async function discoverMarkets(exchangeId, { fetchImpl = fetch, signal, n
       const data = await request(`https://api.bybit.com/v5/market/instruments-info?category=linear&limit=1000${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, options);
       rows.push(...assertArray(data.result?.list, exchangeId)
         .filter(row => row.status === 'Trading' && row.contractType === 'LinearPerpetual' && !row.isPreListing && STABLE_QUOTES.has(row.quoteCoin) && row.settleCoin === row.quoteCoin)
-        .map(row => market(exchangeId, row.symbol, row.baseCoin, row.quoteCoin, { ...classifyMarketIdentity(exchangeId, row.baseCoin, row), ...delistingMetadata(exchangeId, row), ...bybitTakerMetadata(row, now), collateralCurrency: row.settleCoin, identityVerified: row.symbolType === 'innovation' || (row.symbolType === '' && CROSSEX_STANDARD_CRYPTO.has(row.baseCoin)), fundingIntervalHours: number(row.fundingInterval, true) === null ? null : Number(row.fundingInterval) / 60 })));
+        .map(row => market(exchangeId, row.symbol, row.baseCoin, row.quoteCoin, { ...classifyMarketIdentity(exchangeId, row.baseCoin, row), ...delistingMetadata(exchangeId, row), ...bybitTakerMetadata(row, now), collateralCurrency: row.settleCoin, crossexVerified: ['', 'crypto', 'innovation'].includes(row.symbolType), identityVerified: row.symbolType === 'innovation' || (row.symbolType === '' && CROSSEX_STANDARD_CRYPTO.has(row.baseCoin)), fundingIntervalHours: number(row.fundingInterval, true) === null ? null : Number(row.fundingInterval) / 60 })));
       cursor = data.result.nextPageCursor || '';
       if (cursor && seen.has(cursor)) throw new Error('Bybit: repeated pagination cursor');
       seen.add(cursor);
@@ -220,7 +223,7 @@ export async function discoverMarkets(exchangeId, { fetchImpl = fetch, signal, n
       .map(row => {
         const rawBase = row.ctValCcy || row.instId.split('-')[0], identity = classifyMarketIdentity(exchangeId, rawBase, row);
         const rate = identity.assetClass === 'crypto' && ['4', '5'].includes(String(row.groupId)) ? 0.0005 : null;
-        return market(exchangeId, row.instId, rawBase, row.settleCcy, { ...identity, ...delistingMetadata(exchangeId, row), ...takerMetadata(rate, 'okx-standard', now) });
+        return market(exchangeId, row.instId, rawBase, row.settleCcy, { ...identity, ...delistingMetadata(exchangeId, row), ...takerMetadata(rate, 'okx-standard', now), crossexVerified: ['1', '2'].includes(String(row.instCategory)) && row.ruleType === 'normal' && row.ctValCcy === rawBase && Number(row.ctVal) > 0 && Number(row.ctMult) === 1 });
       });
   } else if (exchangeId === 'bitget') {
     const results = await Promise.allSettled(['USDT-FUTURES', 'USDC-FUTURES'].map(async productType => {
@@ -237,19 +240,19 @@ export async function discoverMarkets(exchangeId, { fetchImpl = fetch, signal, n
       // Keep announced delistings while trading. A true flag with zero open
       // positions is explicitly already delisted in Gate's contract schema.
       .filter(row => row.type === 'direct' && row.name?.endsWith('_USDT') && (!row.status || row.status === 'trading') && !(row.in_delisting === true && number(row.position_size) === 0))
-      .map(row => market(exchangeId, row.name, row.name.slice(0, -5), 'USDT', { ...classifyMarketIdentity(exchangeId, row.name.slice(0, -5), row), ...delistingMetadata(exchangeId, row), fundingIntervalHours: number(row.funding_interval, true) === null ? null : Number(row.funding_interval) / 3600 }));
+      .map(row => market(exchangeId, row.name, row.name.slice(0, -5), 'USDT', { ...classifyMarketIdentity(exchangeId, row.name.slice(0, -5), row), ...delistingMetadata(exchangeId, row), crossexVerified: ['', 'crypto'].includes(row.contract_type) && row.is_pre_market === false && Number(row.quanto_multiplier) > 0, fundingIntervalHours: number(row.funding_interval, true) === null ? null : Number(row.funding_interval) / 3600 }));
   } else if (exchangeId === 'hyperliquid') {
     const data = await request('https://api.hyperliquid.xyz/info', options, { type: 'meta' });
     rows = assertArray(data.universe, exchangeId)
       .filter(row => !row.isDelisted && row.name && !row.name.includes(':'))
-      .map(row => market(exchangeId, row.name, row.name, ['HYPE', 'PURR'].includes(row.name) ? 'USDC' : 'USDT', { settlementCurrency: 'USDC', fundingIntervalHours: 1 }));
+      .map(row => market(exchangeId, row.name, row.name, ['HYPE', 'PURR'].includes(row.name) ? 'USDC' : 'USDT', { settlementCurrency: 'USDC', fundingIntervalHours: 1, assetClass: 'crypto', crossexVerified: Number.isInteger(row.szDecimals) && row.szDecimals >= 0 && Number(row.maxLeverage) > 0, identitySource: 'Hyperliquid native meta.universe + independently verified Binance COIN identity; contract-specifications USDC settlement' }));
   } else if (exchangeId === 'lighter') {
     const data = await request('https://mainnet.zklighter.elliot.ai/api/v1/orderBookDetails', options);
     rows = assertArray(data.order_book_details, exchangeId)
       .filter(row => row.status === 'active' && row.market_type === 'perp' && Number.isInteger(row.market_id))
       // Lighter's public market fee fields are percentages, not fractions.
       // https://apidocs.lighter.xyz/reference/orderbooks
-      .map(row => market(exchangeId, row.symbol, row.symbol, 'USDC', { ...classifyMarketIdentity(exchangeId, row.symbol, row), ...takerMetadata(row.taker_fee, 'lighter-standard', now, 100), marketId: row.market_id, fundingIntervalHours: 1 }));
+      .map(row => market(exchangeId, row.symbol, row.symbol, 'USDC', { ...classifyMarketIdentity(exchangeId, row.symbol, row), ...takerMetadata(row.taker_fee, 'lighter-standard', now, 100), crossexVerified: Number(row.funding_premium_multiplier) === 100, marketId: row.market_id, fundingIntervalHours: 1 }));
   } else {
     throw new Error(`Unsupported exchange: ${exchangeId}`);
   }
@@ -274,6 +277,7 @@ function connection(url, markets, subscribe, extra = {}) {
  * The WebSocket transport must answer protocol ping frames automatically.
  */
 export function createSubscriptions(exchangeId, inputMarkets) {
+  if (exchangeId === 'kraken') return createKrakenSubscriptions(inputMarkets);
   if (ADDITIONAL_IDS.has(exchangeId)) return createAdditionalSubscriptions(exchangeId, inputMarkets);
   const markets = inputMarkets.filter(row => row.exchange === exchangeId);
   if (!markets.length) return [];
@@ -457,6 +461,7 @@ export function parseMessage(exchangeId, payload, markets, receivedAt = Date.now
   const decoded = decode(payload);
   if (!decoded) return [];
   checkProtocolError(exchangeId, decoded);
+  if (exchangeId === 'kraken') return parseKrakenMessage(decoded, markets, receivedAt, context);
   if (ADDITIONAL_IDS.has(exchangeId)) return parseAdditionalMessage(exchangeId, decoded, markets, receivedAt, context);
   if (context.indexMarkets !== markets || context.indexExchange !== exchangeId) {
     context.indexMarkets = markets; context.indexExchange = exchangeId;

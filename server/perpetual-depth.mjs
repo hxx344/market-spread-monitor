@@ -14,7 +14,9 @@ import { calculatePerpetualExitPnl, perpetualContractIdentity, perpetualExitIden
 // https://apidocs.lighter.xyz/docs/websocket-reference
 // https://apidocs.rh.lighter.xyz/docs/websocket
 // https://asterdex.github.io/aster-api-website/futures/market-data/#order-book
-const IDS = new Set(['binance', 'bybit', 'okx', 'bitget', 'gate', 'hyperliquid', 'lighter', 'rh-lighter', 'aster', 'entropy']);
+// https://docs.kraken.com/exchange/api-reference/futures-websocket/book
+// https://docs.kraken.com/api-reference/market-data/get-order-book
+const IDS = new Set(['binance', 'bybit', 'okx', 'bitget', 'gate', 'kraken', 'hyperliquid', 'lighter', 'rh-lighter', 'aster', 'entropy']);
 const MAX_BOOK_AGE = 10_000, MAX_SKEW = 5_000, LEVELS = 50;
 const positive = value => (typeof value === 'number' || (typeof value === 'string' && value.trim())) && Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : null;
 const failure = (message, status = 400) => Object.assign(new Error(message), { status });
@@ -221,6 +223,44 @@ export function createPerpetualExecutionService({ getQuote, getMarket = () => nu
       });
     }));
   }
+  function krakenIdentity(quote, market) {
+    if (!market || market.exchange !== 'kraken' || market.symbol !== quote.symbol || market.base !== quote.base
+      || market.quoteCurrency !== 'USD' || quote.quoteCurrency !== 'USD' || market.collateralCurrency !== 'MULTI'
+      || market.settlementCurrency !== 'USD' || market.contractKind !== 'linear' || market.multiplier !== 1
+      || market.identityVerified !== true || market.comparable === false
+      || perpetualContractIdentity(quote) !== perpetualContractIdentity(market)) throw failure('Kraken 当前合约目录身份或数量单位未确认');
+    return JSON.stringify([perpetualContractIdentity(market), market.contractKind, market.settlementCurrency, market.identityVerified]);
+  }
+  function krakenSnapshot(quote, market) {
+    const identity = krakenIdentity(quote, market);
+    return budget.run(() => new Promise((resolve, reject) => {
+      if (controller.signal.aborted) { reject(failure('盘口查询已取消', 503)); return; }
+      const socket = new WebSocketImpl('wss://futures.kraken.com/ws/v1');
+      let done = false;
+      const finish = (error, data) => {
+        if (done) return; done = true; clearTimeout(timer); controller.signal.removeEventListener('abort', aborted);
+        socket.terminate();
+        if (!error) {
+          try { if (identity !== krakenIdentity(quote, getMarket(quote.exchange, quote.symbol))) error = failure('Kraken 查询期间合约身份或数量单位已变化'); }
+          catch (cause) { error = cause; }
+        }
+        if (error) reject(error); else resolve({ data, source: 'https://futures.kraken.com', transport: 'ws' });
+      };
+      const aborted = () => finish(failure('盘口查询已取消', 503));
+      const timer = setTimeout(() => finish(failure('Kraken 盘口快照连接超时', 502)), 8_000);
+      controller.signal.addEventListener('abort', aborted, { once: true });
+      socket.on('open', () => socket.send(JSON.stringify({ event: 'subscribe', feed: 'book', product_ids: [quote.symbol] })));
+      socket.on('error', () => finish(failure('Kraken 盘口快照连接失败', 502)));
+      socket.on('close', () => finish(failure('Kraken 盘口快照连接关闭', 502)));
+      socket.on('message', raw => {
+        let data; try { data = JSON.parse(String(raw)); } catch { return; }
+        if (['error', 'subscribed_failed', 'unsubscribed_failed'].includes(data.event)) { finish(failure('Kraken 盘口订阅失败', 502)); return; }
+        if (data.feed !== 'book_snapshot') return; // Never treat a delta as a complete book.
+        if (data.product_id !== quote.symbol) { finish(failure('Kraken 返回合约与请求不一致', 502)); return; }
+        finish(null, data);
+      });
+    }));
+  }
   async function loadBook(quote, market) {
     const { exchange, symbol } = quote, symbolParam = encodeURIComponent(symbol);
     let data, source, sourceTime, bids, asks, transport = 'rest';
@@ -243,6 +283,11 @@ export function createPerpetualExecutionService({ getQuote, getMarket = () => nu
     } else if (exchange === 'gate') {
       source = `https://api.gateio.ws/api/v4/futures/usdt/order_book?contract=${symbolParam}&limit=${LEVELS}`;
       data = await json(source); ({ bids, asks } = data); sourceTime = Number(data.current) * 1_000;
+    } else if (exchange === 'kraken') {
+      const result = await krakenSnapshot(quote, market); ({ data, source, transport } = result);
+      bids = Array.isArray(data.bids) ? data.bids.slice(0, 250).map(row => [row.price, row.qty]) : null;
+      asks = Array.isArray(data.asks) ? data.asks.slice(0, 250).map(row => [row.price, row.qty]) : null;
+      sourceTime = data.timestamp;
     } else if (['hyperliquid', 'entropy'].includes(exchange)) {
       source = 'https://api.hyperliquid.xyz/info'; data = await json(source, { type: 'l2Book', coin: symbol });
       if (data.coin !== symbol) throw failure('Hyperliquid 返回合约与请求不一致');
@@ -258,7 +303,8 @@ export function createPerpetualExecutionService({ getQuote, getMarket = () => nu
   }
   function book(quote) {
     const key = `${quote.exchange}:${quote.symbol}`, cached = books.get(key), now = clock(), market = getMarket(quote.exchange, quote.symbol);
-    const identity = JSON.stringify([perpetualContractIdentity(quote), market?.marketId ?? null, market?.multiplier ?? quote.multiplier ?? 1]);
+    const identity = JSON.stringify([perpetualContractIdentity(quote), market?.marketId ?? null, market?.multiplier ?? quote.multiplier ?? 1,
+      ...(quote.exchange === 'kraken' ? [market ? perpetualContractIdentity(market) : null, market?.contractKind, market?.settlementCurrency, market?.identityVerified, market?.comparable] : [])]);
     if (cached?.identity === identity && cached.flight) return cached.flight;
     if (cached?.identity === identity && cached.value && now - cached.at < (cached.value.reason ? 10_000 : cacheMs)) return Promise.resolve(cached.value);
     // Active market leases prevent many browsers cycling through the whole market.
@@ -273,15 +319,30 @@ export function createPerpetualExecutionService({ getQuote, getMarket = () => nu
     if (fxSnapshot && clock() - fxAttemptAt < 60_000) return fxSnapshot;
     fxAttemptAt = clock();
     fxFlight = (async () => {
-      const rates = { USDT: { bid: 1, ask: 1, at: clock(), source: 'USDT 计价基准' } }, reasons = { USD: '未接入可信 USD / USDT 换汇盘口' };
-      await Promise.all(['USDC', 'USD1', 'USDG'].map(async currency => {
+      const rates = { USDT: { bid: 1, ask: 1, at: clock(), source: 'USDT 计价基准' } }, reasons = {};
+      await Promise.all(['USDC', 'USD1', 'USDG', 'USD'].map(async currency => {
         const previous = quoteCurrencyFx(currency, fxSnapshot, clock());
         if (previous) rates[currency] = previous;
-        const source = `https://api.gateio.ws/api/v4/spot/order_book?currency_pair=${currency}_USDT&limit=1`;
+        const source = currency === 'USD' ? 'https://api.kraken.com/0/public/Depth?pair=USDTUSD&count=1'
+          : `https://api.gateio.ws/api/v4/spot/order_book?currency_pair=${currency}_USDT&limit=1`;
         try {
-          const data = await json(source), bid = positive(data.bids?.[0]?.[0]), ask = positive(data.asks?.[0]?.[0]);
-          const at = validTime(data.current, clock());
-          if (!bid || !ask || bid > ask || !at || clock() - at > 180_000 || !positive(data.bids?.[0]?.[1]) || !positive(data.asks?.[0]?.[1])) throw failure('汇率盘口缺失或过期');
+          const data = await json(source);
+          let bid, ask, at;
+          if (currency === 'USD') {
+            const keys = data.result && typeof data.result === 'object' && !Array.isArray(data.result) ? Object.keys(data.result) : [];
+            if (!Array.isArray(data.error) || data.error.length || keys.length !== 1 || keys[0] !== 'USDTZUSD') throw failure('USD 汇率交易对或响应无效');
+            const spot = data.result.USDTZUSD, rawBid = positive(spot.bids?.[0]?.[0]), rawAsk = positive(spot.asks?.[0]?.[0]);
+            const bidAt = validTime(Number(spot.bids?.[0]?.[2]) * 1000, clock()), askAt = validTime(Number(spot.asks?.[0]?.[2]) * 1000, clock());
+            if (!rawBid || !rawAsk || rawBid > rawAsk || !bidAt || !askAt || !positive(spot.bids?.[0]?.[1]) || !positive(spot.asks?.[0]?.[1])) throw failure('USD 汇率盘口缺失或过期');
+            // Spot is USD per USDT; invert AND swap sides to express USDT per USD.
+            bid = 1 / rawAsk; ask = 1 / rawBid; at = Math.min(bidAt, askAt);
+          } else {
+            bid = positive(data.bids?.[0]?.[0]); ask = positive(data.asks?.[0]?.[0]);
+            at = validTime(data.update, clock()); // `current` is response time, not a new order-book version.
+            if (!positive(data.bids?.[0]?.[1]) || !positive(data.asks?.[0]?.[1])) throw failure('汇率盘口缺失或过期');
+          }
+          if (!bid || !ask || !Number.isFinite(bid) || !Number.isFinite(ask) || bid > ask || !at || clock() - at > 180_000) throw failure('汇率盘口缺失或过期');
+          if (previous && at < previous.at) throw failure('汇率盘口时间回退');
           rates[currency] = { bid, ask, at, source };
         } catch (error) {
           // Retain last valid exchange timestamp across temporary errors; never
@@ -308,6 +369,7 @@ export function createPerpetualExecutionService({ getQuote, getMarket = () => nu
   }
   return {
     fx,
+    peekFx: () => fxSnapshot,
     async exit(input) {
       try { validatePerpetualExitPosition(input); } catch (error) { throw failure(error.message); }
       const legs = selectLegs(input, true), identity = perpetualExitIdentity(legs[0], legs[1]);

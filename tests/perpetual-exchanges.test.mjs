@@ -278,7 +278,7 @@ test('Lighter BBO uses market ID, handles microseconds, and funding uses current
 });
 
 test('subscription shards fit connection caps and keep Binance public/market endpoints separate', () => {
-  assert.equal(EXCHANGES.length, 10);
+  assert.equal(EXCHANGES.length, 11);
   const markets = Array.from({ length: 451 }, (_, i) => market('lighter', `COIN${i}`, { marketId: i }));
   const lighter = createSubscriptions('lighter', markets);
   assert.equal(lighter.length, 1); assert.equal(lighter[0].subscribe.length, 1); assert.equal(lighter[0].markets.length, 451);

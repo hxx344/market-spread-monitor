@@ -40,6 +40,12 @@ export interface PerpetualQuote {
   displayBase?: string;
   contractUnit?: string;
   collateralCurrency?: string;
+  settlementCurrency?: string;
+  rawBase?: string;
+  contractKind?: "linear" | "quanto";
+  counterCurrency?: string;
+  crossexSymbol?: string;
+  marketId?: number;
   comparable?: boolean;
   /** Official directory classification; missing fields remain unverified. */
   assetClass?: string;

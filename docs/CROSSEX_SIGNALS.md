@@ -1,3 +1,35 @@
+# CrossEx 七所模拟联动（v2）
+
+新增 `GET /api/monitors/perpetual/opportunities-v2`，沿用 Monitor 登录认证，只读现有行情和汇率缓存，不在读取信号时访问交易所。旧 `opportunities` v1 接口及其支持范围保持不变。请先升级 Monitor，再升级 CrossEx。
+
+支持 Binance、Bybit、OKX、Gate、Kraken、Hyperliquid、Lighter，排除 Deribit。每腿必须是单位为 1 的普通加密永续，当前目录提供身份资料，且没有下架标志。非 Binance 合约另需同基础币 Binance COIN 资料；已知简称冲突、未知分类、盘前、倍数合约不进入 v2。Gate EDGE 与 Lighter AI 继续隔离。
+
+v2 延续下面 v1 的 envelope、quotes / signals 分离、5000 / 200 容量和方向键，`schemaVersion: 2`，另附 `fx: { baseCurrency: "USDT", generatedAt, staleAfterMs: 180000, rates, reasons }`。报价增加 `rawBase`、`settlementCurrency`、`collateralCurrency`、`contractKind`、`counterCurrency`、`crossexSymbol`，Lighter 另有 `marketId`。字段来自当前目录，任何身份变化或缺失撤销资格，不改变价格时间。
+
+| 平台 | 报价 / 结算 | 原生合约示例 |
+| --- | --- | --- |
+| Binance | USDT 或 USDC / 同币 | BTCUSDT、BTCUSDC |
+| Bybit | USDT 或 USDC / 同币 | BTCUSDT、BTCPERP |
+| OKX | USDT 或 USDC / 同币 | BTC-USDT-SWAP |
+| Gate | USDT / USDT | BTC_USDT |
+| Kraken | USD / USD，MULTI 保证金 | PF_XBTUSD，基础币 BTC |
+| Hyperliquid | 通常 USDT / USDC（quanto）；HYPE、PURR 为 USDC / USDC | BTC |
+| Lighter | USDC / USDC | BTC + 当前 market_id |
+
+`signal.quoteCurrency: "USDT"` 仅表示展示基准。腿上的 `bid`、`ask`、币种保持原值，信号另有 `referenceBuyPrice` / `referenceSellPrice`。买入报价按对应汇率 ask、卖出按 bid 换算后排序；即使两腿都是 USDC，也保留换汇买卖差。报价币和结算币所需汇率都必须有效，尤其不能因 Hyperliquid 的报价为 USDT 而跳过 USDC 结算汇率。
+
+USDC 使用 Gate USDC/USDT，USD 使用 Kraken USDT/USD：`USD.bid = 1 / USDTUSD.ask`，`USD.ask = 1 / USDTUSD.bid`。保留交易所源时间，后台每分钟刷新共享缓存；单币缺失或过期只排除依赖它的信号，失败保留旧时间，倒退的新时间拒绝。USDT=1 只是基准定义。
+
+两腿各自有效期 10 秒，时间差最多 5 秒；v2 额外将未来时间容差收紧至 1 秒。信号过期时间取盘口与所需汇率的最早到期；ID 包含身份、盘口、所需非 USDT 汇率与其源时间，单纯响应刷新不会变更 ID。服务储存异常时暂停信号。估值端仍须检查 quotes 的时效、身份和状态。
+
+CrossEx 使用独立公共深度复核模拟开平仓，按原生结算币损益换算为 USDT，不假设 USD / USDC 等于 USDT，不提供外汇对冲或换汇深度验证。价差页面的原有“平仓与跟踪”仍限定 USDT 线性合约；跨币开平仓使用独立 CrossEx 模块，未扩大原功能的损益模型。
+
+来源：[Gate CrossEx](https://www.gate.com/docs/developers/crossex/zh_CN/)、[Kraken instruments](https://docs.kraken.com/api/docs/futures-api/trading/get-instruments/)、[Hyperliquid contract specifications](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/contract-specifications)。
+
+---
+
+## v1 兼容接口（以下范围不变）
+
 # CrossEx 模拟机会接口
 
 `GET /api/monitors/perpetual/opportunities` 为独立 CrossEx 模拟工作台提供只读信号，沿用常驻后台的 Basic 登录保护。未登录返回 401，非 GET 方法返回 405；成功响应为 HTTP 200，`Cache-Control: no-store`。接口不接受交易所密钥，不发单，也不改变现有监控、提醒或持仓策略。

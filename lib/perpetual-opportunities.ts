@@ -1,4 +1,5 @@
 import type { PerpetualExchange, PerpetualQuote, PerpetualStatus } from "./perpetual-types.ts";
+import type { PerpetualFxSnapshot } from "./perpetual-fx.ts";
 
 export const CROSS_EX_STALE_MS = 10_000;
 export const CROSS_EX_MAX_SIGNALS = 200;
@@ -29,6 +30,12 @@ export interface PerpetualOpportunities {
   signals: PerpetualOpportunitySignal[];
   error?: string;
   errorCode?: "NO_RESIDENT_FEED" | "QUOTE_LIMIT_EXCEEDED" | "DUPLICATE_QUOTES";
+}
+
+export interface PerpetualOpportunitiesV2 extends Omit<PerpetualOpportunities, "schemaVersion"> {
+  schemaVersion: 2;
+  fx: PerpetualFxSnapshot | null;
+  storageError?: string;
 }
 
 /** Stateless previews have no collector and must not manufacture fresh signals. */
