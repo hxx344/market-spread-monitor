@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { trustedHubOrigin, cleanHubQuery } from '../lib/hub-bridge.ts';
+import { trustedHubOrigin, cleanHubQuery, observeNetworkActivity } from '../lib/hub-bridge.ts';
 
 test('bridge trusts only the exact isolated proxy hostname, matching scheme and port', () => {
   const hostname = 'p-' + 'a'.repeat(24) + '.hub.localhost';
@@ -15,4 +15,14 @@ test('navigation accepts only a bounded symbol and known venues, with no operati
   const query = { symbol: 'BTC', longExchange: 'binance', shortExchange: 'bybit' };
   assert.deepEqual(cleanHubQuery(query), query); assert.deepEqual(cleanHubQuery({}), {});
   for (const input of [null, [], { symbol: 'btc' }, { symbol: 'A'.repeat(41) }, { symbol: '<script>' }, { longExchange: 'unknown' }, { action: 'open' }, { url: 'https://evil.example' }]) assert.equal(cleanHubQuery(input), null);
+});
+
+
+test('network transitions update activity immediately and are detached when the module leaves', () => {
+  const source = new EventTarget(), transitions = []; let online = true;
+  const stop = observeNetworkActivity(() => transitions.push(online), source);
+  online = false; source.dispatchEvent(new Event('offline')); assert.deepEqual(transitions, [false]);
+  online = true; source.dispatchEvent(new Event('online')); assert.deepEqual(transitions, [false, true]);
+  stop(); source.dispatchEvent(new Event('offline')); source.dispatchEvent(new Event('online'));
+  assert.deepEqual(transitions, [false, true]);
 });

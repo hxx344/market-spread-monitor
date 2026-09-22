@@ -23,12 +23,16 @@ export function cleanHubQuery(input: unknown): HubQuery | null {
 function post(value: object) { if (connected && targetOrigin) window.parent.postMessage({ ...envelope, ...value }, targetOrigin); }
 export function hubChanged() { post({ type: 'changed', scope: 'summary' }); }
 export function hubNavigate(projectId: HubProject, query: HubQuery) { const clean = cleanHubQuery(query); if (clean) post({ type: 'navigate', projectId, query: clean }); }
+export function observeNetworkActivity(update: () => void, source: Pick<Window, 'addEventListener' | 'removeEventListener'> = window) {
+  source.addEventListener('online', update); source.addEventListener('offline', update);
+  return () => { source.removeEventListener('online', update); source.removeEventListener('offline', update); };
+}
 export function useHubBridge(projectId: HubProject) {
-  const [state, setState] = useState(() => ({ connected: false, active: typeof window === 'undefined' || !trustedHubOrigin(window.location, window.parent !== window) }));
+  const [state, setState] = useState(() => ({ connected: false, active: typeof window === 'undefined' || (!trustedHubOrigin(window.location, window.parent !== window) && !document.hidden && navigator.onLine) }));
   useEffect(() => {
     const origin = trustedHubOrigin(window.location, window.parent !== window);
     let hostActive = !origin, visible = true;
-    const update = () => setState({ connected, active: hostActive && visible && !document.hidden });
+    const update = () => setState({ connected, active: hostActive && visible && !document.hidden && navigator.onLine });
     const message = (event: MessageEvent) => {
       if (!origin || event.source !== window.parent || event.origin !== origin) return;
       const value = event.data;
@@ -46,11 +50,12 @@ export function useHubBridge(projectId: HubProject) {
       }
     };
     window.addEventListener('message', message); document.addEventListener('visibilitychange', update);
+    const stopNetwork = observeNetworkActivity(update);
     const observer = origin && typeof IntersectionObserver !== 'undefined' ? new IntersectionObserver(entries => { visible = entries[0]?.isIntersecting ?? true; update(); }) : null;
     observer?.observe(document.documentElement); update();
     // A ready probe covers hosts whose iframe load event preceded React effects.
     if (origin) window.parent.postMessage({ ...envelope, type: 'ready', role: 'module' }, origin);
-    return () => { observer?.disconnect(); window.removeEventListener('message', message); document.removeEventListener('visibilitychange', update); connected = false; targetOrigin = ''; };
+    return () => { stopNetwork(); observer?.disconnect(); window.removeEventListener('message', message); document.removeEventListener('visibilitychange', update); connected = false; targetOrigin = ''; };
   }, [projectId]);
   return state;
 }

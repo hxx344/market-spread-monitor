@@ -68,3 +68,13 @@ test('authenticated HTTP summary selects the requested module and defaults to oi
   const legacy = await (await fetch(base, { headers })).json(); assert.equal(legacy.schemaVersion, 1); assert.equal(legacy.data.health, undefined);
   assert.equal((await fetch(base + '?schemaVersion=2&monitor=unknown', { headers })).status, 400);
 });
+
+
+test('all selected module health messages fit the hub 500-character contract', async () => {
+  const longError = '来源错误'.repeat(300);
+  const cache = services({ oil: { handle: async () => ({ ...oil, collection: { error: longError } }) }, hynix: { handle: async () => ({ fetchedAt: timestamp, status: 'live', premium: 1, fundingError: longError }) }, perpetual: { summary: () => ({ state: 'partial', updatedAt: now, message: longError, exchangeCount: 7, liveExchangeCount: 6, quoteCount: 4900 }) } });
+  for (const id of ['oil', 'hynix', 'perpetual']) {
+    const summary = await readHubSummary(cache, now, id);
+    assert.equal(summary.health.state, 'partial'); assert.equal(summary.health.message.length, 500); assert.match(summary.health.message, /来源错误/);
+  }
+});
