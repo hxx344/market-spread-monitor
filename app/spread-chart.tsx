@@ -13,9 +13,9 @@ import { ranges } from "../lib/chart-ranges";
 type Mode = SpreadMetric | "price";
 type Toggles = { sma: boolean; bands: boolean; zscore: boolean };
 const options = [
-  { key: "sma", label: "7 日均线", color: "#e5b573" },
-  { key: "bands", label: "布林带 · 20 日", color: "#b99ce8" },
-  { key: "zscore", label: "Z-score · 20 日", color: "#85b6ff" },
+  { key: "sma", label: "7 日均线", color: "#9a6718" },
+  { key: "bands", label: "布林带 · 20 日", color: "#8051b0" },
+  { key: "zscore", label: "Z-score · 20 日", color: "#356dc4" },
 ] as const;
 const money = (v: number) => `$${v.toFixed(2)}`;
 const metricValue = (v: number | null | undefined, mode: Mode) => v == null ? "—" : mode === "premium" ? `${v.toFixed(2)}%` : `${v < 0 ? "−" : ""}${money(Math.abs(v))}`;
@@ -109,24 +109,24 @@ function SpreadChart({ data, loading, range, onRangeChange }: {
       {!points.length ? <div className="empty-chart"><Activity size={28}/><p>{loading ? "正在载入上市以来的历史行情" : "暂无可用行情"}</p><span>{loading ? "统一美元口径，对齐小时收盘时间" : "点击刷新行情重试"}</span></div> :
         <ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{width:800,height:300}}>
           <ComposedChart data={chartPoints} syncId="hynix-spread-indicators" syncMethod="value" margin={{top:25,right:14,left:0,bottom:6}} accessibilityLayer>
-            <defs><linearGradient id="premiumFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#53d8b2" stopOpacity={0.21}/><stop offset="100%" stopColor="#53d8b2" stopOpacity={0.01}/></linearGradient></defs>
-            <CartesianGrid stroke="#27313b" strokeDasharray="3 5" vertical={false}/>
-            <XAxis dataKey="time" type="number" domain={["dataMin","dataMax"]} tickFormatter={t => date(t)} stroke="#81909f" axisLine={false} tickLine={false} minTickGap={65} tick={{fontSize:12}} dy={10}/>
-            <YAxis orientation="right" width={68} domain={mode === "price" ? ["auto","auto"] : domain} tickFormatter={v => mode === "premium" ? `${v.toFixed(0)}%` : `$${v.toFixed(0)}`} stroke="#81909f" axisLine={false} tickLine={false} tick={{fontSize:12}}/>
-            <Tooltip content={<IndicatorTooltip mode={mode} enabled={enabled}/>} cursor={{stroke:"#667b8d",strokeDasharray:"3 3"}}/>
+            <defs><linearGradient id="premiumFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#087f83" stopOpacity={0.21}/><stop offset="100%" stopColor="#087f83" stopOpacity={0.01}/></linearGradient></defs>
+            <CartesianGrid stroke="#e0e7ef" strokeDasharray="3 5" vertical={false}/>
+            <XAxis dataKey="time" type="number" domain={["dataMin","dataMax"]} tickFormatter={t => date(t)} stroke="#66748a" axisLine={false} tickLine={false} minTickGap={65} tick={{fontSize:12}} dy={10}/>
+            <YAxis orientation="right" width={68} domain={mode === "price" ? ["auto","auto"] : domain} tickFormatter={v => mode === "premium" ? `${v.toFixed(0)}%` : `$${v.toFixed(0)}`} stroke="#66748a" axisLine={false} tickLine={false} tick={{fontSize:12}}/>
+            <Tooltip content={<IndicatorTooltip mode={mode} enabled={enabled}/>} cursor={{stroke:"#66748a",strokeDasharray:"3 3"}}/>
             {mode === "price" ? <>
-              <Line type="linear" dataKey="adr" stroke="#65a7ff" strokeWidth={2} dot={false} isAnimationActive={false}/>
-              <Line type="linear" dataKey="equivalent" stroke="#dbab6d" strokeWidth={2} dot={false} isAnimationActive={false}/>
+              <Line type="linear" dataKey="adr" stroke="#356dc4" strokeWidth={2} dot={false} isAnimationActive={false}/>
+              <Line type="linear" dataKey="equivalent" stroke="#9a6718" strokeWidth={2} dot={false} isAnimationActive={false}/>
             </> : <>
-              <ReferenceLine y={0} stroke="#728494" strokeDasharray="4 4"/>
+              <ReferenceLine y={0} stroke="#66748a" strokeDasharray="4 4"/>
               {enabled.bands && <>
-                <Area type="linear" dataKey="band" fill="#b99ce8" fillOpacity={0.09} stroke="none" tooltipType="none" isAnimationActive={false}/>
-                <Line type="linear" dataKey="upper" stroke="#b99ce8" strokeWidth={1} strokeDasharray="4 4" dot={false} activeDot={false} tooltipType="none" isAnimationActive={false}/>
-                <Line type="linear" dataKey="lower" stroke="#b99ce8" strokeWidth={1} strokeDasharray="4 4" dot={false} activeDot={false} tooltipType="none" isAnimationActive={false}/>
-                <Line type="linear" dataKey="basis" stroke="#b99ce8" strokeOpacity={0.6} strokeWidth={1} strokeDasharray="2 5" dot={false} activeDot={false} tooltipType="none" isAnimationActive={false}/>
+                <Area type="linear" dataKey="band" fill="#8051b0" fillOpacity={0.09} stroke="none" tooltipType="none" isAnimationActive={false}/>
+                <Line type="linear" dataKey="upper" stroke="#8051b0" strokeWidth={1} strokeDasharray="4 4" dot={false} activeDot={false} tooltipType="none" isAnimationActive={false}/>
+                <Line type="linear" dataKey="lower" stroke="#8051b0" strokeWidth={1} strokeDasharray="4 4" dot={false} activeDot={false} tooltipType="none" isAnimationActive={false}/>
+                <Line type="linear" dataKey="basis" stroke="#8051b0" strokeOpacity={0.6} strokeWidth={1} strokeDasharray="2 5" dot={false} activeDot={false} tooltipType="none" isAnimationActive={false}/>
               </>}
-              <Area type="linear" dataKey={metric} stroke="#53d8b2" strokeWidth={2} fill="url(#premiumFill)" isAnimationActive={false}/>
-              {enabled.sma && <Line type="linear" dataKey="sma" stroke="#e5b573" strokeWidth={1.8} dot={false} activeDot={false} tooltipType="none" isAnimationActive={false}/>}
+              <Area type="linear" dataKey={metric} stroke="#087f83" strokeWidth={2} fill="url(#premiumFill)" isAnimationActive={false}/>
+              {enabled.sma && <Line type="linear" dataKey="sma" stroke="#9a6718" strokeWidth={1.8} dot={false} activeDot={false} tooltipType="none" isAnimationActive={false}/>}
             </>}
           </ComposedChart>
         </ResponsiveContainer>}
@@ -137,15 +137,15 @@ function SpreadChart({ data, loading, range, onRangeChange }: {
       <div className="zscore-chart">
         {points.some(p => p.zscore !== null) ? <ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{width:800,height:160}}>
           <ComposedChart data={chartPoints} syncId="hynix-spread-indicators" syncMethod="value" margin={{top:12,right:14,left:0,bottom:6}} accessibilityLayer>
-            <CartesianGrid stroke="#27313b" strokeDasharray="3 5" vertical={false}/>
-            <XAxis dataKey="time" type="number" domain={["dataMin","dataMax"]} tickFormatter={t => date(t)} stroke="#81909f" axisLine={false} tickLine={false} minTickGap={65} tick={{fontSize:12}}/>
-            <YAxis orientation="right" width={68} domain={zDomain} tickFormatter={v => `${v}σ`} stroke="#81909f" axisLine={false} tickLine={false} tick={{fontSize:12}}/>
-            <ReferenceArea y1={-2} y2={2} fill="#85b6ff" fillOpacity={0.035}/>
-            <ReferenceLine y={0} stroke="#536779"/>
-            <ReferenceLine y={2} stroke="#b08d62" strokeDasharray="4 4"/>
-            <ReferenceLine y={-2} stroke="#b08d62" strokeDasharray="4 4"/>
-            <Tooltip content={<IndicatorTooltip mode={mode} enabled={enabled} zOnly/>} cursor={{stroke:"#667b8d",strokeDasharray:"3 3"}}/>
-            <Line type="linear" dataKey="zscore" stroke="#85b6ff" strokeWidth={1.7} dot={false} isAnimationActive={false}/>
+            <CartesianGrid stroke="#e0e7ef" strokeDasharray="3 5" vertical={false}/>
+            <XAxis dataKey="time" type="number" domain={["dataMin","dataMax"]} tickFormatter={t => date(t)} stroke="#66748a" axisLine={false} tickLine={false} minTickGap={65} tick={{fontSize:12}}/>
+            <YAxis orientation="right" width={68} domain={zDomain} tickFormatter={v => `${v}σ`} stroke="#66748a" axisLine={false} tickLine={false} tick={{fontSize:12}}/>
+            <ReferenceArea y1={-2} y2={2} fill="#356dc4" fillOpacity={0.035}/>
+            <ReferenceLine y={0} stroke="#66748a"/>
+            <ReferenceLine y={2} stroke="#9a6718" strokeDasharray="4 4"/>
+            <ReferenceLine y={-2} stroke="#9a6718" strokeDasharray="4 4"/>
+            <Tooltip content={<IndicatorTooltip mode={mode} enabled={enabled} zOnly/>} cursor={{stroke:"#66748a",strokeDasharray:"3 3"}}/>
+            <Line type="linear" dataKey="zscore" stroke="#356dc4" strokeWidth={1.7} dot={false} isAnimationActive={false}/>
           </ComposedChart>
         </ResponsiveContainer> : <div className="indicator-empty">{latest?.deviation === 0 ? "窗口内价差无波动，Z-score 无法定义。" : "累计 480 个连续小时后显示 Z-score。"}</div>}
       </div>

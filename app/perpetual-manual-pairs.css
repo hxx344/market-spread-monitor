@@ -1,13 +1,13 @@
-.perp-manual{margin:18px 0;border:1px solid #365268;border-radius:6px;background:#11212c;color:#d4e5f1;font-size:13px}
+.perp-manual{margin:18px 0;border:1px solid #e0e7ef;border-radius:6px;background:#ffffff;color:#20334c;font-size:13px}
 .perp-manual-toggle{display:flex;justify-content:space-between;align-items:center;width:100%;min-height:48px;padding:12px 16px;background:transparent;border:0;color:inherit;text-align:left;cursor:pointer}
-.perp-manual-toggle>span,.perp-manual small{color:#a1bcd0;font-size:12px}
-.perp-manual>div{padding:0 16px 16px}.perp-manual p{color:#a9bfd0;line-height:1.7;margin:8px 0;overflow-wrap:anywhere}
-.perp-manual form{padding:14px 0;border-block:1px solid #304859;margin:14px 0}.perp-manual label{display:flex;flex-direction:column;gap:7px;min-width:0}
-.perp-manual input,.perp-manual select{min-height:42px;min-width:0;width:100%;padding:9px 10px;border:1px solid #48667b;border-radius:4px;background:#0d1b25;color:#d9e8f3;font:inherit}
+.perp-manual-toggle>span,.perp-manual small{color:#66748a;font-size:12px}
+.perp-manual>div{padding:0 16px 16px}.perp-manual p{color:#66748a;line-height:1.7;margin:8px 0;overflow-wrap:anywhere}
+.perp-manual form{padding:14px 0;border-block:1px solid #e0e7ef;margin:14px 0}.perp-manual label{display:flex;flex-direction:column;gap:7px;min-width:0}
+.perp-manual input,.perp-manual select{min-height:42px;min-width:0;width:100%;padding:9px 10px;border:1px solid #e0e7ef;border-radius:4px;background:#ffffff;color:#20334c;font:inherit}
 .perp-manual-fields{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:14px}.perp-manual-fields>div{display:grid;gap:12px;min-width:0}
-.perp-manual-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:16px}.perp-manual-actions>span{color:#a1bcd0;font-size:12px}
-.perp-manual-actions button,.perp-manual article button{min-height:40px;border:1px solid #48667b;border-radius:4px;padding:8px 13px;color:#d6e8fa;background:#1b3548;cursor:pointer}
-.perp-manual button:disabled{opacity:.5;cursor:default}.perp-manual :is(button,input,select):focus-visible{outline:2px solid #99c6ff;outline-offset:3px}
-.perp-manual article{margin-top:16px;padding:14px;border:1px solid #365268;border-radius:4px}.perp-manual article>header{display:flex;justify-content:space-between;align-items:center;gap:12px}.perp-manual article>header>strong{color:#e3c494}.perp-manual article>header>div{display:flex;gap:8px}
-.perp-manual-directions{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:12px}.perp-manual-directions>div{padding:14px;background:#172c3a;border-radius:4px;min-width:0}.perp-manual-directions dl{display:flex;gap:18px;flex-wrap:wrap;margin:12px 0}.perp-manual dt{font-size:11px;color:#a9bfd0}.perp-manual dd{margin:5px 0 0;font-size:18px;font-variant-numeric:tabular-nums}.perp-manual-directions p{font-size:12px}.perp-manual .perp-manual-unavailable{color:#e3c494}
+.perp-manual-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:16px}.perp-manual-actions>span{color:#66748a;font-size:12px}
+.perp-manual-actions button,.perp-manual article button{min-height:40px;border:1px solid #e0e7ef;border-radius:4px;padding:8px 13px;color:#20334c;background:#e7f4f3;cursor:pointer}
+.perp-manual button:disabled{opacity:.5;cursor:default}.perp-manual :is(button,input,select):focus-visible{outline:2px solid #356dc4;outline-offset:3px}
+.perp-manual article{margin-top:16px;padding:14px;border:1px solid #e0e7ef;border-radius:4px}.perp-manual article>header{display:flex;justify-content:space-between;align-items:center;gap:12px}.perp-manual article>header>strong{color:#9a6718}.perp-manual article>header>div{display:flex;gap:8px}
+.perp-manual-directions{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:12px}.perp-manual-directions>div{padding:14px;background:#ffffff;border-radius:4px;min-width:0}.perp-manual-directions dl{display:flex;gap:18px;flex-wrap:wrap;margin:12px 0}.perp-manual dt{font-size:11px;color:#66748a}.perp-manual dd{margin:5px 0 0;font-size:18px;font-variant-numeric:tabular-nums}.perp-manual-directions p{font-size:12px}.perp-manual .perp-manual-unavailable{color:#9a6718}
 @media(max-width:700px){.perp-manual-fields,.perp-manual-directions{grid-template-columns:1fr}.perp-manual input,.perp-manual select{font-size:16px}.perp-manual article{padding:12px}.perp-manual article>header{flex-wrap:wrap}.perp-manual-directions dl{gap:14px}.perp-manual dd{font-size:17px}}

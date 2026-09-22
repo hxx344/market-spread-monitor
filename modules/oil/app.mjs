@@ -217,22 +217,22 @@ function renderChart() {
   const baseline = y(Math.max(domain.min, Math.min(domain.max, 0)));
   const defs = svgElement('defs');
   const gradient = svgElement('linearGradient', { id: 'spread-fill', x1: '0', y1: '0', x2: '0', y2: '1' });
-  gradient.append(svgElement('stop', { offset: '0%', 'stop-color': '#cbf49a', 'stop-opacity': '.20' }), svgElement('stop', { offset: '100%', 'stop-color': '#cbf49a', 'stop-opacity': '.015' }));
+  gradient.append(svgElement('stop', { offset: '0%', 'stop-color': '#087f83', 'stop-opacity': '.20' }), svgElement('stop', { offset: '100%', 'stop-color': '#087f83', 'stop-opacity': '.015' }));
   defs.append(gradient); svg.append(defs);
   svg.append(svgElement('title', {}, `${isSpread ? '布伦特减WTI价差' : '布伦特与WTI永续合约收盘价'}，${rows[0].date}至${rows.at(-1).date}`));
   svg.append(svgElement('desc', {}, `共${rows.length}根共同 15 分钟 K 线。价差均值${summary.average.toFixed(3)}，最低${summary.min.spread.toFixed(3)}，最高${summary.max.spread.toFixed(3)}USDT 每桶。完整数值见页面下方15 分钟数据明细。`));
   for (let i = 0; i <= 4; i++) {
     const value = domain.min + (domain.max - domain.min) * i / 4;
     const py = y(value);
-    svg.append(svgElement('line', { x1: padding.left, y1: py, x2: width - padding.right, y2: py, stroke: '#2b352c', 'stroke-dasharray': '3 5' }));
+    svg.append(svgElement('line', { x1: padding.left, y1: py, x2: width - padding.right, y2: py, stroke: '#e0e7ef', 'stroke-dasharray': '3 5' }));
     svg.append(svgElement('text', { x: padding.left - 11, y: py + 4, 'text-anchor': 'end' }, value.toFixed(Math.abs(value) >= 100 ? 0 : 1)));
   }
   if (isSpread && domain.min < 0 && domain.max > 0) {
-    svg.append(svgElement('line', { x1: padding.left, y1: y(0), x2: width - padding.right, y2: y(0), stroke: '#66725e', 'stroke-width': 1 }));
+    svg.append(svgElement('line', { x1: padding.left, y1: y(0), x2: width - padding.right, y2: y(0), stroke: '#66748a', 'stroke-width': 1 }));
   }
   drawTimeTicks(svg, rows, width, height, x);
-  if (isSpread) svg.append(svgElement('line', { x1: padding.left, y1: y(summary.average), x2: width - padding.right, y2: y(summary.average), stroke: '#81936a', 'stroke-dasharray': '5 5', opacity: '.75' }));
-  const series = isSpread ? [{ field: 'spread', color: '#cbf49a' }] : [{ field: 'brent', color: '#cbf49a' }, { field: 'wti', color: '#99bdf2' }];
+  if (isSpread) svg.append(svgElement('line', { x1: padding.left, y1: y(summary.average), x2: width - padding.right, y2: y(summary.average), stroke: '#66748a', 'stroke-dasharray': '5 5', opacity: '.75' }));
+  const series = isSpread ? [{ field: 'spread', color: '#087f83' }] : [{ field: 'brent', color: '#087f83' }, { field: 'wti', color: '#356dc4' }];
   for (const { field, color } of series) {
     const segments = [];
     for (const row of rows) {
@@ -246,12 +246,12 @@ function renderChart() {
       svg.append(svgElement('path', { d: path, fill: 'none', stroke: color, 'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
       if (segment.length === 1) svg.append(svgElement('circle', { cx: x(segment[0].date), cy: y(segment[0][field]), r: 2.5, fill: color }));
     }
-    svg.append(svgElement('circle', { cx: x(rows.at(-1).date), cy: y(rows.at(-1)[field]), r: 4, fill: color, stroke: '#181e1b', 'stroke-width': 2 }));
+    svg.append(svgElement('circle', { cx: x(rows.at(-1).date), cy: y(rows.at(-1)[field]), r: 4, fill: color, stroke: '#ffffff', 'stroke-width': 2 }));
   }
   const crosshair = svgElement('g', { visibility: 'hidden', 'aria-hidden': 'true' });
-  const guide = svgElement('line', { y1: padding.top, y2: height - padding.bottom, stroke: '#65765c', 'stroke-dasharray': '3 4' });
+  const guide = svgElement('line', { y1: padding.top, y2: height - padding.bottom, stroke: '#66748a', 'stroke-dasharray': '3 4' });
   crosshair.append(guide);
-  const dots = series.map(item => { const dot = svgElement('circle', { r: 4, fill: item.color, stroke: '#181e1b', 'stroke-width': 2 }); crosshair.append(dot); return { field: item.field, node: dot }; });
+  const dots = series.map(item => { const dot = svgElement('circle', { r: 4, fill: item.color, stroke: '#ffffff', 'stroke-width': 2 }); crosshair.append(dot); return { field: item.field, node: dot }; });
   svg.append(crosshair);
   state.chart = { width, height, x, y, crosshair, guide, dots, padding, start, end, plotWidth };
   svg.setAttribute('aria-label', isSpread ? '布伦特减WTI15分钟K线收盘价差走势，单位USDT 每桶' : '布伦特和WTI永续合约15分钟K线收盘价格走势，单位USDT 每桶');
@@ -320,25 +320,25 @@ function renderFundingHistoryChart() {
   svg.append(svgElement('desc', {}, `两腿等 USDT 名义，按两腿总敞口计算。做多为多布伦特空WTI，做空相反。正值收款，负值付款。累计年化为所选区间累计净结算费率除以（有效结算次数乘4小时），再乘8760，不复利。当前覆盖${fundingAnalysis.count}次结算，缺少${fundingAnalysis.missingSettlements}次结算。`));
   for (let i = -2; i <= 2; i++) {
     const value = maxAbs * i / 2;
-    svg.append(svgElement('line', { x1: padding.left, x2: width - padding.right, y1: y(value), y2: y(value), stroke: i === 0 ? '#66725e' : '#2b352c', 'stroke-dasharray': i === 0 ? 'none' : '3 5' }));
+    svg.append(svgElement('line', { x1: padding.left, x2: width - padding.right, y1: y(value), y2: y(value), stroke: i === 0 ? '#66748a' : '#e0e7ef', 'stroke-dasharray': i === 0 ? 'none' : '3 5' }));
     svg.append(svgElement('text', { x: padding.left - 9, y: y(value) + 4, 'text-anchor': 'end' }, `${(value * 100).toFixed(axisDigits)}%`));
   }
   drawTimeTicks(svg, state.visible, width, height, state.chart.x);
-  const series = [{ field: fields[0], color: '#99bdf2', dash: 'none' }, { field: fields[1], color: '#e9b288', dash: '5 3' }];
+  const series = [{ field: fields[0], color: '#356dc4', dash: 'none' }, { field: fields[1], color: '#9a6718', dash: '5 3' }];
   for (const item of series) {
     let path = '', previous = null;
     for (const point of records) {
       const connected = previous && Date.parse(point.date) - Date.parse(previous.date) === DAY;
       path += `${connected ? 'L' : 'M'}${x(point.date).toFixed(3)},${y(point[item.field]).toFixed(3)} `;
-      if (!connected || point.count < 6) svg.append(svgElement('circle', { cx: x(point.date), cy: y(point[item.field]), r: 2.5, fill: '#181e1b', stroke: item.color, 'stroke-width': 1.5 }));
+      if (!connected || point.count < 6) svg.append(svgElement('circle', { cx: x(point.date), cy: y(point[item.field]), r: 2.5, fill: '#ffffff', stroke: item.color, 'stroke-width': 1.5 }));
       previous = point;
     }
     svg.append(svgElement('path', { d: path, fill: 'none', stroke: item.color, 'stroke-width': 1.8, 'stroke-linejoin': 'round', 'stroke-dasharray': item.dash }));
   }
   const crosshair = svgElement('g', { visibility: 'hidden', 'aria-hidden': 'true' });
-  const guide = svgElement('line', { y1: top, y2: height - bottom, stroke: '#65765c', 'stroke-dasharray': '3 4' });
+  const guide = svgElement('line', { y1: top, y2: height - bottom, stroke: '#66748a', 'stroke-dasharray': '3 4' });
   crosshair.append(guide);
-  const dots = series.map(item => { const dot = svgElement('circle', { r: 4, fill: item.color, stroke: '#181e1b', 'stroke-width': 2 }); crosshair.append(dot); return { field: item.field, node: dot }; });
+  const dots = series.map(item => { const dot = svgElement('circle', { r: 4, fill: item.color, stroke: '#ffffff', 'stroke-width': 2 }); crosshair.append(dot); return { field: item.field, node: dot }; });
   svg.append(crosshair);
   state.fundingChart = { width, x, y, crosshair, guide, dots };
   $('funding-history-cursor').max = records.length - 1;
