@@ -277,13 +277,37 @@ test('Lighter BBO uses market ID, handles microseconds, and funding uses current
   assert.equal(Object.hasOwn(missing, 'ask'), false);
 });
 
+test('Lighter unchanged BBO snapshots confirm only their source time and funding or heartbeats cannot renew them', () => {
+  const markets = [market('lighter', 'BTC', { marketId: 1, quoteCurrency: 'USDC', fundingIntervalHours: 1 })];
+  const context = {};
+  const stats = (timestamp, fields) => ({ type: 'subscribed/market_stats', channel: 'market_stats:all', timestamp,
+    market_stats: { 1: { market_id: 1, symbol: 'BTC', ...fields } } });
+  const book = { best_bid_price: '100', best_ask_price: '101' };
+  const merge = (previous, payload, receivedAt) => parseMessage('lighter', payload, markets, receivedAt, context)
+    .reduce((quote, row) => mergePerpetualQuote(quote, row, receivedAt), previous);
+  const first = merge(null, stats(NOW, book), NOW + 100);
+  const confirmed = merge(first, stats(NOW + 3_000, book), NOW + 3_200);
+  assert.equal(confirmed.bid, first.bid); assert.equal(confirmed.ask, first.ask);
+  assert.equal(confirmed.bidAskAt, NOW + 3_000, 'A new full snapshot confirms unchanged real prices');
+  assert.equal(confirmed.sourceTime, NOW + 3_000);
+  assert.equal(confirmed.receivedAt, NOW + 3_200, 'Receipt time stays separate from the exchange confirmation');
+  const funding = merge(confirmed, stats(NOW + 6_000, { current_funding_rate: '0.0012', mark_price: '102' }), NOW + 6_200);
+  assert.equal(funding.fundingAt, NOW + 6_000);
+  assert.equal(funding.markAt, NOW + 6_000);
+  assert.equal(funding.bidAskAt, confirmed.bidAskAt);
+  const heartbeat = merge(funding, { type: 'ping', timestamp: NOW + 12_000 }, NOW + 12_000);
+  assert.equal(heartbeat, funding);
+  const delayed = merge(heartbeat, stats(NOW, book), NOW + 15_000);
+  assert.equal(delayed.bidAskAt, confirmed.bidAskAt, 'Replayed source times cannot revive a stale book');
+});
+
 test('subscription shards fit connection caps and keep Binance public/market endpoints separate', () => {
   assert.equal(EXCHANGES.length, 11);
   const markets = Array.from({ length: 451 }, (_, i) => market('lighter', `COIN${i}`, { marketId: i }));
   const lighter = createSubscriptions('lighter', markets);
   assert.equal(lighter.length, 1); assert.equal(lighter[0].subscribe.length, 1); assert.equal(lighter[0].markets.length, 451);
   assert.deepEqual(lighter[0].poll.messages.map(message => message.type), ['unsubscribe', 'subscribe']);
-  assert.equal(lighter[0].poll.intervalMs, 10000);
+  assert.equal(lighter[0].poll.intervalMs, 3000);
   const aster = createSubscriptions('aster', markets.map(row => ({ ...row, exchange: 'aster' })));
   assert.ok(aster.every(spec => spec.subscribe[0].params.length <= 200));
   const binance = createSubscriptions('binance', [market('binance')]);

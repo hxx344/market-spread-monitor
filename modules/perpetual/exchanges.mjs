@@ -335,12 +335,12 @@ export function createSubscriptions(exchangeId, inputMarkets) {
         poll: { messages: group.map((row, id) => ({ method: 'post', id, request: { type: 'info', payload: { type: 'l2Book', coin: row.symbol } } })), intervalMs: 20_000, sendIntervalMs: 100, staleBookAfterMs: 15_000, maxPerMinute: 60 } }));
   }
   if (exchangeId === 'lighter') {
-    // Stats contains real BBO prices. A fresh snapshot of unchanged markets
-    // uses only two client messages every 10s, below the 200/minute IP cap.
+    // Request unchanged real BBOs with room for CrossEx's 5s pair-time gap.
+    // Two client messages every 3s use 40/minute, below the 200/minute IP cap.
     return [connection('wss://mainnet.zklighter.elliot.ai/stream', markets,
       [{ type: 'subscribe', channel: 'market_stats/all' }],
       { heartbeat: { type: 'ping' }, heartbeatMs: 30_000, sendIntervalMs: 400,
-        poll: { messages: [{ type: 'unsubscribe', channel: 'market_stats/all' }, { type: 'subscribe', channel: 'market_stats/all' }], intervalMs: 10_000, sendIntervalMs: 400 } })];
+        poll: { messages: [{ type: 'unsubscribe', channel: 'market_stats/all' }, { type: 'subscribe', channel: 'market_stats/all' }], intervalMs: 3_000, sendIntervalMs: 400 } })];
   }
   throw new Error(`Unsupported exchange: ${exchangeId}`);
 }

@@ -10,6 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createPerpetualService, mergePerpetualQuote, createPerpetualDelta, createPerpetualPatch, createPerpetualChangedPatch } from '../server/perpetual-service.mjs';
 import { openPerpetualStore } from '../server/perpetual-store.mjs';
 import { createHandler } from '../server/http.mjs';
+import { createSubscriptions, parseMessage, getControlResponse } from '../modules/perpetual/exchanges.mjs';
 
 const update = (patch = {}) => ({ exchange: 'test', symbol: 'BTCUSDT', base: 'BTC', quoteCurrency: 'USDT', bid: 100, ask: 101, sourceTime: 1000, ...patch });
 
@@ -386,6 +387,44 @@ test('new SSE clients align with the shared baseline after a price reverses befo
   const patch = joining.packets[before];
   assert.equal(patch.type, 'patch'); assert.equal(patch.baseSequence, baseline);
   assert.equal(patch.patches.find(([key]) => key === 'test:BTCUSDT')[1].bid, 100.5);
+});
+
+test('Lighter confirmation rounds finish every three seconds within the client message budget and stop cleanly', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  let now = 1_789_820_000_000;
+  const startedAt = now, sent = [];
+  const { service, sockets } = setup({ clock: () => now,
+    exchanges: [{ id: 'lighter', name: 'Lighter', kind: 'dex' }],
+    discover: async () => [{ exchange: 'lighter', symbol: 'BTC', base: 'BTC', quoteCurrency: 'USDC', multiplier: 1, marketId: 1 }],
+    subscriptions: createSubscriptions, parse: parseMessage, control: getControlResponse,
+    saveIntervalMs: 60_000, broadcastIntervalMs: 60_000,
+  });
+  t.after(() => service.stop()); service.start();
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(0); assert.equal(sockets.length, 1);
+  const socket = sockets[0];
+  socket.send = data => {
+    const message = JSON.parse(data); sent.push({ ...message, at: now - startedAt });
+    if (message.type === 'subscribe') socket.message({ type: 'subscribed/market_stats', channel: 'market_stats:all', timestamp: now,
+      market_stats: { 1: { market_id: 1, best_bid_price: '100', best_ask_price: '101' } } });
+  };
+  socket.open(); t.mock.timers.tick(0);
+  for (let elapsed = 100; elapsed <= 60_000; elapsed += 100) { now += 100; t.mock.timers.tick(100); }
+  const rounds = sent.filter(message => message.channel === 'market_stats/all').slice(1);
+  assert.equal(rounds.length, 40, 'One full-market confirmation uses two messages, twenty times per minute');
+  for (let index = 0; index < 20; index++) {
+    assert.deepEqual(rounds.slice(index * 2, index * 2 + 2), [
+      { type: 'unsubscribe', channel: 'market_stats/all', at: 800 + index * 3_000 },
+      { type: 'subscribe', channel: 'market_stats/all', at: 1_200 + index * 3_000 },
+    ]);
+  }
+  assert.equal(sent.filter(message => message.type === 'ping').length, 2);
+  assert.ok(sent.length < 200, 'Confirmation plus initial subscription and client heartbeats fit the 200/minute IP limit');
+  assert.equal(service.snapshot().quotes[0].bidAskAt, startedAt + 58_200);
+  assert.equal(sockets.length, 1, 'Repeated unchanged price confirmations keep the collector connected');
+  await service.stop();
+  const count = sent.length; now += 60_000; t.mock.timers.tick(60_000);
+  assert.equal(sent.length, count); assert.equal(sockets.length, 1);
 });
 
 test('WS snapshot requests are paced and REST confirmation cannot continue after connection disposal', async t => {
