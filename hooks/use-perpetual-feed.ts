@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createPerpetualClock, startPerpetualFeed, type PerpetualConnection } from "../lib/perpetual-feed";
+import { createPerpetualClock, readPerpetualSnapshot, startPerpetualFeed, type PerpetualConnection } from "../lib/perpetual-feed";
 import type { PerpetualSnapshot } from "../lib/perpetual-types";
 
 export function usePerpetualFeed(active: boolean, paused = false) {
@@ -33,11 +33,7 @@ export function usePerpetualFeed(active: boolean, paused = false) {
         return;
       }
       controls.current = startPerpetualFeed({
-        fetchSnapshot: async signal => {
-          const response = await fetch("/api/monitors/perpetual/quote", { cache: "no-store", signal });
-          if (!response.ok) throw new Error("行情更新失败");
-          return response.json();
-        },
+        fetchSnapshot: readPerpetualSnapshot,
         createStream: () => {
           const source = new EventSource("/api/monitors/perpetual/stream");
           const adapter: { onmessage: ((event: { data: string }) => void) | null; onerror: (() => void) | null; close: () => void } = { onmessage: null, onerror: null, close: () => source.close() };

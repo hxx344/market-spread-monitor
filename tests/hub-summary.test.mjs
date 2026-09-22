@@ -28,16 +28,20 @@ test('selected module summaries preserve legacy keys, units and source time with
   await assert.rejects(readHubSummary(services(), now, 'unknown'), /不存在/);
 });
 
-test('v2 compression negotiates gzip and preserves the original full compatible JSON envelope', async t => {
-  const payload = { schemaVersion: 2, quotes: Array.from({ length: 200 }, (_, i) => ({ symbol: `BTC${i}`, bid: 100, ask: 101 })), signals: [] };
-  const server = createServer(createHandler({ services: new Map([['perpetual', { actions: { 'opportunities-v2': ['GET'] }, handle: async () => payload }]]), username: 'test', password: 'test-password', nextHandler: (_q, r) => r.end() }));
+for (const action of ['opportunities-v2', 'quote']) test(`${action} compression negotiates gzip and preserves source times and the full JSON envelope`, async t => {
+  const payload = { schemaVersion: action === 'quote' ? 1 : 2, generatedAt: now, monitorId: 'perpetual', staleAfterMs: 30000,
+    exchanges: [{ id: 'binance', status: 'live' }], quotes: Array.from({ length: 200 }, (_, i) => ({ symbol: `BTC${i}`, bid: 100, ask: 101, bidAskAt: now - 1000 })), signals: [] };
+  const server = createServer(createHandler({ services: new Map([['perpetual', { actions: { [action]: ['GET'] }, handle: async () => payload }]]), username: 'test', password: 'test-password', nextHandler: (_q, r) => r.end() }));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
-  const url = `http://127.0.0.1:${server.address().port}/api/monitors/perpetual/opportunities-v2`;
-  const read = encoding => new Promise((resolve, reject) => get(url, { headers: { Authorization: `Basic ${Buffer.from('test:test-password').toString('base64')}`, 'Accept-Encoding': encoding } }, response => { const chunks = []; response.on('data', chunk => chunks.push(chunk)); response.on('end', () => resolve({ headers: response.headers, body: Buffer.concat(chunks) })); }).on('error', reject));
+  const url = `http://127.0.0.1:${server.address().port}/api/monitors/perpetual/${action}`;
+  const read = encoding => new Promise((resolve, reject) => get(url, { headers: { Authorization: `Basic ${Buffer.from('test:test-password').toString('base64')}`, ...(encoding ? { 'Accept-Encoding': encoding } : {}) } }, response => { const chunks = []; response.on('data', chunk => chunks.push(chunk)); response.on('end', () => resolve({ headers: response.headers, body: Buffer.concat(chunks) })); }).on('error', reject));
   const zipped = await read('gzip'); assert.equal(zipped.headers['content-encoding'], 'gzip'); assert.equal(zipped.headers.vary, 'Accept-Encoding');
   assert.deepEqual(JSON.parse(gunzipSync(zipped.body)), payload);
+  assert.equal(Number(zipped.headers['content-length']), zipped.body.length);
+  assert.equal(zipped.headers['cache-control'], 'no-store');
   const plain = await read('gzip;q=0, identity'); assert.equal(plain.headers['content-encoding'], undefined); assert.deepEqual(JSON.parse(plain.body), payload);
+  const unspecified = await read(); assert.equal(unspecified.headers['content-encoding'], undefined); assert.deepEqual(JSON.parse(unspecified.body), payload);
   assert.ok(zipped.body.length < plain.body.length / 4);
 });
 

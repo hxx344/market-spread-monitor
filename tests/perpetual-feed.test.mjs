@@ -48,7 +48,7 @@ test("perpetual stream ignores old snapshots, falls back on error and retries st
   const f = fixture(); await tick();
   f.streams[0].onmessage({ data: JSON.stringify(snapshot(10)) });
   f.streams[0].onmessage({ data: JSON.stringify(snapshot(9)) });
-  assert.deepEqual(f.data.map(item => item.generatedAt), [10]);
+  assert.deepEqual(f.data.map(item => item.generatedAt), [1, 10]);
   assert.equal(f.statuses.at(-1), "stream");
   f.streams[0].onerror(); await tick();
   assert.equal(f.streams[0].closed, true);
@@ -74,10 +74,10 @@ test("stop aborts pending requests and rejects late stream callbacks", async () 
 test("silent streams switch to polling, failed requests retry without replacing prior data", async () => {
   let fail = false, calls = 0;
   const f = fixture(async () => { calls++; if (fail) throw Error("offline"); return snapshot(1); });
-  await tick(); assert.equal(calls, 0); f.streams[0].onmessage({ data: JSON.stringify(snapshot(1)) }); fail = true;
+  await tick(); assert.equal(calls, 1); f.streams[0].onmessage({ data: JSON.stringify(snapshot(1)) }); fail = true;
   f.run(12000); await tick();
-  assert.equal(f.statuses.at(-1), "error"); assert.equal(f.data.length, 1);
-  f.run(5000); await tick(); assert.equal(calls, 2);
+  assert.equal(f.statuses.at(-1), "error"); assert.equal(f.data.length, 2);
+  f.run(5000); await tick(); assert.equal(calls, 3);
   f.feed.stop();
 });
 
@@ -96,10 +96,11 @@ test("delta snapshots preserve untouched quote identities and no-change array id
 });
 
 test("a delta without a baseline triggers one snapshot recovery instead of rendering partial markets", async () => {
-  let requests = 0;
-  const f = fixture(async () => { requests++; return snapshot(3); });
-  await tick(); assert.equal(requests, 0);
+  let requests = 0, finish;
+  const f = fixture(() => { requests++; return new Promise(resolve => { finish = resolve; }); });
+  assert.equal(requests, 1);
   f.streams[0].onmessage({ data: JSON.stringify({ ...snapshot(2), type: "delta", updates: [], removed: [] }) });
+  assert.equal(requests, 1); finish(snapshot(3));
   await tick(); assert.equal(requests, 1); assert.equal(f.streams[0].closed, true); assert.equal(f.data[0].generatedAt, 3);
   f.feed.stop();
 });
@@ -110,7 +111,7 @@ test("visibility lifecycle can stop a feed and resume with a new stream without 
   hidden.streams[0].onmessage({ data: JSON.stringify(snapshot(1)) }); hidden.feed.stop();
   const resumed = fixture(async () => { requests++; return snapshot(3); });
   resumed.streams[0].onmessage({ data: JSON.stringify(snapshot(3)) }); await tick();
-  assert.equal(requests, 0); assert.equal(hidden.timers.size, 0); assert.equal(resumed.data[0].generatedAt, 3);
+  assert.equal(requests, 2); assert.equal(hidden.timers.size, 0); assert.equal(resumed.data[0].generatedAt, 3);
   resumed.feed.stop();
 });
 

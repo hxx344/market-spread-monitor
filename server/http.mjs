@@ -77,7 +77,7 @@ export function createHandler({ service, services, username, password, nextHandl
             if (request.headers["sec-fetch-site"] === "cross-site" || (origin && new URL(origin).host !== request.headers.host)) return json(response, 403, { error: "不接受跨站配置请求" });
             if (!/^application\/json(?:;|$)/i.test(request.headers["content-type"] || "")) return json(response, 415, { error: "请使用 JSON 请求" });
           }
-          try { return await json(response, 200, await backend.handle(action, request.method, writing ? await body(request) : undefined), action === 'opportunities-v2' ? request : undefined); }
+          try { return await json(response, 200, await backend.handle(action, request.method, writing ? await body(request) : undefined), action === 'opportunities-v2' || (id === 'perpetual' && action === 'quote') ? request : undefined); }
           catch (error) { return json(response, error.status || (writing ? action.includes("test") ? 502 : 400 : 503), { error: writing ? error.message : "监控服务暂不可用" }); }
         }
       }

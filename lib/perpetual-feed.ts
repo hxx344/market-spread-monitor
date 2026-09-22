@@ -17,6 +17,21 @@ interface FeedOptions {
   monotonic?: () => number;
 }
 
+export class PerpetualRequestError extends Error {}
+
+export async function readPerpetualSnapshot(signal: AbortSignal, fetchImpl: typeof fetch = fetch) {
+  const response = await fetchImpl("/api/monitors/perpetual/quote", { cache: "no-store", signal });
+  if (!response.ok) {
+    if (response.status === 401 || response.status === 403) throw new PerpetualRequestError(`行情访问已失效（HTTP ${response.status}），请从工作台重新打开价差模块。`);
+    throw new PerpetualRequestError(`行情接口返回 HTTP ${response.status}，请检查价差服务是否正常运行。`);
+  }
+  try { return parsePerpetualSnapshot(await response.json()); }
+  catch (error) {
+    if (signal.aborted) throw error;
+    throw new PerpetualRequestError("行情接口返回了无效数据，请检查价差服务是否已正确启动。");
+  }
+}
+
 export function parsePerpetualSnapshot(value: unknown): PerpetualSnapshot {
   const snapshot = value as PerpetualSnapshot | null;
   if (!snapshot || snapshot.schemaVersion !== 1 || snapshot.monitorId !== "perpetual" || !Number.isFinite(snapshot.generatedAt)
@@ -156,19 +171,25 @@ export function startPerpetualFeed(options: FeedOptions) {
     const controller = new AbortController();
     const requestVersion = acceptedVersion;
     request = controller;
+    const canceled = new Promise<never>((_, reject) => {
+      controller.signal.addEventListener("abort", () => reject(new PerpetualRequestError("行情快照请求超过 12 秒未完成，请检查价差服务与连接。")), { once: true });
+    });
     requestTimer = schedule(() => controller.abort(), 12_000);
     try {
-      const value = await options.fetchSnapshot(controller.signal);
+      // Abort is advisory for a transport. Settle our slot even when it ignores
+      // cancellation, so a stalled first read cannot block all future refreshes.
+      const value = await Promise.race([options.fetchSnapshot(controller.signal), canceled]);
       if (stopped || controller.signal.aborted) return;
       const responseStream = (value as PerpetualSnapshot | null)?.streamId;
       // A delayed HTTP response from a retired service cannot replace a newer stream baseline.
       if (acceptedVersion !== requestVersion && latest?.streamId && responseStream && responseStream !== latest.streamId) return;
       accept(value);
-      if (fallback) options.onConnection("polling");
-    } catch {
+      if (!streaming) { fallback = true; options.onConnection("polling"); }
+    } catch (error) {
       if (!stopped && !streaming) {
+        fallback = true;
         options.onConnection("error");
-        options.onError("无法更新行情，5 秒后重试。已有报价超过有效期会退出排名。");
+        options.onError((error instanceof PerpetualRequestError ? error.message : "无法更新行情，请检查价差服务与连接。") + " 5 秒后自动重试，过期报价不参与排名。");
       }
     } finally {
       clear(requestTimer);
@@ -229,6 +250,8 @@ export function startPerpetualFeed(options: FeedOptions) {
 
   options.onConnection("connecting");
   connect();
+  // A buffered SSE connection must not delay the first visible snapshot.
+  void loadSnapshot();
   return {
     refresh: () => { clear(pollingTimer); void loadSnapshot(); },
     stop() {
