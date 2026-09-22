@@ -23,6 +23,9 @@ const STABLE_QUOTES = new Set(['USDT', 'USDC', 'USD1']);
 const SCALED_BASES = new Set(['PEPE', 'SHIB', 'BONK', 'FLOKI', 'LUNC', 'XEC', 'SATS', 'RATS', 'CAT', 'CHEEMS', 'BABYDOGE', 'WHY', 'MOG', 'TOSHI', 'NOT', 'BTT', 'DOGS', 'TURBO', 'MUMU', 'NEIRO', 'APU']);
 const HL_SCALED = new Set(['kPEPE', 'kSHIB', 'kBONK', 'kFLOKI', 'kLUNC', 'kDOGS']);
 const VERIFIED_US_SHARES = new Set(['SNDK', 'NBIS', 'GPRO', 'IONQ']);
+// Bybit's ordinary crypto category is an explicit empty string, not a missing
+// field. CrossEx additionally checks the matching verified Binance COIN quote.
+const CROSSEX_STANDARD_CRYPTO = new Set(['BTC', 'ETH', 'SOL', 'XRP', 'DOGE', 'ADA', 'AVAX', 'LINK', 'LTC', 'BCH', 'DOT', 'BNB', 'SUI', 'TRX', 'TON']);
 const ADDITIONAL_IDS = new Set(ADDITIONAL_EXCHANGES.map(exchange => exchange.id));
 
 function number(value, positive = false) {
@@ -128,7 +131,7 @@ export function classifyMarketIdentity(exchange, rawBase, metadata = {}) {
     const type = String(metadata.symbolType || '').toLowerCase();
     if (type && !['innovation', 'crypto'].includes(type)) classification = type;
     if (metadata.isPreListing) classification = 'pre-market';
-    identitySource = `symbolType=${metadata.symbolType || 'crypto'}`;
+    identitySource = `symbolType=${metadata.symbolType ?? 'unknown'}`;
   } else if (exchange === 'okx') {
     if (metadata.ruleType === 'pre_market') classification = 'pre-market';
     else if (metadata.instCategory && !['1', '2'].includes(String(metadata.instCategory))) classification = `category-${metadata.instCategory}`;
@@ -189,6 +192,7 @@ export async function discoverMarkets(exchangeId, { fetchImpl = fetch, signal, n
         const asterRate = identity.assetClass === 'rwa' ? 0.00009 : identity.assetClass === 'crypto' ? row.quoteAsset === 'USDT' ? 0.0004 : row.quoteAsset === 'USD1' ? 0.00005 : null : null;
         return market(exchangeId, row.symbol, row.baseAsset, row.quoteAsset, {
           ...identity, ...delistingMetadata(exchangeId, row),
+          ...(exchangeId === 'binance' ? { collateralCurrency: row.marginAsset, identitySource: `${identity.identitySource};underlyingType=${row.underlyingType ?? 'unknown'}`, identityVerified: row.underlyingType === 'COIN' && identity.assetClass === 'crypto' } : {}),
           ...(exchangeId === 'aster' ? takerMetadata(asterRate, 'aster-standard', now) : {}),
           // Binance fundingInfo lists adjusted intervals; unlisted contracts use 8h.
           // On a failed metadata read, keep the interval unknown.
@@ -203,7 +207,7 @@ export async function discoverMarkets(exchangeId, { fetchImpl = fetch, signal, n
       const data = await request(`https://api.bybit.com/v5/market/instruments-info?category=linear&limit=1000${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, options);
       rows.push(...assertArray(data.result?.list, exchangeId)
         .filter(row => row.status === 'Trading' && row.contractType === 'LinearPerpetual' && !row.isPreListing && STABLE_QUOTES.has(row.quoteCoin) && row.settleCoin === row.quoteCoin)
-        .map(row => market(exchangeId, row.symbol, row.baseCoin, row.quoteCoin, { ...classifyMarketIdentity(exchangeId, row.baseCoin, row), ...delistingMetadata(exchangeId, row), ...bybitTakerMetadata(row, now), fundingIntervalHours: number(row.fundingInterval, true) === null ? null : Number(row.fundingInterval) / 60 })));
+        .map(row => market(exchangeId, row.symbol, row.baseCoin, row.quoteCoin, { ...classifyMarketIdentity(exchangeId, row.baseCoin, row), ...delistingMetadata(exchangeId, row), ...bybitTakerMetadata(row, now), collateralCurrency: row.settleCoin, identityVerified: row.symbolType === 'innovation' || (row.symbolType === '' && CROSSEX_STANDARD_CRYPTO.has(row.baseCoin)), fundingIntervalHours: number(row.fundingInterval, true) === null ? null : Number(row.fundingInterval) / 60 })));
       cursor = data.result.nextPageCursor || '';
       if (cursor && seen.has(cursor)) throw new Error('Bybit: repeated pagination cursor');
       seen.add(cursor);

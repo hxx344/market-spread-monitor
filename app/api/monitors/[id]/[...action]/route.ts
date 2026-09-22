@@ -2,6 +2,7 @@ import { getMonitor } from "../../../../../lib/monitors";
 import { readMonitorData } from "../../../../../lib/monitor-service";
 import { exchangeFromAction } from "../../../../../lib/exchange-quotes";
 import { OIL_CANDLE_ACTION } from "../../../../../modules/oil/intraday.mjs";
+import { unavailablePerpetualOpportunities } from "../../../../../lib/perpetual-opportunities.ts";
 
 export async function GET(_request: Request, context: { params: Promise<{ id: string; action: string[] }> }) {
   const { id, action } = await context.params;
@@ -9,6 +10,7 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
   const monitor = getMonitor(id);
   const headers = { "Cache-Control": "no-store" };
   if (!monitor) return Response.json({ error: "监控模块不存在" }, { status: 404, headers });
+  if (id === "perpetual" && name === "opportunities") return Response.json(unavailablePerpetualOpportunities(), { headers });
   if (id === "perpetual" && name === "paper") return Response.json({ available: false, generatedAt: Date.now(), revision: 0, running: false, error: "当前为网页行情版，请通过 Linux 一键部署启用持仓跟踪。", positions: [] }, { headers });
   if (exchangeFromAction(name) && id !== 'oil' && id !== 'hynix') return Response.json({ error: '模块不支持此接口' }, { status: 404, headers });
   if (["alerts", "status"].includes(name)) return Response.json({ available: false, monitorId: id, reason: "当前为网页行情版。Linux 一键部署后可运行常驻监控并保存飞书告警。" }, { headers });

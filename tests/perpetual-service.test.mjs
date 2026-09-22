@@ -199,6 +199,28 @@ function setup(overrides = {}) {
 }
 async function until(check) { for (let i = 0; i < 100; i++) { if (check()) return; await delay(5); } assert.fail('Condition did not become true'); }
 
+test('CrossEx evidence enriches only its response and preserves existing restored quote identities', async t => {
+  let now = 1100;
+  let metadata = { assetClass: 'crypto', identitySource: 'symbolType=', identityVerified: true, collateralCurrency: 'USDT' };
+  const previous = mergePerpetualQuote(null, update({ exchange: 'binance' }), 1000);
+  const { service, sockets } = setup({ clock: () => now, discoveryIntervalMs: 20,
+    exchanges: [{ id: 'binance', name: 'Binance', kind: 'cex' }],
+    discover: async () => [{ ...update({ exchange: 'binance', multiplier: 1 }), ...metadata }],
+    store: { load: () => [previous], prune() {}, save() {}, close() {} },
+  });
+  assert.deepEqual(service.handle('opportunities', 'GET').quotes, [], 'Restored cache alone has no current directory evidence');
+  t.after(() => service.stop()); service.start();
+  await until(() => sockets.length === 1);
+  const current = service.handle('opportunities', 'GET').quotes[0];
+  assert.equal(current.identityVerified, true); assert.equal(current.assetClass, 'crypto');
+  assert.equal(current.collateralCurrency, 'USDT'); assert.equal(current.bidAskAt, 1000); assert.equal(current.receivedAt, 1000);
+  const retained = service.snapshot().quotes[0];
+  assert.equal(retained.collateralCurrency, undefined); assert.equal(retained.identityVerified, undefined);
+  now = 3000; metadata = { ...metadata, identityVerified: false };
+  await until(() => service.handle('opportunities', 'GET').quotes.length === 0);
+  assert.equal(service.snapshot().quotes[0], retained); assert.equal(sockets.length, 1);
+});
+
 test('discovered identity changes invalidate restored prices before the first new WS message', async t => {
   const previous = mergePerpetualQuote(null, update({ base: 'OLD-ASSET' }), 1000);
   const pruned = [];

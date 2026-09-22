@@ -76,6 +76,7 @@ Linux 服务持续采集并写入 `ALERT_DATA_DIR/market.sqlite`：海力士报�
 成功刷新目录会自动删除已下线合约，SQLite 复用删除后的空间。写入日志每 1,000 页自动归并，归并后按 4 MiB 上限保留日志空间（归并前单次批量写入可能临时超过），关闭数据库也会回收日志。**无需另设定时清理过期报价任务**；报价超过 30 秒只代表不能参加实时排行，不会生成额外历史记录。数据库与配置位于版本目录之外，现有一键升级流程保留它们并安装新增依赖，无需手动迁移。
 
 - `GET /api/monitors/perpetual/quote`：平台连接状态及全部最新报价。
+- `GET /api/monitors/perpetual/opportunities`：CrossEx 只读模拟联动，返回最多 200 条 Binance / Bybit 同币种 USDT 永续正毛价差信号，以及独立保留的支持市场原始报价；盘口有效期 10 秒。沿用已有登录和后台行情，不发单、不新增轮询。身份范围、估值时效与完整契约见 [CrossEx 模拟接口](docs/CROSSEX_SIGNALS.md)。
 - `GET /api/monitors/perpetual/stream`：相同数据的 SSE 推送，仅常驻服务支持。
 - `GET /api/monitors/perpetual/diagnostics`：已登录用户可查看当前连接、客户端、待写报价数及最近一帧处理/写库耗时，详见 [性能说明](docs/PERFORMANCE.md)。
 - `POST /api/monitors/perpetual/depth`：手动按目标金额检查两腿盘口。

@@ -1,0 +1,60 @@
+# CrossEx 模拟机会接口
+
+`GET /api/monitors/perpetual/opportunities` 为独立 CrossEx 模拟工作台提供只读信号，沿用常驻后台的 Basic 登录保护。未登录返回 401，非 GET 方法返回 405；成功响应为 HTTP 200，`Cache-Control: no-store`。接口不接受交易所密钥，不发单，也不改变现有监控、提醒或持仓策略。
+
+每次请求仅投影内存中的共享永续快照，不增加交易所请求、轮询、行情历史或文件写入。Windows 完整后台与 Linux 部署使用同一实现；Next 网页预览没有常驻行情时返回下述同一契约，`status: "unavailable"`、`errorCode: "NO_RESIDENT_FEED"`，两组数据为空。
+
+## 响应契约
+
+```ts
+{
+  schemaVersion: 1,
+  mode: "paper",
+  source: "market-monitor",
+  monitorId: "perpetual",
+  generatedAt: number, // 响应生成时间，epoch ms，不代表盘口时间
+  status: "live" | "partial" | "snapshot" | "connecting" | "unavailable",
+  staleAfterMs: 10000,
+  exchanges: PerpetualExchange[], // 原快照的平台元数据
+  quotes: PerpetualQuote[],       // 全部受支持的原始报价，最多 5000
+  signals: [{                    // 最多 200 条，毛价差从高到低
+    id: string,                  // 64 位小写十六进制 SHA-256
+    pairKey: string,             // JSON.stringify([base, long.exchange+":"+long.symbol, short.exchange+":"+short.symbol])
+    base: string,
+    quoteCurrency: "USDT",
+    long: PerpetualQuote,
+    short: PerpetualQuote,
+    grossSpreadPercent: number,
+    observedAt: number,          // 两腿最早的独立盘口时间
+    expiresAt: number            // observedAt + 10000
+  }],
+  errorCode?: "NO_RESIDENT_FEED" | "QUOTE_LIMIT_EXCEEDED" | "DUPLICATE_QUOTES",
+  error?: string
+}
+```
+
+类型定义位于 `lib/perpetual-opportunities.ts` 与 `lib/perpetual-types.ts`。正常响应的 `status` 沿用源快照；它反映全平台采集状态，不保证一定存在可用信号。报价超过 5000 条时返回 `status: "unavailable"`、`errorCode: "QUOTE_LIMIT_EXCEEDED"` 及明确条数，`quotes`、`signals` 均为空，不返回部分报价。重复平台合约键同样拒绝并返回 `DUPLICATE_QUOTES`。
+
+## 首版市场与身份
+
+仅支持 Binance / Bybit、USDT 计价且 USDT 结算、`multiplier === 1` 的普通加密永续。要求 `assetClass: "crypto"`、明确 `identitySource` 与 `identityVerified: true`，且未被现有身份规则标记为不可比较。股票、商品、ETF、外汇、盘前、未知身份与倍数合约不进入接口。目录有下架标志或有效下架时间的合约也不进入接口，包括即将下架。
+
+新增字段来自已有官方批量目录，保持原始盘口时间：
+
+- Binance 的 `collateralCurrency` 来自 `marginAsset`；只有 `underlyingType === "COIN"` 且现有身份分类为 crypto 才验证通过。
+- Bybit 的 `collateralCurrency` 来自 `settleCoin`；明确存在的 `symbolType: ""` 仅允许 BTC、ETH、SOL、XRP、DOGE、ADA、AVAX、LINK、LTC、BCH、DOT、BNB、SUI、TRX、TON。`symbolType: "innovation"` 沿用现有加密类别。缺失分类、未知新类别（包括未在当前官方枚举中明确列出的 `crypto` 值）均拒绝。
+- 两种受支持的 Bybit 类别都必须在当前快照中找到同 base、同计价结算币、倍数 1 且通过 Binance COIN 验证的报价，再进入接口。交叉核对不能替代代币地址核验；目录出现已知身份冲突时仍以现有隔离规则为准，未知类别不自动扩大。
+
+证据在生成此接口响应时按需从当前目录追加，价格和时间保持原始快照值。原 `quote` / SSE 报价、既有持仓身份键与策略保持原样。进程刚启动、尚无当前目录证据时暂不提供信号；已有目录刷新会补齐证据，字段丢失或证据撤销时立即撤销资格。分类与结算币的更新不会刷新盘口时间，不新增目录轮询。上述严格条件只用于本接口，不改动原页面的行情配对范围。
+
+字段依据于 2026-09-22 核对：[Binance exchangeInfo](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data)、[Bybit instruments-info](https://bybit-exchange.github.io/docs/v5/market/instrument)、[Bybit symbolType 枚举](https://bybit-exchange.github.io/docs/v5/enum#symboltype)。官方目录没有下架标志不等于从未发布其他公告，本接口只使用已有目录证据。
+
+## 时效、版本与持仓估值
+
+`signals` 复用 `rankPerpetualSpreads`、`quotePriceTime`、`perpetualSpreadKey`：两平台必须 live，两腿完整买卖盘口有效，各自不超过 10 秒、时间差不超过 5 秒；沿用现有最多 5 秒的未来时间容差。盘口时间为 `min(bidAskAt, receivedAt)`，缺少 `bidAskAt` 不会用 `sourceTime` 或 `generatedAt` 补齐。只有严格大于 0 的 `(short.bid / long.ask - 1) × 100` 毛价差进入信号，未扣费用、滑点或资金费。
+
+`id` 哈希输入由方向键、两腿身份及单位、bid、ask、独立盘口时间组成。请求时间、快照排序、单独资金费或 mark 更新不会生成新 ID；盘口价格或确认时间变更会生成新 ID。`pairKey` 对同一做多/做空方向保持稳定，方向反转产生另一键。客户端应同时检查自己的当前时间与 `expiresAt`，不能以响应时间延长信号有效期。
+
+`quotes` 与正价差信号分开保留：满足身份与市场条件的负价差、零价差、过期报价、缺少盘口字段以及非 live 平台报价仍按原样返回，供持仓状态判断；估值使用方必须检查两腿字段、原始时间、平台状态与身份一致性。过期、缺失或范围外的腿不能当作零价格、零盈亏或完整成交。没有信号不代表没有持仓报价。
+
+本次验证：Windows 原生 Node 测试覆盖认证/方法、正负价差、时效/错位/缺失盘口、身份与官方目录透传、下架、稳定 ID、容量边界、旧缓存元数据补齐及撤销；同时运行相关排行/服务/路由回归与 TypeScript 检查。未使用 WSL。

@@ -41,6 +41,11 @@ export interface PerpetualQuote {
   contractUnit?: string;
   collateralCurrency?: string;
   comparable?: boolean;
+  /** Official directory classification; missing fields remain unverified. */
+  assetClass?: string;
+  identitySource?: string;
+  /** Explicit crypto category evidence for the limited CrossEx paper feed. */
+  identityVerified?: boolean;
   /** Official venue lifecycle metadata, independent of price freshness. */
   delisting?: boolean;
   delistingAt?: number | null;
