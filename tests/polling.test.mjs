@@ -5,6 +5,35 @@ import { loadQuote } from "../lib/quote-service.ts";
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
 
+test("a transport that ignores cancellation cannot pin polling or overwrite recovered data", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  let calls = 0, finish, firstSignal, settled = 0;
+  const values = [], errors = [];
+  const poll = startPolling({ intervalMs: 10_000, timeoutMs: 5000,
+    load: signal => { calls++; if (calls === 1) { firstSignal = signal; return new Promise(resolve => { finish = resolve; }); } return Promise.resolve(calls); },
+    onData: value => values.push(value), onError: error => errors.push(error), onSettled: () => settled++ });
+  t.after(() => poll.stop()); await flush();
+  const shared = poll.refresh(); assert.equal(shared, poll.refresh());
+  t.mock.timers.tick(5000); await shared;
+  assert.equal(firstSignal.aborted, true); assert.equal(errors[0].name, "TimeoutError"); assert.equal(settled, 1);
+  await poll.refresh(); assert.deepEqual(values, [2]);
+  finish(1); await flush(); assert.deepEqual(values, [2]); assert.equal(settled, 2);
+});
+
+test("offline pauses reads and online resumes once, ignoring late results from the previous connection", async t => {
+  const network = Object.assign(new EventTarget(), { onLine: false });
+  let calls = 0, finish, signal;
+  const values = [];
+  const poll = startActivityPolling({ network, intervalMs: 10_000, immediate: false,
+    load: s => { signal = s; calls++; return new Promise(resolve => { finish = resolve; }); }, onData: value => values.push(value), onError: assert.fail });
+  t.after(() => poll.stop()); await flush(); assert.equal(calls, 0);
+  network.onLine = true; network.dispatchEvent(new Event("online")); await flush(); assert.equal(calls, 1);
+  const oldFinish = finish;
+  network.onLine = false; network.dispatchEvent(new Event("offline")); assert.equal(signal.aborted, true);
+  network.onLine = true; network.dispatchEvent(new Event("online")); network.dispatchEvent(new Event("online"));
+  await flush(); assert.equal(calls, 2); finish(2); await flush(); oldFinish(1); await flush(); assert.deepEqual(values, [2]);
+});
+
 test("inactive panels create no reads; restoring activity immediately resumes without clearing retained data", async t => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   const page = Object.assign(new EventTarget(), { hidden: false });
