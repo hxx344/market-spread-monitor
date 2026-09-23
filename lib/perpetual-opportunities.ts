@@ -15,6 +15,7 @@ export interface PerpetualOpportunitySignal {
   grossSpreadPercent: number;
   observedAt: number;
   expiresAt: number;
+  spotTransfer?: { networks: string[]; checkedAt: number; expiresAt: number };
 }
 
 export interface PerpetualOpportunities {
@@ -36,6 +37,7 @@ export interface PerpetualOpportunitiesV2 extends Omit<PerpetualOpportunities, "
   schemaVersion: 2;
   fx: PerpetualFxSnapshot | null;
   storageError?: string;
+  crossexFilter?: { requireSpotTransfer: boolean; excluded: number };
 }
 
 /** Stateless previews have no collector and must not manufacture fresh signals. */

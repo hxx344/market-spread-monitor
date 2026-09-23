@@ -7,6 +7,7 @@ import { Activity, ArrowDown, Bell, ChevronDown, ChevronLeft, ChevronRight, Refr
 import { usePerpetualFeed } from "../hooks/use-perpetual-feed";
 import { usePerpetualQuality } from "../hooks/use-perpetual-quality";
 import { usePerpetualFx } from "../hooks/use-perpetual-fx";
+import PerpetualCrossExSettings from "./perpetual-crossex-settings";
 import PerpetualFeeSettings from "./perpetual-fee-settings";
 import { defaultQualityBudget, evaluateOpportunityQuality, pairQualityHistory, parseQualityBudget, qualityPairKey, type OpportunityQuality, type PerpetualQualityReport } from "../lib/perpetual-quality";
 import { classifyPerpetualQuote, createPerpetualQuoteSelector, createPerpetualRankingSelector, defaultPerpetualFilters, normalizedFunding8h, parsePerpetualPreferences, perpetualSpreadKey, quotePriceTime, type PerpetualFilters, type PerpetualSpread } from "../lib/perpetual-spreads";
@@ -316,6 +317,7 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
     {healthOpen ? <PerpetualHealth active={active} defaultOpen/> : null}
     <div id="perpetual-alert-region" hidden={!alertsOpen}>{alertsVisited ? <PerpetualAlerts active={active && alertsOpen} pair={alertPair} budget={qualityBudget} defaultOpen/> : null}</div>
 
+    <PerpetualCrossExSettings active={opportunitiesActive}/>
     <div className="perp-toolbar"><label className="perp-search"><Search size={17} aria-hidden="true"/><input aria-label="搜索币种" placeholder="搜索币种，如 BTC、ETH" value={filters.search} maxLength={40} onChange={event => updateFilters({ search: event.target.value.toUpperCase() })}/>{filters.search ? <button type="button" aria-label="清空搜索" onClick={() => updateFilters({ search: "" })}><X size={14}/></button> : null}</label>
       <button type="button" className="perp-tool-button" title="选择七所并按现货买卖汇率比较；模拟资格由 CrossEx 模块再次核对" onClick={() => { changeView("rank"); updateFilters({ exchanges: ["binance", "bybit", "okx", "gate", "kraken", "hyperliquid", "lighter"], crossCurrency: true, pairMode: "all", priceMode: "book", search: "", favoritesOnly: false, sortBy: "gross", minSpreadPercent: 0 }); }}>CrossEx 七所</button>
       {view === "rank" ? <label className="perp-sort"><span className="perp-sr-only">价差排序</span><select aria-label="价差排序" value={netSort ? "net" : "gross"} onChange={event => updateFilters({ sortBy: event.target.value as "net" | "gross" })}><option value="gross">毛价差从高到低</option><option value="net">净价差从高到低</option></select></label> : null}

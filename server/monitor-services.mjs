@@ -13,6 +13,7 @@ import { openPerpetualStore } from './perpetual-store.mjs';
 import { createPerpetualService } from './perpetual-service.mjs';
 import { createFundamentalsClient } from './perpetual-fundamentals.mjs';
 import { openPerpetualAlertStore } from './perpetual-alert-store.mjs';
+import { openCrossExSettingsStore } from './perpetual-crossex-store.mjs';
 import { openPerpetualPaperStore } from './perpetual-paper-store.mjs';
 
 const exchangeActions = Object.fromEntries(externalExchanges.map(exchange => [exchangeAction(exchange), ["GET"]]));
@@ -59,7 +60,8 @@ export async function createMonitorServices(directory, { externallyLocked = fals
     let perpetualPaperStore, paperUnavailableReason = '';
     try { perpetualPaperStore = await openPerpetualPaperStore(join(directory, 'perpetual')); }
     catch { paperUnavailableReason = '持仓记录无法读取，请修复或恢复 paper-positions.json；行情监控继续运行。'; }
-    const perpetual = createPerpetualService({ store: perpetualStore, notifications, alertOptions: { store: perpetualAlertStore }, paperOptions: { store: perpetualPaperStore, unavailableReason: paperUnavailableReason }, qualityOptions: { fundamentals: createFundamentalsClient({ coinIds, apiKey: env.COINGECKO_DEMO_API_KEY || '' }) }, ...perpetualOptions });
+    const crossexStore = await openCrossExSettingsStore(join(directory, 'perpetual'));
+    const perpetual = createPerpetualService({ store: perpetualStore, crossexOptions: { store: crossexStore }, notifications, alertOptions: { store: perpetualAlertStore }, paperOptions: { store: perpetualPaperStore, unavailableReason: paperUnavailableReason }, qualityOptions: { fundamentals: createFundamentalsClient({ coinIds, apiKey: env.COINGECKO_DEMO_API_KEY || '' }) }, ...perpetualOptions });
     const services = new Map([
       ['perpetual', perpetual],
       ["hynix", {

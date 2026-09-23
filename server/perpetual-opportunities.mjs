@@ -37,7 +37,7 @@ function withDirectoryEvidence(quote, getMarket) {
 }
 
 /** Synchronous projection of the shared snapshot: no network, storage or timers. */
-export function createPerpetualOpportunities(snapshot, now = Date.now(), getMarket) {
+export function createPerpetualOpportunities(snapshot, now = Date.now(), getMarket, filter) {
   const candidates = snapshot.quotes.filter(quote => supportedVenues.has(quote.exchange))
     .map(quote => withDirectoryEvidence(quote, getMarket)).filter(quote => quote && supportedQuote(quote));
   const binanceCrypto = new Set(candidates.filter(quote => quote.exchange === 'binance').map(quote => quote.base));
@@ -56,14 +56,16 @@ export function createPerpetualOpportunities(snapshot, now = Date.now(), getMark
     error: '行情快照包含重复合约，无法确定报价版本。',
   };
   const ranked = rankPerpetualSpreads({ ...snapshot, staleAfterMs: CROSS_EX_STALE_MS, quotes: quotes.filter(completeBook) }, filters, now);
-  result.signals = ranked.filter(row => row.spreadPercent > 0).slice(0, CROSS_EX_MAX_SIGNALS).map(row => {
+  result.signals = ranked.filter(row => row.spreadPercent > 0).flatMap(row => {
+    const evidence = filter?.enabled ? filter.evaluate(row.long, row.short, now) : {};
+    if (!evidence) return [];
     const pairKey = perpetualSpreadKey(row);
     const observedAt = Math.min(quotePriceTime(row.long, 'book'), quotePriceTime(row.short, 'book'));
     return {
       id: createHash('sha256').update(JSON.stringify([pairKey, bookVersion(row.long), bookVersion(row.short)])).digest('hex'),
       pairKey, base: row.base, quoteCurrency: 'USDT', long: row.long, short: row.short,
-      grossSpreadPercent: row.spreadPercent, observedAt, expiresAt: observedAt + CROSS_EX_STALE_MS,
+      grossSpreadPercent: row.spreadPercent, observedAt, expiresAt: Math.min(observedAt + CROSS_EX_STALE_MS, evidence.expiresAt ?? Infinity),
     };
-  });
+  }).slice(0, CROSS_EX_MAX_SIGNALS);
   return result;
 }

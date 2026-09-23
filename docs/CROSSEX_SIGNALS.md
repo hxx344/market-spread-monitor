@@ -1,6 +1,27 @@
 # CrossEx 七所模拟联动（v2）
 
-新增 `GET /api/monitors/perpetual/opportunities-v2`，沿用 Monitor 登录认证，只读现有行情和汇率缓存，不在读取信号时访问交易所。旧 `opportunities` v1 接口及其支持范围保持不变。请先升级 Monitor，再升级 CrossEx。
+新增 `GET /api/monitors/perpetual/opportunities-v2`，沿用 Monitor 登录认证，只读现有行情和汇率缓存，不在读取信号时访问交易所。旧 `opportunities` v1 接口的协议及支持范围保持不变，也遵守下面的可选推送筛选。请先升级 Monitor，再升级 CrossEx。
+
+## 可选的双边现货与充提筛选
+
+在合约价差的“发现机会 → CrossEx 推送筛选”勾选“仅推送双边有现货且共同网络充提正常的机会”，即保存到服务器。默认关闭，升级保留原有行为；开启后即使页面关闭，CrossEx 后台拉取也会应用此规则。此设置不改变 Monitor 行情列表的本地筛选。
+
+两边交易所都必须有该基础币可买卖的现货，且至少有一条共同网络在双方都明确开放充值和提现；代币合约地址须相同。EVM 地址忽略大小写，其他地址严格匹配；仅对明确列出的原生币和网络允许双方空地址，不猜测未知链别名。单向充提、延迟提现、下架、未知状态、地址不匹配和过期资料都排除。现货交易对不要求与合约使用相同计价币。
+
+公开数据覆盖于 2026-09-23 核对：
+
+| 平台 | 已接入证据与处理 |
+| --- | --- |
+| Binance | [现货 exchangeInfo](https://developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/rest-api/general) 确认可交易现货；[公开充提状态](https://www.binance.com/en/network) 使用 `bapi/capital/v1/public/capital/getNetworkCoinAll` 的币种与链级开放/隐藏/繁忙状态、合约地址。网站接口可能变化，响应异常时停止通过该平台资格。 |
+| Gate | [Spot API](https://www.gate.com/docs/developers/apiv4/en/spot/) 的 `spot/currency_pairs` 和 `spot/currencies`，分别核实现货可交易、币种与各链的充提状态和合约地址。 |
+| Bybit / OKX | [Bybit coin-info](https://bybit-exchange.github.io/docs/v5/asset/coin-info) 和 [OKX currencies](https://www.okx.com/docs-v5/en/#funding-account-rest-api-get-currencies) 正式接口需要凭据。本功能仅使用公开数据，目前显示无法核验，开启筛选后排除。 |
+| Kraken / Hyperliquid / Lighter | 当前未接入能够同时证明对应现货、共同网络与双向充提正常的公开证据，开启筛选后排除；不把资产可交易或 USDC 桥可用当成基础币可充提。 |
+
+只有开启开关才启动独立后台采集：每 60 秒批量读取两个已支持平台，最多 4 个公开请求并行，无逐机会查询。核对时间取各请求开始时间的最早值，并扣除 HTTP `Age`；这是成功读取状态的时间，不是交易所最近一次修改开关的时间。资料超过 180 秒失效；请求失败立即暂停该平台资格，不更新旧成功时间，启动后重新核验。关闭开关会停止轮询并清除资格缓存。
+
+`GET/PUT /api/monitors/perpetual/crossex-settings` 沿用 Monitor 认证及同源写入保护；PUT 接收 `{ revision, config: { requireSpotTransfer: boolean } }`，旧版本返回 409。配置以原子写入保存在现有数据目录的 `perpetual/crossex-settings.json`，升级保留，不保存交易所凭据。无常驻后台的网页预览显示不可保存。
+
+规则只过滤 `signals`，在 200 条上限之前应用；`quotes` 全部保留给 CrossEx 既有持仓估值和退出。v2 通过的信号附带 `spotTransfer: { networks, checkedAt, expiresAt }`，信号到期时间不晚于充提证据、盘口或汇率的任一到期时间。设置和元数据变更、资格到期都会使投影缓存失效，机会接口本身不发起交易所请求。v2 的 `crossexFilter` 返回当前开关与本次被过滤的候选数量。
 
 支持 Binance、Bybit、OKX、Gate、Kraken、Hyperliquid、Lighter，排除 Deribit。每腿必须是单位为 1 的普通加密永续，当前目录提供身份资料，且没有下架标志。非 Binance 合约另需同基础币 Binance COIN 资料；已知简称冲突、未知分类、盘前、倍数合约不进入 v2。Gate EDGE 与 Lighter AI 继续隔离。
 
