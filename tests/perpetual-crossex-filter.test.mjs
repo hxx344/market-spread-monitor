@@ -11,6 +11,7 @@ import { createOpportunitiesV2Reader, createPerpetualOpportunitiesV2 } from '../
 import { createPerpetualOpportunities } from '../server/perpetual-opportunities.mjs';
 import { createPerpetualService } from '../server/perpetual-service.mjs';
 import { createHandler } from '../server/http.mjs';
+import { MAX_CROSSEX_BLOCKED_BASES, normalizeCrossExBlockedBases } from '../lib/perpetual-crossex-config.ts';
 
 const NOW = 1790000000000, ADDRESS = '0x1234567890123456789012345678901234567890';
 const bMarket = (base = 'BTC') => ({ symbol: `${base}USDT`, baseAsset: base, status: 'TRADING', isSpotTradingAllowed: true });
@@ -152,4 +153,90 @@ test('settings HTTP shares existing authentication and persists changes without 
   assert.equal((await fetch(`${url}crossex-settings`, { headers, method: 'PUT', body })).status, 409);
   const response = await fetch(`${url}opportunities-v2`, { headers }); assert.equal(response.status, 200); assert.equal(calls, 0);
   assert.equal((await openCrossExSettingsStore(dir)).get().config.requireSpotTransfer, true);
+});
+
+test('blocked bases normalize exact codes and reject malformed or oversized lists', () => {
+  assert.deepEqual(normalizeCrossExBlockedBases([' eth ', 'btc', 'BTC', '1inch', 'BTCUSDT']), ['1INCH', 'BTC', 'BTCUSDT', 'ETH']);
+  for (const input of [null, 'BTC', {}, [null], [1], [''], ['BTC/USDT'], ['比特币'], ['-'], ['X'.repeat(41)], Array(MAX_CROSSEX_BLOCKED_BASES + 1).fill('BTC')]) assert.throws(() => normalizeCrossExBlockedBases(input));
+});
+
+test('old files migrate; maximum lists survive restart and legacy PUT never erases a saved block list', async t => {
+  const dir = await directory(t);
+  await writeFile(join(dir, 'crossex-settings.json'), JSON.stringify({ version: 1, revision: 4, config: { requireSpotTransfer: false } }));
+  const store = await openCrossExSettingsStore(dir), service = createCrossExFilterService({ store, clock: () => NOW });
+  assert.deepEqual(service.view().config.blockedBases, []);
+  const blockedBases = Array.from({ length: MAX_CROSSEX_BLOCKED_BASES }, (_, i) => `COIN${i}`.padEnd(40, 'X'));
+  await service.update({ revision: 4, config: { requireSpotTransfer: false, blockedBases } });
+  assert.deepEqual((await openCrossExSettingsStore(dir)).get().config.blockedBases, blockedBases.sort());
+  await service.update({ revision: 5, config: { requireSpotTransfer: true } });
+  assert.deepEqual(service.view().config.blockedBases, blockedBases);
+  await service.update({ revision: 6, config: { requireSpotTransfer: true, blockedBases: [] } });
+  assert.deepEqual((await openCrossExSettingsStore(dir)).get().config.blockedBases, []);
+});
+
+test('block-list validation and disk failure preserve the confirmed list; response arrays cannot mutate it', async () => {
+  const store = memoryStore(), service = createCrossExFilterService({ store, clock: () => NOW });
+  await service.update({ revision: 0, config: { requireSpotTransfer: false, blockedBases: [' btc ', 'BTC'] } });
+  const first = service.filter(); service.view().config.blockedBases.push('ETH'); first.blockedBases.length = 0;
+  assert.equal(service.filter().evaluate(leg('binance'), leg('gate'), NOW), null);
+  assert.deepEqual(service.view().config.blockedBases, ['BTC']);
+  for (const blockedBases of [null, 'ETH', ['BTC/USDT']]) await assert.rejects(service.update({ revision: 1, config: { requireSpotTransfer: false, blockedBases } }));
+  const broken = createCrossExFilterService({ store: { get: store.get, save: async () => { throw new Error('disk full'); } }, clock: () => NOW });
+  await assert.rejects(broken.update({ revision: 1, config: { requireSpotTransfer: false, blockedBases: [] } }), /保存失败/);
+  assert.equal(broken.filter().evaluate(leg('binance'), leg('gate'), NOW), null);
+  assert.deepEqual(broken.view().config.blockedBases, ['BTC']);
+  await service.update({ revision: 1, config: { requireSpotTransfer: false, blockedBases: [] } });
+  assert.equal(first.evaluate(leg('binance'), leg('gate'), NOW), null, 'previous filter retains its own snapshot');
+});
+
+test('blocking applies to all directions and venues in both feeds without requiring spot checks', async t => {
+  let calls = 0;
+  const service = createCrossExFilterService({ store: memoryStore(), clock: () => NOW, read: async () => { calls++; throw new Error('should not poll'); } });
+  t.after(() => service.stop()); service.start();
+  await service.update({ revision: 0, config: { requireSpotTransfer: false, blockedBases: ['BTC'] } });
+  for (const venues of [['binance', 'bybit', 'gate'], ['gate', 'bybit', 'binance']]) {
+    const quotes = ['BTC', 'ETH', 'BTCST'].flatMap(base => venues.map((venue, i) => leg(venue, base, 100 + i * 3)));
+    const plain = project(quotes), filtered = project(quotes, service.filter());
+    assert.ok(plain.signals.some(signal => signal.base === 'BTC'));
+    assert.ok(filtered.signals.length > 0); assert.ok(filtered.signals.every(signal => signal.base !== 'BTC' && signal.spotTransfer === undefined));
+    assert.ok(filtered.signals.some(signal => signal.base === 'BTCST'), 'matches full base, not a prefix');
+    assert.deepEqual(filtered.quotes, plain.quotes);
+    assert.deepEqual(filtered.crossexFilter, { requireSpotTransfer: false, blockedBases: ['BTC'], excluded: 3 });
+    const legacy = createPerpetualOpportunities(snapshot(quotes), NOW, undefined, service.filter());
+    assert.ok(legacy.signals.length > 0); assert.ok(legacy.signals.every(signal => signal.base !== 'BTC'));
+    assert.deepEqual(legacy.quotes, createPerpetualOpportunities(snapshot(quotes), NOW).quotes);
+  }
+  await service.refresh(); assert.equal(calls, 0);
+});
+
+test('adding and removing a blocked base immediately invalidates the unchanged source projection', async () => {
+  const service = createCrossExFilterService({ store: memoryStore(), clock: () => NOW }), quotes = [leg('binance'), leg('gate')], input = snapshot(quotes), read = createOpportunitiesV2Reader();
+  const feed = () => read(input, NOW, (e, s) => quotes.find(q => q.exchange === e && q.symbol === s), null, 'same-source', service.filter());
+  const original = feed(); assert.equal(original.signals.length, 1);
+  await service.update({ revision: 0, config: { requireSpotTransfer: false, blockedBases: ['BTC'] } });
+  assert.equal(feed().signals.length, 0); assert.deepEqual(feed().quotes, original.quotes);
+  await service.update({ revision: 1, config: { requireSpotTransfer: false, blockedBases: [] } });
+  assert.deepEqual(feed().signals, original.signals);
+});
+
+test('blocked-base filtering precedes the cap without dropping existing-position quotes', async () => {
+  const service = createCrossExFilterService({ store: memoryStore(), clock: () => NOW });
+  const quotes = Array.from({ length: 230 }, (_, i) => [leg('binance', `T${i}`), leg('gate', `T${i}`, 500 - i)]).flat();
+  await service.update({ revision: 0, config: { requireSpotTransfer: false, blockedBases: Array.from({ length: 200 }, (_, i) => `T${i}`) } });
+  assert.equal(project(quotes).signals.length, 200);
+  const result = project(quotes, service.filter()); assert.equal(result.signals.length, 30); assert.equal(result.quotes.length, 460);
+});
+
+test('changing the block list preserves fresh spot metadata and still combines both rules', async t => {
+  let calls = 0;
+  const service = createCrossExFilterService({ store: memoryStore(true), clock: () => NOW, read: async exchange => { calls++; return { at: NOW, assets: parsed(exchange) }; } });
+  t.after(() => service.stop()); service.start(); await service.refresh();
+  const quotes = [leg('binance'), leg('gate')]; assert.equal(project(quotes, service.filter()).signals.length, 1);
+  const venues = service.view().venues;
+  await service.update({ revision: 0, config: { requireSpotTransfer: true, blockedBases: ['BTC'] } });
+  assert.equal(project(quotes, service.filter()).signals.length, 0);
+  await service.update({ revision: 1, config: { requireSpotTransfer: true, blockedBases: [] } });
+  assert.ok(project(quotes, service.filter()).signals[0].spotTransfer);
+  assert.equal(project([leg('binance'), leg('bybit')], service.filter()).signals.length, 0, 'unsupported transfer evidence remains blocked');
+  assert.deepEqual(service.view().venues, venues); assert.equal(calls, 2);
 });

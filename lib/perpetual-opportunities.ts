@@ -37,7 +37,7 @@ export interface PerpetualOpportunitiesV2 extends Omit<PerpetualOpportunities, "
   schemaVersion: 2;
   fx: PerpetualFxSnapshot | null;
   storageError?: string;
-  crossexFilter?: { requireSpotTransfer: boolean; excluded: number };
+  crossexFilter?: { requireSpotTransfer: boolean; blockedBases: string[]; excluded: number };
 }
 
 /** Stateless previews have no collector and must not manufacture fresh signals. */

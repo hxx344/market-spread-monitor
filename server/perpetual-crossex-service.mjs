@@ -4,13 +4,15 @@ import { createSpotTransferReader, SPOT_TRANSFER_SOURCES, SPOT_TRANSFER_TTL_MS, 
 /** Auxiliary polling never runs on the signal request path. Metadata is not restored as fresh after restart. */
 export function createCrossExFilterService({ store, clock = Date.now, read = createSpotTransferReader({ clock }), intervalMs = 60_000 } = {}) {
   let state = store?.get() ?? initialCrossExSettings(), running = false, timer, task, controller, generation = 0, dataRevision = 0, storageError = '', queue = Promise.resolve();
+  state.config = validateCrossExConfig(state.config);
+  let blocked = new Set(state.config.blockedBases);
   const metadata = new Map();
   const enabled = () => state.config.requireSpotTransfer;
   const status = (exchange, now) => {
     const value = metadata.get(exchange);
     return TRANSFER_UNAVAILABLE[exchange] ? 'unsupported' : value?.error ? 'error' : !value ? 'pending' : value.at > now || now - value.at >= SPOT_TRANSFER_TTL_MS ? 'stale' : 'live';
   };
-  const view = () => ({ available: Boolean(store), generatedAt: clock(), revision: state.revision, config: { ...state.config }, error: storageError,
+  const view = () => ({ available: Boolean(store), generatedAt: clock(), revision: state.revision, config: structuredClone(state.config), error: storageError,
     refreshIntervalMs: intervalMs, staleAfterMs: SPOT_TRANSFER_TTL_MS,
     venues: ['binance', 'bybit', 'okx', 'gate', 'kraken', 'hyperliquid', 'lighter'].map(exchange => {
       const value = metadata.get(exchange);
@@ -45,10 +47,10 @@ export function createCrossExFilterService({ store, clock = Date.now, read = cre
     start() { if (running) return; running = true; reschedule(); },
     async stop() { running = false; generation++; clearInterval(timer); controller?.abort(); await task; await queue; },
     filter() {
-      const now = clock(), required = enabled();
-      return { enabled: required,
+      const now = clock(), required = enabled(), blockedSnapshot = blocked;
+      return { enabled: required || blockedSnapshot.size > 0, requireSpotTransfer: required, blockedBases: [...blockedSnapshot],
         version: JSON.stringify([state.revision, dataRevision, storageError, [...Object.keys(SPOT_TRANSFER_SOURCES)].map(id => status(id, now))]),
-        evaluate: (long, short, at) => !required ? {} : storageError ? null : spotTransferEvidence(long, short, metadata, at),
+        evaluate: (long, short, at) => blockedSnapshot.has(long.base) || blockedSnapshot.has(short.base) ? null : !required ? {} : storageError ? null : spotTransferEvidence(long, short, metadata, at),
       };
     },
     update(input) {
@@ -56,9 +58,10 @@ export function createCrossExFilterService({ store, clock = Date.now, read = cre
         if (!store) throw new Error('当前服务无法保存 CrossEx 筛选设置');
         if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['revision', 'config'].includes(key)) || !Number.isSafeInteger(input.revision)) throw new Error('CrossEx 筛选请求无效');
         if (input.revision !== state.revision) throw Object.assign(new Error('设置已在其他页面更新，请重新读取后再保存'), { status: 409 });
-        const config = validateCrossExConfig(input.config), next = { ...state, revision: state.revision + 1, config };
+        const config = validateCrossExConfig(input.config, state.config), next = { ...state, revision: state.revision + 1, config };
         try { await store.save(next); } catch { storageError = 'CrossEx 筛选保存失败，请检查数据目录'; throw new Error(storageError); }
         const changed = config.requireSpotTransfer !== enabled(); state = next; storageError = '';
+        blocked = new Set(config.blockedBases);
         if (changed) reschedule();
         return view();
       });

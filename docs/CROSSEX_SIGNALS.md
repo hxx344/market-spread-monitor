@@ -6,6 +6,8 @@
 
 在合约价差的“发现机会 → CrossEx 推送筛选”勾选“仅推送双边有现货且共同网络充提正常的机会”，即保存到服务器。默认关闭，升级保留原有行为；开启后即使页面关闭，CrossEx 后台拉取也会应用此规则。此设置不改变 Monitor 行情列表的本地筛选。
 
+同一区域可添加“屏蔽币种”：输入基础币种（如 `BTC`），点击“添加屏蔽”；已保存名单中的每个币种可单独解除。名单最多 200 个，自动去除首尾空白、转大写、去重排序，按行情 `base` 精确匹配，不把 `BTCUSDT` 猜成 `BTC`。屏蔽覆盖该币种所有交易所及多空方向，独立于现货充提开关生效；保存后关闭页面或重启服务仍保留。仅屏蔽币种不会启动充提轮询，更新名单也不会清除已有充提资料。保存失败或配置冲突会显示原因并保留待添加文本。
+
 两边交易所都必须有该基础币可买卖的现货，且至少有一条共同网络在双方都明确开放充值和提现；代币合约地址须相同。EVM 地址忽略大小写，其他地址严格匹配；仅对明确列出的原生币和网络允许双方空地址，不猜测未知链别名。单向充提、延迟提现、下架、未知状态、地址不匹配和过期资料都排除。现货交易对不要求与合约使用相同计价币。
 
 公开数据覆盖于 2026-09-23 核对：
@@ -19,9 +21,9 @@
 
 只有开启开关才启动独立后台采集：每 60 秒批量读取两个已支持平台，最多 4 个公开请求并行，无逐机会查询。核对时间取各请求开始时间的最早值，并扣除 HTTP `Age`；这是成功读取状态的时间，不是交易所最近一次修改开关的时间。资料超过 180 秒失效；请求失败立即暂停该平台资格，不更新旧成功时间，启动后重新核验。关闭开关会停止轮询并清除资格缓存。
 
-`GET/PUT /api/monitors/perpetual/crossex-settings` 沿用 Monitor 认证及同源写入保护；PUT 接收 `{ revision, config: { requireSpotTransfer: boolean } }`，旧版本返回 409。配置以原子写入保存在现有数据目录的 `perpetual/crossex-settings.json`，升级保留，不保存交易所凭据。无常驻后台的网页预览显示不可保存。
+`GET/PUT /api/monitors/perpetual/crossex-settings` 沿用 Monitor 认证及同源写入保护；PUT 接收 `{ revision, config: { requireSpotTransfer: boolean, blockedBases: string[] } }`，配置版本冲突返回 409。旧配置文件缺少 `blockedBases` 时默认空名单；旧客户端 PUT 缺少该字段时保留当前名单，显式 `[]` 才清空。配置以原子写入保存在现有数据目录的 `perpetual/crossex-settings.json`，升级保留，不保存交易所凭据。无常驻后台的网页预览显示不可保存。
 
-规则只过滤 `signals`，在 200 条上限之前应用；`quotes` 全部保留给 CrossEx 既有持仓估值和退出。v2 通过的信号附带 `spotTransfer: { networks, checkedAt, expiresAt }`，信号到期时间不晚于充提证据、盘口或汇率的任一到期时间。设置和元数据变更、资格到期都会使投影缓存失效，机会接口本身不发起交易所请求。v2 的 `crossexFilter` 返回当前开关与本次被过滤的候选数量。
+两项规则都只过滤 `signals`，在 200 条上限之前应用；`quotes` 全部保留给 CrossEx 既有持仓估值和退出。仅在启用充提筛选且验证通过时，v2 信号附带 `spotTransfer: { networks, checkedAt, expiresAt }`，信号到期时间不晚于充提证据、盘口或汇率的任一到期时间；单独使用币种屏蔽不产生充提已验证标志。设置和元数据变更、资格到期都会使投影缓存失效，机会接口本身不发起交易所请求。v2 的 `crossexFilter` 返回 `requireSpotTransfer`、`blockedBases` 与本次被过滤的候选数量。
 
 支持 Binance、Bybit、OKX、Gate、Kraken、Hyperliquid、Lighter，排除 Deribit。每腿必须是单位为 1 的普通加密永续，当前目录提供身份资料，且没有下架标志。非 Binance 合约另需同基础币 Binance COIN 资料；已知简称冲突、未知分类、盘前、倍数合约不进入 v2。Gate EDGE 与 Lighter AI 继续隔离。
 

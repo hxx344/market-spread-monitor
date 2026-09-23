@@ -12,7 +12,7 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
   if (!monitor) return Response.json({ error: "监控模块不存在" }, { status: 404, headers });
   if (id === "perpetual" && name === "opportunities") return Response.json(unavailablePerpetualOpportunities(), { headers });
   if (id === "perpetual" && name === "opportunities-v2") return Response.json({ ...unavailablePerpetualOpportunities(), schemaVersion: 2, fx: null }, { headers });
-  if (id === "perpetual" && name === "crossex-settings") return Response.json({ available: false, revision: 0, config: { requireSpotTransfer: false }, venues: [], error: "当前网页预览没有常驻后台，无法保存 CrossEx 推送筛选。" }, { headers });
+  if (id === "perpetual" && name === "crossex-settings") return Response.json({ available: false, revision: 0, config: { requireSpotTransfer: false, blockedBases: [] }, venues: [], error: "当前网页预览没有常驻后台，无法保存 CrossEx 推送筛选。" }, { headers });
   if (id === "perpetual" && name === "paper") return Response.json({ available: false, generatedAt: Date.now(), revision: 0, running: false, error: "当前为网页行情版，请通过 Linux 一键部署启用持仓跟踪。", positions: [] }, { headers });
   if (exchangeFromAction(name) && id !== 'oil' && id !== 'hynix') return Response.json({ error: '模块不支持此接口' }, { status: 404, headers });
   if (["alerts", "status"].includes(name)) return Response.json({ available: false, monitorId: id, reason: "当前为网页行情版。Linux 一键部署后可运行常驻监控并保存飞书告警。" }, { headers });

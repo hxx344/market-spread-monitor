@@ -70,8 +70,8 @@ export function createPerpetualOpportunitiesV2(snapshot, now = Date.now(), getMa
     const expiresAt = Math.min(observedAt + CROSS_EX_STALE_MS, evidence.expiresAt ?? Infinity, ...fxVersions.map(row => row[3] + Math.min(180000, fx.staleAfterMs)));
     return { id: createHash('sha256').update(JSON.stringify([pairKey, legs.map(version), fxVersions])).digest('hex'), pairKey, base: row.base, quoteCurrency: 'USDT', long: row.long, short: row.short,
       grossSpreadPercent: (referenceSellPrice / referenceBuyPrice - 1) * 100, referenceBuyPrice, referenceSellPrice, observedAt, expiresAt,
-      ...(filter?.enabled ? { spotTransfer: evidence } : {}) };
+      ...(evidence.networks ? { spotTransfer: evidence } : {}) };
   }).filter(row => row.expiresAt >= now && row.grossSpreadPercent > 0).sort((a, b) => b.grossSpreadPercent - a.grossSpreadPercent || a.pairKey.localeCompare(b.pairKey)).slice(0, CROSS_EX_MAX_SIGNALS);
-  if (filter) result.crossexFilter = { requireSpotTransfer: filter.enabled, excluded };
+  if (filter) result.crossexFilter = { requireSpotTransfer: filter.requireSpotTransfer ?? filter.enabled, blockedBases: filter.blockedBases ?? [], excluded };
   return result;
 }

@@ -1,11 +1,12 @@
 import { mkdir, readFile, writeFile, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { normalizeCrossExBlockedBases } from '../lib/perpetual-crossex-config.ts';
 
-export const initialCrossExSettings = () => ({ version: 1, revision: 0, config: { requireSpotTransfer: false } });
-export function validateCrossExConfig(config) {
-  if (!config || typeof config !== 'object' || Array.isArray(config) || Object.keys(config).length !== 1 || typeof config.requireSpotTransfer !== 'boolean') throw new Error('CrossEx 筛选配置无效');
-  return { requireSpotTransfer: config.requireSpotTransfer };
+export const initialCrossExSettings = () => ({ version: 1, revision: 0, config: { requireSpotTransfer: false, blockedBases: [] } });
+export function validateCrossExConfig(config, previous = { blockedBases: [] }) {
+  if (!config || typeof config !== 'object' || Array.isArray(config) || Object.keys(config).some(key => !['requireSpotTransfer', 'blockedBases'].includes(key)) || typeof config.requireSpotTransfer !== 'boolean') throw new Error('CrossEx 筛选配置无效');
+  return { requireSpotTransfer: config.requireSpotTransfer, blockedBases: normalizeCrossExBlockedBases(Object.hasOwn(config, 'blockedBases') ? config.blockedBases : previous.blockedBases) };
 }
 
 export async function openCrossExSettingsStore(directory) {
@@ -14,7 +15,7 @@ export async function openCrossExSettingsStore(directory) {
   let state = initialCrossExSettings();
   try {
     const text = await readFile(file, 'utf8');
-    if (text.length > 4096) throw new Error('State too large');
+    if (text.length > 16_384) throw new Error('State too large');
     const loaded = JSON.parse(text);
     if (loaded.version !== 1 || !Number.isSafeInteger(loaded.revision) || loaded.revision < 0) throw new Error('Invalid state');
     state = { version: 1, revision: loaded.revision, config: validateCrossExConfig(loaded.config) };
