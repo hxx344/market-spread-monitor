@@ -26,11 +26,13 @@ const signedMoney = (v: number | undefined) => v === undefined ? "—" : `${v > 
 const date = (t: number | string, full=false) => new Intl.DateTimeFormat("zh-CN", { timeZone:"UTC", month:"2-digit", day:"2-digit", ...(full ? {year:"numeric"} : {}) }).format(new Date(t));
 const stamp = (t: number | string) => `${date(t,true)} ${new Date(t).toISOString().slice(11,16)} UTC`;
 
-export default function Dashboard({ onSummary, active = true, initial = null }: SummaryProps & { active?: boolean; initial?: InitialMarketData | null }) {
+export default function Dashboard({ onSummary, active = true, summaryActive = active, initial = null }: SummaryProps & { active?: boolean; summaryActive?: boolean; initial?: InitialMarketData | null }) {
   const [hasOpened, setHasOpened] = useState(active);
   // Mount the heavy chart only on its first visit, then preserve its controls.
   if (active && !hasOpened) setHasOpened(true);
-  const { data, quote, loading, error, quoteError, refresh } = useMarketFeed(initial?.hynix, initial?.renderedAt, active);
+  // The overview card stays visible while another market's detail is selected.
+  // Share its feed with the detail without activating hidden charts or funding history.
+  const { data, quote, loading, error, quoteError, refresh } = useMarketFeed(initial?.hynix, initial?.renderedAt, active || summaryActive);
   const trend = useMemo(() => createTrend(data ? { points: data.points.map(point => ({ time: point.time, value: point.premium })), status: data.status, fetchedAt: data.fetchedAt } : undefined, { days: 7, intervalMs: 3_600_000, label: "7 天小时线", shortLabel: "7天", unit: "%" }, Boolean(error)), [data, error]);
   useEffect(() => { onSummary?.(hynixSummary(quote, quoteError, trend)); }, [onSummary, quote, quoteError, trend]);
   const [range,setRange] = useState<number | null>(null);
