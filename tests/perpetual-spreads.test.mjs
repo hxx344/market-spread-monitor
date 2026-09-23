@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyPerpetualQuote, createPerpetualQuoteSelector, createPerpetualRankingSelector, defaultPerpetualFilters, normalizedFunding8h, parsePerpetualPreferences, perpetualSpreadIsFavorite, perpetualSpreadKey, quoteIsFresh, rankBestPerpetualSpreads, rankPerpetualSpreads } from "../lib/perpetual-spreads.ts";
+import { classifyPerpetualQuote, createPerpetualQuoteSelector, createPerpetualRankingSelector, defaultPerpetualFilters, normalizedFunding8h, parsePerpetualPreferences, perpetualSpreadIsFavorite, perpetualSpreadKey, quoteIsFresh, rankBestPerpetualSpreads, rankPerpetualSpreads, visiblePerpetualSnapshot } from "../lib/perpetual-spreads.ts";
 import { defaultQualityBudget } from "../lib/perpetual-fees.ts";
 
 const now = 1_800_000_000_000;
@@ -9,6 +9,44 @@ const quote = (exchange, overrides = {}) => ({ exchange, symbol: "BTCUSDT", base
 const snapshot = (quotes, exchanges = [venue("a"), venue("b"), venue("c", "dex")]) => ({ schemaVersion: 1, monitorId: "perpetual", status: "live", generatedAt: now, staleAfterMs: 30000, exchanges, quotes });
 const fx = { baseCurrency: "USDT", generatedAt: now, staleAfterMs: 180000, rates: { USDC: { bid: 1, ask: 1, at: now, source: "fixture" } } };
 const rank = (data, filters = {}, fxSnapshot = fx) => rankPerpetualSpreads(data, { ...defaultPerpetualFilters, ...filters }, now, defaultQualityBudget, fxSnapshot);
+
+test("saved coin blocks update ranking and quote caches without mutating the source snapshot", () => {
+  const data = snapshot(['BTC', 'ETH', 'BTC2'].flatMap(base => [quote('a', { base, symbol: `${base}USDT`, displayBase: 'BTC' }), quote('b', { base, symbol: `${base}USDT`, bid: 102, ask: 103 })]));
+  const sourceQuotes = [...data.quotes], selectRank = createPerpetualRankingSelector(), selectQuotes = createPerpetualQuoteSelector();
+  const initial = selectRank(data, defaultPerpetualFilters, now);
+  assert.equal(initial.length, 3);
+  assert.equal(selectQuotes(data.quotes, defaultPerpetualFilters).baseCount, 3);
+  const visible = visiblePerpetualSnapshot(data, new Set(['BTC']));
+  assert.deepEqual(selectRank(visible, defaultPerpetualFilters, now).map(row => row.base), ['BTC2', 'ETH']);
+  const selected = selectQuotes(visible.quotes, defaultPerpetualFilters);
+  assert.equal(selected.keys.length, 4); assert.equal(selected.baseCount, 2);
+  assert.ok(selected.keys.every(key => selected.byKey.get(key).base !== 'BTC'));
+  assert.equal(visible.generatedAt, data.generatedAt); assert.equal(visible.exchanges, data.exchanges);
+  assert.deepEqual(data.quotes, sourceQuotes, 'Complete quotes remain available for holdings and manual pairs');
+  assert.equal(visible.quotes[0], data.quotes[2], 'Retained quotes keep their identity and original times');
+  const restored = visiblePerpetualSnapshot(data, new Set());
+  assert.equal(restored, data);
+  assert.deepEqual(selectRank(restored, defaultPerpetualFilters, now), initial);
+  assert.equal(selectQuotes(restored.quotes, defaultPerpetualFilters).keys.length, 6);
+});
+
+test("search and favorites cannot reveal blocked bases, including unavailable quotes", () => {
+  const data = snapshot([quote('a'), quote('b', { bid: 102, ask: 103 }), quote('c', { symbol: 'BTCUSDC', quoteCurrency: 'USDC', bidAskAt: now - 60000 }), quote('a', { base: 'ETH', symbol: 'ETHUSDT' })]);
+  const visible = visiblePerpetualSnapshot(data, new Set(['BTC']));
+  const filters = { ...defaultPerpetualFilters, search: 'BTC', favoritesOnly: true, favorites: ['BTC'], favoritePairs: [perpetualSpreadKey(rank(data)[0])] };
+  assert.deepEqual(rankPerpetualSpreads(visible, filters, now), []);
+  assert.equal(createPerpetualQuoteSelector()(visible.quotes, filters).keys.length, 0);
+  const allBlocked = visiblePerpetualSnapshot(data, new Set(['BTC', 'ETH']));
+  assert.deepEqual(rank(allBlocked), []);
+  assert.equal(createPerpetualQuoteSelector()(allBlocked.quotes, defaultPerpetualFilters).baseCount, 0);
+});
+
+test("page waits for the saved block list and preserves snapshots when nothing is hidden", () => {
+  const data = snapshot([quote('a')]);
+  assert.equal(visiblePerpetualSnapshot(data, null), null);
+  assert.equal(visiblePerpetualSnapshot(null, new Set(['BTC'])), null);
+  assert.equal(visiblePerpetualSnapshot(data, new Set(['ETH'])), data);
+});
 
 test("perpetual ranking uses buy ask / sell bid on different venues, not mark or last", () => {
   const rows = rank(snapshot([quote("a", { mark: 200 }), quote("b", { bid: 102, ask: 103, mark: 90 }), quote("a", { symbol: "BTCUSDC", quoteCurrency: "USDC", bid: 150, ask: 151 })]));

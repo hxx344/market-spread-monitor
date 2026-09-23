@@ -12,7 +12,7 @@ import PerpetualPushToggle from "./perpetual-push-toggle";
 import { usePerpetualCrossExSettings, type PerpetualCrossExController } from "../hooks/use-perpetual-crossex-settings";
 import PerpetualFeeSettings from "./perpetual-fee-settings";
 import { defaultQualityBudget, evaluateOpportunityQuality, pairQualityHistory, parseQualityBudget, qualityPairKey, type OpportunityQuality, type PerpetualQualityReport } from "../lib/perpetual-quality";
-import { classifyPerpetualQuote, createPerpetualQuoteSelector, createPerpetualRankingSelector, defaultPerpetualFilters, normalizedFunding8h, parsePerpetualPreferences, perpetualSpreadKey, quotePriceTime, type PerpetualFilters, type PerpetualSpread } from "../lib/perpetual-spreads";
+import { classifyPerpetualQuote, createPerpetualQuoteSelector, createPerpetualRankingSelector, defaultPerpetualFilters, normalizedFunding8h, parsePerpetualPreferences, perpetualSpreadKey, quotePriceTime, visiblePerpetualSnapshot, type PerpetualFilters, type PerpetualSpread } from "../lib/perpetual-spreads";
 import type { PerpetualExchange, PerpetualPairMode, PerpetualPriceMode, PerpetualQuote, PerpetualSnapshot } from "../lib/perpetual-types";
 import type { SummaryProps } from "../lib/monitor-summary";
 import "./perpetual.css";
@@ -154,12 +154,15 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
   const [workspace, setWorkspace] = useState<"opportunities" | "positions">("opportunities");
   const opportunitiesActive = active && workspace === "opportunities";
   const crossex = usePerpetualCrossExSettings(opportunitiesActive);
-  const [inspection, setInspection] = useState<{ key: string; base: string; snapshot: PerpetualSnapshot; ranking: PerpetualSpread[]; page: number } | null>(null);
-  // Leaving this monitor releases the captured view before its next activation.
-  if (!active && inspection) setInspection(null);
+  const blockedKey = crossex.data?.config.blockedBases.join(",") ?? "";
+  const [inspection, setInspection] = useState<{ key: string; base: string; snapshot: PerpetualSnapshot; ranking: PerpetualSpread[]; page: number; blockedKey: string } | null>(null);
+  // Release frozen rows when the saved list changes; ordinary polling keeps inspection open.
+  if (inspection && (!active || inspection.blockedKey !== blockedKey)) setInspection(null);
   const paused = opportunitiesActive && inspection !== null;
   const { data: liveData, connection, error, now, refresh } = usePerpetualFeed(opportunitiesActive, paused);
   const data = paused ? inspection.snapshot : liveData;
+  const savedBlockedBases = crossex.data ? crossex.blockedBases : null;
+  const visibleData = useMemo(() => visiblePerpetualSnapshot(data, savedBlockedBases), [data, savedBlockedBases]);
   const [filters, setFilters] = useState<PerpetualFilters>(defaultPerpetualFilters);
   const [preferencesReady, setPreferencesReady] = useState(false);
   const [qualityBudget, setQualityBudget] = useState(defaultQualityBudget);
@@ -189,7 +192,7 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
   }, []);
 
   const search = useDeferredValue(filters.search);
-  const quotes = data?.quotes ?? emptyQuotes;
+  const quotes = visibleData?.quotes ?? emptyQuotes;
   const exchanges = data?.exchanges ?? emptyExchanges;
   const expired = Boolean(data && now - data.generatedAt > data.staleAfterMs);
   const venues = useMemo(() => new Map(exchanges.map(exchange => [exchange.id, exchange])), [exchanges]);
@@ -201,7 +204,7 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
   const selectRanking = useMemo(() => createPerpetualRankingSelector(), []);
   const selectQuotes = useMemo(() => createPerpetualQuoteSelector(), []);
   const rankingFilters = useMemo(() => ({ ...filters, search }), [filters, search]);
-  const fullRanking = useMemo(() => paused ? inspection.ranking : opportunitiesActive && view === "rank" && data && now ? selectRanking(data, rankingFilters, now, qualityBudget, fx) : emptySpreads, [paused, inspection, opportunitiesActive, view, data, rankingFilters, now, selectRanking, qualityBudget, fx]);
+  const fullRanking = useMemo(() => paused ? inspection.ranking : opportunitiesActive && view === "rank" && visibleData && now ? selectRanking(visibleData, rankingFilters, now, qualityBudget, fx) : emptySpreads, [paused, inspection, opportunitiesActive, view, visibleData, rankingFilters, now, selectRanking, qualityBudget, fx]);
   const ranking = useMemo(() => fullRanking.filter(row => (!hubPair.longExchange || row.long.exchange === hubPair.longExchange) && (!hubPair.shortExchange || row.short.exchange === hubPair.shortExchange)), [fullRanking, hubPair]);
   const quoteSelection = useMemo(() => selectQuotes(quotes, rankingFilters), [quotes, rankingFilters, selectQuotes]);
   const availableBases = quoteSelection.baseCount;
@@ -217,7 +220,7 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
   }, [opportunitiesActive, quoteSelection, filters.priceMode, now, data?.staleAfterMs]);
   const totalItems = view === "rank" ? ranking.length : quoteSelection.keys.length;
   const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
-  const visiblePage = paused ? inspection.page : Math.min(page, totalPages);
+  const visiblePage = Math.max(1, Math.min(paused ? inspection.page : page, totalPages));
   const rows = useMemo(() => ranking.slice((visiblePage - 1) * pageSize, visiblePage * pageSize), [ranking, visiblePage]);
   const qualityPairs = useMemo(() => rows.map(row => ({ base: row.base, longKey: `${row.long.exchange}:${row.long.symbol}`, shortKey: `${row.short.exchange}:${row.short.symbol}`, ...(perpetualSpreadKey(row) === expanded ? { includeSeries: true } : {}) })), [rows, expanded]);
   const { report: qualityReport, loading: qualityLoading, error: qualityError } = usePerpetualQuality(qualityPairs, opportunitiesActive && view === "rank");
@@ -275,7 +278,7 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
     const key = perpetualSpreadKey(row), base = row.base;
     if (toggle && expanded === key) { setInspection(null); return; }
     setDetailTab(tab);
-    if (data) setInspection(previous => previous ? { ...previous, key, base } : { key, base, snapshot: data, ranking, page: visiblePage });
+    if (data) setInspection(previous => previous ? { ...previous, key, base } : { key, base, snapshot: data, ranking, page: visiblePage, blockedKey });
   }
   function updateFilters(update: Partial<PerpetualFilters>) { setInspection(null); setFilters(previous => ({ ...previous, ...update })); setPage(1); }
   function changeView(next: "rank" | "quotes") { setInspection(null); setView(next); setPage(1); }
@@ -300,7 +303,7 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
   const statusText = paused ? "查看详情 · 行情刷新已暂停" : connection === "paused" ? "已暂停更新" : !data ? error ? "行情连接异常" : "正在连接行情" : data.status === "unavailable" ? "采集服务未就绪" : expired ? "快照已过期" : connection === "error" ? "更新中断" : data.status === "snapshot" ? "保留快照" : data.status === "connecting" ? "等待首批报价" : data.status === "partial" ? "部分平台在线" : "行情实时更新";
   const transportText = paused ? "收起后恢复" : connection === "stream" ? "推送 / 1 秒" : connection === "polling" || connection === "error" ? "快照 / 5 秒" : connection === "paused" ? "切回后恢复" : "优先实时推送";
   const problem = error || data?.error || (data?.status === "unavailable" ? data.note || "请启动完整监控后台，连接交易所实时行情。" : "");
-  const emptyMessage = !data ? "正在获取交易所与合约报价…" : data.status === "unavailable" ? "采集服务启动后，这里会显示实时合约价差。" : quotes.length === 0 ? "交易所正在连接，收到首批有效报价后自动更新。" : selected && selected.size < 2 ? "请至少选择两家交易所。" : filters.favoritesOnly && favorites.size + favoritePairs.size === 0 ? "点击组合旁的星标加入自选，再回来查看。" : netSort && filters.priceMode === "mark" ? "标记价仅供参考。切换买卖盘口可查看净价差排名。" : netSort ? "没有达到净价差阈值的组合；费用或汇率缺失的组合不计入。可降低阈值或切换毛价差核对。" : "当前筛选下没有有效价差。可以降低阈值、增加平台或切换报价口径。";
+  const emptyMessage = !crossex.data ? crossex.error ? "屏蔽名单读取失败，暂不展示行情；恢复连接后自动重试。" : "正在读取已保存的屏蔽名单…" : !data ? "正在获取交易所与合约报价…" : data.status === "unavailable" ? "采集服务启动后，这里会显示实时合约价差。" : quotes.length === 0 ? data.quotes.length > 0 ? "当前币种均已屏蔽，可在上方“屏蔽币种”名单中解除屏蔽。" : "交易所正在连接，收到首批有效报价后自动更新。" : selected && selected.size < 2 ? "请至少选择两家交易所。" : filters.favoritesOnly && favorites.size + favoritePairs.size === 0 ? "点击组合旁的星标加入自选，再回来查看。" : netSort && filters.priceMode === "mark" ? "标记价仅供参考。切换买卖盘口可查看净价差排名。" : netSort ? "没有达到净价差阈值的组合；费用或汇率缺失的组合不计入。可降低阈值或切换毛价差核对。" : "当前筛选下没有有效价差。可以降低阈值、增加平台或切换报价口径。";
 
   return <section className="perpetual-panel" aria-label="CEX 与 DEX 合约价差监控">
     <header className="perp-heading"><div><h2>合约价差</h2><p>发现组合，核对成本与成交条件</p></div><div className="perp-heading-actions" hidden={workspace === "positions"}><button className="perp-refresh" type="button" aria-expanded={healthOpen} onClick={() => setHealthOpen(value => !value)}><Activity size={15}/>报价健康</button><button className="perp-refresh" type="button" aria-expanded={alertsOpen} onClick={() => { setAlertsVisited(true); setAlertsOpen(value => !value); }}><Bell size={15}/>机会提醒</button><button className="perp-refresh" type="button" onClick={() => paused ? setInspection(null) : refresh()} disabled={!paused && connection === "paused"}><RefreshCw size={15}/>{paused ? "收起并恢复" : "刷新"}</button></div></header>

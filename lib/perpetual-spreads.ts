@@ -177,6 +177,14 @@ function collectPerpetualSpreads(snapshot: PerpetualSnapshot, filters: Perpetual
   return rows.sort(context.compare);
 }
 
+/** Page-only projection. A missing saved list must not briefly reveal blocked assets. */
+export function visiblePerpetualSnapshot(snapshot: PerpetualSnapshot | null, blockedBases: ReadonlySet<string> | null): PerpetualSnapshot | null {
+  if (!snapshot || !blockedBases) return null;
+  if (!blockedBases.size) return snapshot;
+  const quotes = snapshot.quotes.filter(quote => !blockedBases.has(quote.base));
+  return quotes.length === snapshot.quotes.length ? snapshot : { ...snapshot, quotes };
+}
+
 export interface PerpetualQuoteSelection {
   byKey: Map<string, PerpetualQuote>;
   keys: string[];

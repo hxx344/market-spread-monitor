@@ -28,7 +28,7 @@ export default function PerpetualCrossExSettings({ settings }: { settings: Perpe
       <input id="crossex-blocked-base" value={blockedInput} maxLength={40} placeholder="输入基础币种，如 BTC" autoComplete="off" autoCapitalize="characters" spellCheck={false} aria-describedby="crossex-blocked-help" disabled={disabled} onChange={event => setBlockedInput(event.target.value)}/>
       <button type="submit" disabled={disabled || !blockedInput.trim()}>添加屏蔽</button>
     </form>
-    <p id="crossex-blocked-help">也可直接点击下方行情列表币种旁的“屏蔽推送”。手动添加时填写 BTC 等基础币种，不填 BTCUSDT。屏蔽该币在所有平台和方向上的新机会，独立于充提开关生效；保存后可随时解除。</p>
+    <p id="crossex-blocked-help">点击行情列表币种旁的“屏蔽并隐藏”，保存后隐藏该币种的价差排名和全部报价，同时停止所有平台和方向的新机会推送。可在下方名单中解除屏蔽；独立于充提开关生效。手动添加时填写 BTC 等基础币种，不填 BTCUSDT。</p>
     {data?.config.blockedBases.length ? <ul className="perp-crossex-blocked-list" aria-label="已屏蔽币种">{data.config.blockedBases.map(base => <li key={base}><strong>{base}</strong><button type="button" disabled={disabled} aria-label={`解除屏蔽 ${base}`} onClick={() => void setBaseBlocked(base, false)}>解除屏蔽</button></li>)}</ul> : data ? <p>尚未屏蔽任何币种</p> : null}
     {saveError || error || data?.error ? <p role="alert">{saveError || error || data?.error}</p> : null}
     {data?.config.requireSpotTransfer ? <details><summary>公开数据覆盖与核验时间</summary><p>每分钟更新，资料超过 3 分钟失效。此规则用于推送新机会，行情列表仍按上方条件显示。</p><ul>{data.venues.map(venue => <li key={venue.exchange}><strong>{names[venue.exchange] ?? venue.exchange}</strong> · {labels[venue.state] ?? "无法核验"}{venue.checkedAt ? ` · ${new Date(venue.checkedAt).toLocaleTimeString("zh-CN", { hour12: false })}` : ""}{venue.error ? ` · ${venue.error}` : ""}</li>)}</ul></details> : null}
