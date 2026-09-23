@@ -6,20 +6,42 @@ export function createCrossExFilterService({ store, clock = Date.now, read = cre
   let state = store?.get() ?? initialCrossExSettings(), running = false, timer, task, controller, generation = 0, dataRevision = 0, storageError = '', queue = Promise.resolve();
   state.config = validateCrossExConfig(state.config);
   let blocked = new Set(state.config.blockedBases);
+  let pairCache;
   const metadata = new Map();
   const enabled = () => state.config.requireSpotTransfer;
   const status = (exchange, now) => {
     const value = metadata.get(exchange);
-    return TRANSFER_UNAVAILABLE[exchange] ? 'unsupported' : value?.error ? 'error' : !value ? 'pending' : value.at > now || now - value.at >= SPOT_TRANSFER_TTL_MS ? 'stale' : 'live';
+    return TRANSFER_UNAVAILABLE[exchange] ? 'unsupported' : value?.error ? 'error' : !value ? 'pending' : !Number.isFinite(value.at) || value.at <= 0 || value.at > now || now - value.at >= SPOT_TRANSFER_TTL_MS ? 'stale' : 'live';
   };
-  const view = () => ({ available: Boolean(store), generatedAt: clock(), revision: state.revision, config: structuredClone(state.config), error: storageError,
+  const version = now => JSON.stringify([state.revision, dataRevision, storageError, Object.keys(SPOT_TRANSFER_SOURCES).map(id => status(id, now))]);
+  function spotTransferPairs(now) {
+    if (!enabled() || storageError) return [];
+    const key = version(now);
+    if (pairCache?.key === key) return pairCache.pairs;
+    const pairs = [], exchanges = Object.keys(SPOT_TRANSFER_SOURCES).sort();
+    for (let i = 0; i < exchanges.length; i++) for (let j = i + 1; j < exchanges.length; j++) {
+      const longExchange = exchanges[i], shortExchange = exchanges[j];
+      if (status(longExchange, now) !== 'live' || status(shortExchange, now) !== 'live') continue;
+      for (const base of metadata.get(longExchange).assets.keys()) {
+        if (blocked.has(base)) continue;
+        const evidence = spotTransferEvidence({ base, exchange: longExchange, multiplier: 1 }, { base, exchange: shortExchange, multiplier: 1 }, metadata, now);
+        if (evidence) pairs.push({ base, exchanges: [longExchange, shortExchange], ...evidence });
+      }
+    }
+    pairCache = { key, pairs };
+    return pairs;
+  }
+  const view = () => {
+    const now = clock();
+    return { available: Boolean(store), generatedAt: now, revision: state.revision, metadataRevision: dataRevision, config: structuredClone(state.config), error: storageError,
+    spotTransferPairs: structuredClone(spotTransferPairs(now)),
     refreshIntervalMs: intervalMs, staleAfterMs: SPOT_TRANSFER_TTL_MS,
     venues: ['binance', 'bybit', 'okx', 'gate', 'kraken', 'hyperliquid', 'lighter'].map(exchange => {
       const value = metadata.get(exchange);
-      return { exchange, state: status(exchange, clock()), checkedAt: value?.at ?? null, spotAssets: value?.assets ? [...value.assets.values()].filter(asset => asset.spotSymbols.length > 0).length : 0,
+      return { exchange, state: status(exchange, now), checkedAt: value?.at ?? null, spotAssets: value?.assets ? [...value.assets.values()].filter(asset => asset.spotSymbols.length > 0).length : 0,
         error: TRANSFER_UNAVAILABLE[exchange] ?? value?.error ?? '', sources: SPOT_TRANSFER_SOURCES[exchange] ?? [] };
     }),
-  });
+  }; };
   function refresh() {
     if (!running || !enabled() || task) return task ?? Promise.resolve();
     const current = generation;
@@ -48,8 +70,8 @@ export function createCrossExFilterService({ store, clock = Date.now, read = cre
     async stop() { running = false; generation++; clearInterval(timer); controller?.abort(); await task; await queue; },
     filter() {
       const now = clock(), required = enabled(), blockedSnapshot = blocked;
-      return { enabled: required || blockedSnapshot.size > 0, requireSpotTransfer: required, blockedBases: [...blockedSnapshot],
-        version: JSON.stringify([state.revision, dataRevision, storageError, [...Object.keys(SPOT_TRANSFER_SOURCES)].map(id => status(id, now))]),
+      return { enabled: required || blockedSnapshot.size > 0, requireSpotTransfer: required, blockedBases: [...blockedSnapshot], revision: state.revision,
+        version: version(now),
         evaluate: (long, short, at) => blockedSnapshot.has(long.base) || blockedSnapshot.has(short.base) ? null : !required ? {} : storageError ? null : spotTransferEvidence(long, short, metadata, at),
       };
     },

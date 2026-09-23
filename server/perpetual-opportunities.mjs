@@ -46,6 +46,7 @@ export function createPerpetualOpportunities(snapshot, now = Date.now(), getMark
     schemaVersion: 1, mode: 'paper', source: 'market-monitor', monitorId: 'perpetual',
     generatedAt: now, status: snapshot.status, staleAfterMs: CROSS_EX_STALE_MS,
     exchanges: snapshot.exchanges, quotes, signals: [],
+    crossexFilter: { requireSpotTransfer: filter?.requireSpotTransfer ?? filter?.enabled ?? false, blockedBases: filter?.blockedBases ?? [], excluded: 0, revision: filter?.revision ?? 0 },
   };
   if (quotes.length > CROSS_EX_MAX_QUOTES) return {
     ...result, status: 'unavailable', quotes: [], errorCode: 'QUOTE_LIMIT_EXCEEDED',
@@ -58,14 +59,15 @@ export function createPerpetualOpportunities(snapshot, now = Date.now(), getMark
   const ranked = rankPerpetualSpreads({ ...snapshot, staleAfterMs: CROSS_EX_STALE_MS, quotes: quotes.filter(completeBook) }, filters, now);
   result.signals = ranked.filter(row => row.spreadPercent > 0).flatMap(row => {
     const evidence = filter?.enabled ? filter.evaluate(row.long, row.short, now) : {};
-    if (!evidence) return [];
+    if (!evidence) { result.crossexFilter.excluded++; return []; }
     const pairKey = perpetualSpreadKey(row);
     const observedAt = Math.min(quotePriceTime(row.long, 'book'), quotePriceTime(row.short, 'book'));
     return {
       id: createHash('sha256').update(JSON.stringify([pairKey, bookVersion(row.long), bookVersion(row.short)])).digest('hex'),
       pairKey, base: row.base, quoteCurrency: 'USDT', long: row.long, short: row.short,
       grossSpreadPercent: row.spreadPercent, observedAt, expiresAt: Math.min(observedAt + CROSS_EX_STALE_MS, evidence.expiresAt ?? Infinity),
+      ...(evidence.networks ? { spotTransfer: evidence } : {}),
     };
-  }).slice(0, CROSS_EX_MAX_SIGNALS);
+  }).filter(signal => result.crossexFilter.requireSpotTransfer ? now < signal.expiresAt : now <= signal.expiresAt).slice(0, CROSS_EX_MAX_SIGNALS);
   return result;
 }

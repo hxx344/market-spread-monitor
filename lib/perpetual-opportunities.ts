@@ -29,6 +29,7 @@ export interface PerpetualOpportunities {
   exchanges: PerpetualExchange[];
   quotes: PerpetualQuote[];
   signals: PerpetualOpportunitySignal[];
+  crossexFilter?: { requireSpotTransfer: boolean; blockedBases: string[]; excluded: number; revision: number };
   error?: string;
   errorCode?: "NO_RESIDENT_FEED" | "QUOTE_LIMIT_EXCEEDED" | "DUPLICATE_QUOTES";
 }
@@ -37,7 +38,6 @@ export interface PerpetualOpportunitiesV2 extends Omit<PerpetualOpportunities, "
   schemaVersion: 2;
   fx: PerpetualFxSnapshot | null;
   storageError?: string;
-  crossexFilter?: { requireSpotTransfer: boolean; blockedBases: string[]; excluded: number };
 }
 
 /** Stateless previews have no collector and must not manufacture fresh signals. */

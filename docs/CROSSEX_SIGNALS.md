@@ -4,17 +4,17 @@
 
 ## 可选的双边现货与充提筛选
 
-在合约价差的“发现机会 → CrossEx 推送筛选”勾选“仅推送双边有现货且共同网络充提正常的机会”，即保存到服务器。默认关闭，升级保留原有行为；开启后即使页面关闭，CrossEx 后台拉取也会应用此规则。此设置不改变 Monitor 行情列表的本地筛选。
+在合约价差的“发现机会 → CrossEx 推送筛选”勾选“仅显示并推送双边有现货且共同网络充提正常的机会”，即保存到服务器。默认关闭，升级保留原有行为；开启后 Monitor 价差排名与 CrossEx 新机会推送共用现货充提资格，即使页面关闭后台仍执行。排名继续叠加原有搜索、交易所、报价口径等本地条件。
 
 在合约价差的“价差排名”“全部报价”及展开的各平台报价中，点击币种旁的“屏蔽并隐藏”，保存后隐藏该币种所有行情行，并停止新机会推送。页面上方“CrossEx 推送筛选”保留完整名单，可输入基础币种（如 `BTC`）添加或逐个解除；解除后按当前筛选重新显示。所有入口共享一次设置轮询及保存锁，保存中禁用修改，服务器确认后更新状态；失败或配置冲突会显示原因并重新读取实际配置，待添加文本保留。
 
-页面在分页和统计前排除已屏蔽币种，搜索、自选及重置本地筛选不会绕过名单。名单内容变化时收起暂停详情并恢复实时行情；普通设置轮询、充提开关变更不收起详情。首次读取名单前暂不展示机会，避免刷新时短暂出现已屏蔽币种。该展示过滤不修改后台行情、已有持仓或独立手动配对的数据。
+页面在分页和统计前排除已屏蔽币种及开启后不满足现货充提资格的组合，搜索、自选及重置本地筛选不会绕过服务器规则。配置版本变化时收起暂停详情并恢复实时行情；普通设置轮询不收起详情，暂停排名仍按当前资格和证据到期时间动态过滤，当前展开组合失去资格时自动恢复行情。首次读取设置前暂不展示机会；读取失败显示原因并暂停排名。该展示过滤不修改后台行情、已有持仓或独立手动配对的数据；“全部报价”只沿用币种屏蔽，不受现货充提筛选影响。
 
 名单最多 200 个，自动去除首尾空白、转大写、去重排序，按行情 `base` 精确匹配，不把 `BTCUSDT` 猜成 `BTC`。屏蔽覆盖该币种所有交易所及多空方向，独立于现货充提开关生效；保存后关闭页面或重启服务仍保留。仅屏蔽币种不会启动充提轮询，更新名单也不会清除已有充提资料。
 
-两边交易所都必须有该基础币可买卖的现货，且至少有一条共同网络在双方都明确开放充值和提现；代币合约地址须相同。EVM 地址忽略大小写，其他地址严格匹配；仅对明确列出的原生币和网络允许双方空地址，不猜测未知链别名。单向充提、延迟提现、下架、未知状态、地址不匹配和过期资料都排除。现货交易对不要求与合约使用相同计价币。
+两边交易所都必须有该基础币可买卖的现货，且至少有一条共同网络在双方都明确开放充值和提现；代币合约地址须相同。仅已知 EVM 网络的有效 20 字节地址忽略大小写，其他地址严格匹配；仅对明确列出的原生币和网络允许双方空地址，不猜测未知链别名。同平台重复网络记录按歧义排除。单向充提、延迟提现、下架、未知状态、地址不匹配和过期资料都排除。现货交易对不要求与合约使用相同计价币。Gate 的 `trade_status` 必须为 `tradable`，已提供的 `buy_start` / `sell_start` 必须不晚于资料采集时间（官方字段单位为 epoch 秒）；明确盘前或带下架时间的市场不用于证明现货资格。缺少可选开市字段仍沿用交易状态，`0` 保持有效。
 
-公开数据覆盖于 2026-09-23 核对：
+公开数据覆盖与 Gate 现货字段于 2026-09-24 核对：
 
 | 平台 | 已接入证据与处理 |
 | --- | --- |
@@ -25,9 +25,11 @@
 
 只有开启开关才启动独立后台采集：每 60 秒批量读取两个已支持平台，最多 4 个公开请求并行，无逐机会查询。核对时间取各请求开始时间的最早值，并扣除 HTTP `Age`；这是成功读取状态的时间，不是交易所最近一次修改开关的时间。资料超过 180 秒失效；请求失败立即暂停该平台资格，不更新旧成功时间，启动后重新核验。关闭开关会停止轮询并清除资格缓存。
 
-`GET/PUT /api/monitors/perpetual/crossex-settings` 沿用 Monitor 认证及同源写入保护；PUT 接收 `{ revision, config: { requireSpotTransfer: boolean, blockedBases: string[] } }`，配置版本冲突返回 409。旧配置文件缺少 `blockedBases` 时默认空名单；旧客户端 PUT 缺少该字段时保留当前名单，显式 `[]` 才清空。配置以原子写入保存在现有数据目录的 `perpetual/crossex-settings.json`，升级保留，不保存交易所凭据。无常驻后台的网页预览显示不可保存。
+`GET/PUT /api/monitors/perpetual/crossex-settings` 沿用 Monitor 认证及同源写入保护；PUT 接收 `{ revision, config: { requireSpotTransfer: boolean, blockedBases: string[] } }`，配置版本冲突返回 409。响应另有 `metadataRevision` 及完整 `spotTransferPairs: [{ base, exchanges: [exchangeA, exchangeB], networks, checkedAt, expiresAt }]`。此清单仅在开关开启时由同一 `spotTransferEvidence` 计算，不受 200 条信号上限影响；客户端按基础币、双方平台与单位 1 匹配，两种方向共用证据。清单按设置版本、资料版本和状态缓存，不传原始币种网络目录，也不增加逐行请求。清单及信号内的时间均为 epoch 毫秒。页面每 15 秒共享读取一次设置，资格在客户端时钟到达 `expiresAt` 时立即淘汰；每行显示双边现货、双向充提、共同网络与核验/到期时间，关闭、未知和过期状态明确区分。
 
-两项规则都只过滤 `signals`，在 200 条上限之前应用；`quotes` 全部保留给 CrossEx 既有持仓估值和退出。仅在启用充提筛选且验证通过时，v2 信号附带 `spotTransfer: { networks, checkedAt, expiresAt }`，信号到期时间不晚于充提证据、盘口或汇率的任一到期时间；单独使用币种屏蔽不产生充提已验证标志。设置和元数据变更、资格到期都会使投影缓存失效，机会接口本身不发起交易所请求。v2 的 `crossexFilter` 返回 `requireSpotTransfer`、`blockedBases` 与本次被过滤的候选数量。
+旧配置文件缺少 `blockedBases` 时默认空名单；旧客户端 PUT 缺少该字段时保留当前名单，显式 `[]` 才清空。配置以原子写入保存在现有数据目录的 `perpetual/crossex-settings.json`，升级保留，不保存交易所凭据。无常驻后台的网页预览显示不可保存。
+
+信号接口的两项规则都只过滤 `signals`，在 200 条上限之前应用；`quotes` 全部保留给 CrossEx 既有持仓估值和退出。仅在启用充提筛选且验证通过时，v1/v2 信号均附带 `spotTransfer: { networks, checkedAt, expiresAt }`，信号到期时间不晚于充提证据、盘口或汇率的任一到期时间；开启时严格要求 `now < signal.expiresAt` 且 `now < spotTransfer.expiresAt`。关闭时保持原报价边界与市场范围；单独使用币种屏蔽不产生充提已验证标志。设置和元数据变更、资格到期都会使投影缓存失效，机会接口本身不发起交易所请求。v1/v2 均附 `crossexFilter: { requireSpotTransfer, blockedBases, excluded, revision }`，`excluded` 为本次被规则过滤的候选数量，`revision` 为设置版本；无信号或行情不可用时仍返回策略元数据。
 
 支持 Binance、Bybit、OKX、Gate、Kraken、Hyperliquid、Lighter，排除 Deribit。每腿必须是单位为 1 的普通加密永续，当前目录提供身份资料，且没有下架标志。非 Binance 合约另需同基础币 Binance COIN 资料；已知简称冲突、未知分类、盘前、倍数合约不进入 v2。Gate EDGE 与 Lighter AI 继续隔离。
 
@@ -85,8 +87,10 @@ CrossEx 使用独立公共深度复核模拟开平仓，按原生结算币损益
     short: PerpetualQuote,
     grossSpreadPercent: number,
     observedAt: number,          // 两腿最早的独立盘口时间
-    expiresAt: number            // observedAt + 10000
+    expiresAt: number,           // 盘口及启用后的现货充提证据的最早到期时间
+    spotTransfer?: { networks: string[], checkedAt: number, expiresAt: number }
   }],
+  crossexFilter?: { requireSpotTransfer: boolean, blockedBases: string[], excluded: number, revision: number },
   errorCode?: "NO_RESIDENT_FEED" | "QUOTE_LIMIT_EXCEEDED" | "DUPLICATE_QUOTES",
   error?: string
 }

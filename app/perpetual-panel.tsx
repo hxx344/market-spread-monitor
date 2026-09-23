@@ -10,6 +10,7 @@ import { usePerpetualFx } from "../hooks/use-perpetual-fx";
 import PerpetualCrossExSettings from "./perpetual-crossex-settings";
 import PerpetualPushToggle from "./perpetual-push-toggle";
 import { usePerpetualCrossExSettings, type PerpetualCrossExController } from "../hooks/use-perpetual-crossex-settings";
+import { filterCrossExRanking, spotTransferPairEvidence, spotTransferPairState } from "../lib/perpetual-crossex-eligibility";
 import PerpetualFeeSettings from "./perpetual-fee-settings";
 import { defaultQualityBudget, evaluateOpportunityQuality, pairQualityHistory, parseQualityBudget, qualityPairKey, type OpportunityQuality, type PerpetualQualityReport } from "../lib/perpetual-quality";
 import { classifyPerpetualQuote, createPerpetualQuoteSelector, createPerpetualRankingSelector, defaultPerpetualFilters, normalizedFunding8h, parsePerpetualPreferences, perpetualSpreadKey, quotePriceTime, visiblePerpetualSnapshot, type PerpetualFilters, type PerpetualSpread } from "../lib/perpetual-spreads";
@@ -56,6 +57,13 @@ function price(value: number | null) {
 function pairName(key: string) {
   try { const [base, long, short] = JSON.parse(key) as string[]; return `${base} · 多 ${long} / 空 ${short}`; }
   catch { return key; }
+}
+
+function SpotTransferEvidence({ row, settings, now }: { row: PerpetualSpread; settings: PerpetualCrossExController; now: number }) {
+  const state = spotTransferPairState(row, settings.error ? null : settings.data, settings.spotTransferPairs, now);
+  const evidence = spotTransferPairEvidence(row, settings.spotTransferPairs);
+  if (state !== "verified") return <small>现货充提：{state === "disabled" ? "未启用" : state === "expired" ? "证据已过期" : "未知 / 无法核验"}</small>;
+  return <><small>双边现货 · 双向充提正常</small><small>共同网络 {evidence!.networks.join(" / ")}</small><small>核验 {stamp(evidence!.checkedAt)} · 到期 {stamp(evidence!.expiresAt)}</small></>;
 }
 
 function DelistingNotice({ quote, now }: { quote: PerpetualQuote; now: number }) {
@@ -154,9 +162,9 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
   const [workspace, setWorkspace] = useState<"opportunities" | "positions">("opportunities");
   const opportunitiesActive = active && workspace === "opportunities";
   const crossex = usePerpetualCrossExSettings(opportunitiesActive);
-  const blockedKey = crossex.data?.config.blockedBases.join(",") ?? "";
+  const blockedKey = crossex.data ? JSON.stringify([crossex.data.revision, crossex.data.config]) : "";
   const [inspection, setInspection] = useState<{ key: string; base: string; snapshot: PerpetualSnapshot; ranking: PerpetualSpread[]; page: number; blockedKey: string } | null>(null);
-  // Release frozen rows when the saved list changes; ordinary polling keeps inspection open.
+  // Release frozen rows when the policy changes; metadata polling still applies below.
   if (inspection && (!active || inspection.blockedKey !== blockedKey)) setInspection(null);
   const paused = opportunitiesActive && inspection !== null;
   const { data: liveData, connection, error, now, refresh } = usePerpetualFeed(opportunitiesActive, paused);
@@ -205,7 +213,9 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
   const selectQuotes = useMemo(() => createPerpetualQuoteSelector(), []);
   const rankingFilters = useMemo(() => ({ ...filters, search }), [filters, search]);
   const fullRanking = useMemo(() => paused ? inspection.ranking : opportunitiesActive && view === "rank" && visibleData && now ? selectRanking(visibleData, rankingFilters, now, qualityBudget, fx) : emptySpreads, [paused, inspection, opportunitiesActive, view, visibleData, rankingFilters, now, selectRanking, qualityBudget, fx]);
-  const ranking = useMemo(() => fullRanking.filter(row => (!hubPair.longExchange || row.long.exchange === hubPair.longExchange) && (!hubPair.shortExchange || row.short.exchange === hubPair.shortExchange)), [fullRanking, hubPair]);
+  const qualifiedRanking = useMemo(() => filterCrossExRanking(fullRanking, crossex.error ? null : crossex.data, crossex.spotTransferPairs, now), [fullRanking, crossex.data, crossex.error, crossex.spotTransferPairs, now]);
+  const ranking = useMemo(() => qualifiedRanking.filter(row => (!hubPair.longExchange || row.long.exchange === hubPair.longExchange) && (!hubPair.shortExchange || row.short.exchange === hubPair.shortExchange)), [qualifiedRanking, hubPair]);
+  if (paused && !ranking.some(row => perpetualSpreadKey(row) === inspection.key)) setInspection(null);
   const quoteSelection = useMemo(() => selectQuotes(quotes, rankingFilters), [quotes, rankingFilters, selectQuotes]);
   const availableBases = quoteSelection.baseCount;
   const liveExchanges = exchanges.filter(exchange => exchange.status === "live").length;
@@ -303,7 +313,7 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
   const statusText = paused ? "查看详情 · 行情刷新已暂停" : connection === "paused" ? "已暂停更新" : !data ? error ? "行情连接异常" : "正在连接行情" : data.status === "unavailable" ? "采集服务未就绪" : expired ? "快照已过期" : connection === "error" ? "更新中断" : data.status === "snapshot" ? "保留快照" : data.status === "connecting" ? "等待首批报价" : data.status === "partial" ? "部分平台在线" : "行情实时更新";
   const transportText = paused ? "收起后恢复" : connection === "stream" ? "推送 / 1 秒" : connection === "polling" || connection === "error" ? "快照 / 5 秒" : connection === "paused" ? "切回后恢复" : "优先实时推送";
   const problem = error || data?.error || (data?.status === "unavailable" ? data.note || "请启动完整监控后台，连接交易所实时行情。" : "");
-  const emptyMessage = !crossex.data ? crossex.error ? "屏蔽名单读取失败，暂不展示行情；恢复连接后自动重试。" : "正在读取已保存的屏蔽名单…" : !data ? "正在获取交易所与合约报价…" : data.status === "unavailable" ? "采集服务启动后，这里会显示实时合约价差。" : quotes.length === 0 ? data.quotes.length > 0 ? "当前币种均已屏蔽，可在上方“屏蔽币种”名单中解除屏蔽。" : "交易所正在连接，收到首批有效报价后自动更新。" : selected && selected.size < 2 ? "请至少选择两家交易所。" : filters.favoritesOnly && favorites.size + favoritePairs.size === 0 ? "点击组合旁的星标加入自选，再回来查看。" : netSort && filters.priceMode === "mark" ? "标记价仅供参考。切换买卖盘口可查看净价差排名。" : netSort ? "没有达到净价差阈值的组合；费用或汇率缺失的组合不计入。可降低阈值或切换毛价差核对。" : "当前筛选下没有有效价差。可以降低阈值、增加平台或切换报价口径。";
+  const emptyMessage = !crossex.data ? crossex.error ? "屏蔽名单读取失败，暂不展示行情；恢复连接后自动重试。" : "正在读取已保存的屏蔽名单…" : !data ? "正在获取交易所与合约报价…" : data.status === "unavailable" ? "采集服务启动后，这里会显示实时合约价差。" : quotes.length === 0 ? data.quotes.length > 0 ? "当前币种均已屏蔽，可在上方“屏蔽币种”名单中解除屏蔽。" : "交易所正在连接，收到首批有效报价后自动更新。" : selected && selected.size < 2 ? "请至少选择两家交易所。" : filters.favoritesOnly && favorites.size + favoritePairs.size === 0 ? "点击组合旁的星标加入自选，再回来查看。" : crossex.error ? "资格设置读取失败，暂不展示排名；恢复连接后自动重试。" : crossex.data.config.requireSpotTransfer && qualifiedRanking.length === 0 ? "没有双边现货及共同网络双向充提均已核验的组合。未知、过期或不符合条件的组合已排除；可展开公开数据覆盖查看原因。" : netSort && filters.priceMode === "mark" ? "标记价仅供参考。切换买卖盘口可查看净价差排名。" : netSort ? "没有达到净价差阈值的组合；费用或汇率缺失的组合不计入。可降低阈值或切换毛价差核对。" : "当前筛选下没有有效价差。可以降低阈值、增加平台或切换报价口径。";
 
   return <section className="perpetual-panel" aria-label="CEX 与 DEX 合约价差监控">
     <header className="perp-heading"><div><h2>合约价差</h2><p>发现组合，核对成本与成交条件</p></div><div className="perp-heading-actions" hidden={workspace === "positions"}><button className="perp-refresh" type="button" aria-expanded={healthOpen} onClick={() => setHealthOpen(value => !value)}><Activity size={15}/>报价健康</button><button className="perp-refresh" type="button" aria-expanded={alertsOpen} onClick={() => { setAlertsVisited(true); setAlertsOpen(value => !value); }}><Bell size={15}/>机会提醒</button><button className="perp-refresh" type="button" onClick={() => paused ? setInspection(null) : refresh()} disabled={!paused && connection === "paused"}><RefreshCw size={15}/>{paused ? "收起并恢复" : "刷新"}</button></div></header>
@@ -323,7 +333,7 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
     {healthOpen ? <PerpetualHealth active={active} defaultOpen/> : null}
     <div id="perpetual-alert-region" hidden={!alertsOpen}>{alertsVisited ? <PerpetualAlerts active={active && alertsOpen} pair={alertPair} budget={qualityBudget} defaultOpen/> : null}</div>
 
-    <PerpetualCrossExSettings settings={crossex}/>
+    <PerpetualCrossExSettings settings={crossex} now={now}/>
     <div className="perp-toolbar"><label className="perp-search"><Search size={17} aria-hidden="true"/><input aria-label="搜索币种" placeholder="搜索币种，如 BTC、ETH" value={filters.search} maxLength={40} onChange={event => updateFilters({ search: event.target.value.toUpperCase() })}/>{filters.search ? <button type="button" aria-label="清空搜索" onClick={() => updateFilters({ search: "" })}><X size={14}/></button> : null}</label>
       <button type="button" className="perp-tool-button" title="选择七所并按现货买卖汇率比较；模拟资格由 CrossEx 模块再次核对" onClick={() => { changeView("rank"); updateFilters({ exchanges: ["binance", "bybit", "okx", "gate", "kraken", "hyperliquid", "lighter"], crossCurrency: true, pairMode: "all", priceMode: "book", search: "", favoritesOnly: false, sortBy: "gross", minSpreadPercent: 0 }); }}>CrossEx 七所</button>
       {view === "rank" ? <label className="perp-sort"><span className="perp-sr-only">价差排序</span><select aria-label="价差排序" value={netSort ? "net" : "gross"} onChange={event => updateFilters({ sortBy: event.target.value as "net" | "gross" })}><option value="gross">毛价差从高到低</option><option value="net">净价差从高到低</option></select></label> : null}
@@ -359,7 +369,7 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
         const longFunding = normalizedFunding8h(row.long, now), shortFunding = normalizedFunding8h(row.short, now);
         const fundingSpread = longFunding === null || shortFunding === null ? null : shortFunding - longFunding;
         return <Fragment key={rowKey}><tr className={isExpanded ? "perp-row-expanded" : undefined}>
-          <th scope="row" className="perp-base-cell"><button type="button" className={`perp-star ${isFavorite ? "is-favorite" : ""}`} aria-label={`${isFavorite ? "移除" : "收藏"}组合：${pairLabel}`} aria-pressed={isFavorite} onClick={() => toggleFavorite(row)}><Star size={17} fill={isFavorite ? "currentColor" : "none"}/></button><div><strong>{row.base}</strong><small>{row.crossCurrency ? `${row.long.quoteCurrency} / ${row.short.quoteCurrency}` : row.long.quoteCurrency}<span>{row.fxAdjusted ? "已换汇" : "永续"}</span></small>{favorites.has(row.base) ? <small className="perp-legacy-label">币种自选</small> : null}<PerpetualPushToggle base={row.base} settings={crossex}/></div></th>
+          <th scope="row" className="perp-base-cell"><button type="button" className={`perp-star ${isFavorite ? "is-favorite" : ""}`} aria-label={`${isFavorite ? "移除" : "收藏"}组合：${pairLabel}`} aria-pressed={isFavorite} onClick={() => toggleFavorite(row)}><Star size={17} fill={isFavorite ? "currentColor" : "none"}/></button><div><strong>{row.base}</strong><small>{row.crossCurrency ? `${row.long.quoteCurrency} / ${row.short.quoteCurrency}` : row.long.quoteCurrency}<span>{row.fxAdjusted ? "已换汇" : "永续"}</span></small>{favorites.has(row.base) ? <small className="perp-legacy-label">币种自选</small> : null}<PerpetualPushToggle base={row.base} settings={crossex}/><SpotTransferEvidence row={row} settings={crossex} now={now}/></div></th>
           <td className="perp-leg perp-long"><span className="perp-mobile-label">做多</span><strong>{venues.get(row.long.exchange)?.name ?? row.long.exchange}<small>{venues.get(row.long.exchange)?.kind.toUpperCase()}</small></strong><small className="perp-leg-symbol">{row.long.symbol}</small><span title={String(row.buyPrice)}>{price(row.buyPrice)} <small>{row.long.quoteCurrency}</small></span><DelistingNotice quote={row.long} now={now}/></td>
           <td className="perp-leg perp-short"><span className="perp-mobile-label">做空</span><strong>{venues.get(row.short.exchange)?.name ?? row.short.exchange}<small>{venues.get(row.short.exchange)?.kind.toUpperCase()}</small></strong><small className="perp-leg-symbol">{row.short.symbol}</small><span title={String(row.sellPrice)}>{price(row.sellPrice)} <small>{row.short.quoteCurrency}</small></span><DelistingNotice quote={row.short} now={now}/></td>
           <td className={`perp-spread ${primarySpread !== null && primarySpread > 0 ? "positive" : primarySpread !== null && primarySpread < 0 ? "negative" : ""}`}><strong>{percent(primarySpread)}</strong><span className="perp-mobile-label">{netSort ? "净价差" : "毛价差"}</span><small className="perp-secondary-spread">{netSort ? "毛" : "净"} {percent(netSort ? row.spreadPercent : row.netSpreadPercent ?? null)}</small>{historicalDeviation !== null ? <small className="perp-deviation">较 1h 均值 {historicalDeviation >= 0 ? "+" : ""}{historicalDeviation.toFixed(1)} bp</small> : null}</td>

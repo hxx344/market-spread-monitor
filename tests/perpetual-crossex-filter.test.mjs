@@ -201,7 +201,7 @@ test('blocking applies to all directions and venues in both feeds without requir
     assert.ok(filtered.signals.length > 0); assert.ok(filtered.signals.every(signal => signal.base !== 'BTC' && signal.spotTransfer === undefined));
     assert.ok(filtered.signals.some(signal => signal.base === 'BTCST'), 'matches full base, not a prefix');
     assert.deepEqual(filtered.quotes, plain.quotes);
-    assert.deepEqual(filtered.crossexFilter, { requireSpotTransfer: false, blockedBases: ['BTC'], excluded: 3 });
+    assert.deepEqual(filtered.crossexFilter, { requireSpotTransfer: false, blockedBases: ['BTC'], excluded: 3, revision: 1 });
     const legacy = createPerpetualOpportunities(snapshot(quotes), NOW, undefined, service.filter());
     assert.ok(legacy.signals.length > 0); assert.ok(legacy.signals.every(signal => signal.base !== 'BTC'));
     assert.deepEqual(legacy.quotes, createPerpetualOpportunities(snapshot(quotes), NOW).quotes);
@@ -239,4 +239,84 @@ test('changing the block list preserves fresh spot metadata and still combines b
   assert.ok(project(quotes, service.filter()).signals[0].spotTransfer);
   assert.equal(project([leg('binance'), leg('bybit')], service.filter()).signals.length, 0, 'unsupported transfer evidence remains blocked');
   assert.deepEqual(service.view().venues, venues); assert.equal(calls, 2);
+});
+
+test('spot trading start times and ambiguous network or contract records fail closed', () => {
+  for (const patch of [{ id: '' }, { trade_status: 'buyable' }, { trade_status: 'sellable' }, { buy_start: NOW / 1000 + 1 }, { sell_start: NOW / 1000 + 1 }, { buy_start: '0' }, { sell_start: null }, { type: 'premarket' }, { delisting_time: NOW / 1000 + 1 }]) {
+    const metadata = data();
+    metadata.get('gate').assets = parseSpotTransfer('gate', [{ ...gMarket(), ...patch }], [gCoin()], NOW);
+    assert.equal(spotTransferEvidence(leg('binance'), leg('gate'), metadata, NOW), null);
+  }
+  const valid = data(); valid.get('gate').assets = parseSpotTransfer('gate', [{ ...gMarket(), buy_start: 0, sell_start: NOW / 1000, delisting_time: 0, type: 'normal' }], [gCoin()], NOW);
+  assert.ok(spotTransferEvidence(leg('binance'), leg('gate'), valid, NOW));
+  for (const exchange of ['binance', 'gate']) {
+    const coin = exchange === 'binance' ? bCoin() : gCoin();
+    const chains = exchange === 'binance' ? coin.networkList : coin.chains;
+    chains.push({ ...chains[0], ...(exchange === 'binance' ? { withdrawEnable: false } : { withdraw_disabled: true }) });
+    const metadata = data(); metadata.get(exchange).assets = parsed(exchange, 'BTC', coin);
+    assert.equal(spotTransferEvidence(leg('binance'), leg('gate'), metadata, NOW), null);
+  }
+  for (const contract of ['unknown', ' 0x1234567890123456789012345678901234567890 ', '0x1234']) {
+    const metadata = new Map([['binance', { at: NOW, assets: parsed('binance', 'ABC', bCoin('ABC', 'ETH', contract)) }], ['gate', { at: NOW, assets: parsed('gate', 'ABC', gCoin('ABC', 'ETH', contract)) }]]);
+    assert.equal(spotTransferEvidence(leg('binance', 'ABC'), leg('gate', 'ABC'), metadata, NOW), null);
+  }
+  const metadata = new Map([['binance', { at: NOW, assets: parsed('binance', 'ABC', bCoin('ABC', 'SOL', '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd')) }], ['gate', { at: NOW, assets: parsed('gate', 'ABC', gCoin('ABC', 'SOL', '0xABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD')) }]]);
+  assert.equal(spotTransferEvidence(leg('binance', 'ABC'), leg('gate', 'ABC'), metadata, NOW), null, 'non-EVM contracts remain case sensitive');
+});
+
+test('raw duplicate networks and aliases remain ambiguous when one record has an invalid address or asset', () => {
+  for (const [first, duplicate, canonical] of [['ETH', 'ETH', 'ETH'], ['ARB', 'ARBEVM', 'ARBITRUM']]) {
+    for (const exchange of ['binance', 'gate']) {
+      const b = bCoin('ABC', first, ADDRESS), g = gCoin('ABC', duplicate, ADDRESS);
+      const makeData = () => new Map([['binance', { at: NOW, assets: parsed('binance', 'ABC', b) }], ['gate', { at: NOW, assets: parsed('gate', 'ABC', g) }]]);
+      const readEvidence = () => spotTransferEvidence(leg('binance', 'ABC'), leg('gate', 'ABC'), makeData(), NOW);
+      assert.deepEqual(readEvidence()?.networks, [canonical], 'a single valid network remains usable');
+      if (exchange === 'binance') b.networkList.push({ ...b.networkList[0], network: duplicate, contractAddress: null, depositEnable: false, withdrawEnable: false });
+      else g.chains.push({ ...g.chains[0], name: first, addr: null, deposit_disabled: true, withdraw_disabled: true });
+      assert.equal(readEvidence(), null, `${exchange} ${first}/${duplicate} cannot discard the closed invalid-address row before checking duplicates`);
+      if (exchange === 'binance') {
+        b.networkList[1].contractAddress = ADDRESS; b.networkList[1].coin = 'OTHER';
+        assert.equal(readEvidence(), null, 'conflicting Binance coin records cannot conceal duplicate network keys');
+      }
+    }
+  }
+});
+
+test('both feed versions publish the same policy revision and evidence, including unavailable responses', () => {
+  const quotes = [leg('binance'), leg('bybit')], input = snapshot(quotes), evidence = { networks: ['BTC'], checkedAt: NOW - 100, expiresAt: NOW + 100 };
+  const filter = { enabled: true, requireSpotTransfer: true, blockedBases: [], revision: 17, evaluate: () => evidence };
+  const v1 = createPerpetualOpportunities(input, NOW, undefined, filter), v2 = project(quotes, filter);
+  assert.deepEqual(v1.crossexFilter, { requireSpotTransfer: true, blockedBases: [], excluded: 0, revision: 17 });
+  assert.deepEqual(v2.crossexFilter, v1.crossexFilter);
+  for (const result of [v1, v2]) { assert.deepEqual(result.signals[0].spotTransfer, evidence); assert.equal(result.signals[0].expiresAt, evidence.expiresAt); }
+  assert.equal(createPerpetualOpportunities(input, evidence.expiresAt, undefined, filter).signals.length, 0);
+  assert.equal(project(quotes, filter, evidence.expiresAt).signals.length, 0);
+  const read = createOpportunitiesV2Reader();
+  const feed = now => read(input, now, (e, s) => quotes.find(q => q.exchange === e && q.symbol === s), null, 'same', filter);
+  assert.equal(feed(NOW).signals.length, 1); assert.equal(feed(evidence.expiresAt).signals.length, 0);
+  const duplicates = snapshot([...quotes, quotes[0]]);
+  for (const result of [createPerpetualOpportunities(duplicates, NOW, undefined, filter), createPerpetualOpportunitiesV2(duplicates, NOW, (e, s) => quotes.find(q => q.exchange === e && q.symbol === s), null, filter)]) {
+    assert.equal(result.errorCode, 'DUPLICATE_QUOTES'); assert.deepEqual(result.crossexFilter, v1.crossexFilter);
+  }
+});
+
+test('settings expose all qualified pairs without signal truncation and revoke on refresh, expiry and policy changes', async t => {
+  let now = NOW, failed = false;
+  const service = createCrossExFilterService({ store: memoryStore(true), clock: () => now, read: async exchange => {
+    if (failed) throw new Error('offline');
+    const assets = new Map();
+    for (let i = 0; i < 230; i++) { const base = `T${i}`; assets.set(base, parsed(exchange, base, exchange === 'binance' ? bCoin(base, 'ETH', ADDRESS) : gCoin(base, 'ETH', ADDRESS)).get(base)); }
+    return { at: now - SPOT_TRANSFER_TTL_MS + 1000, assets };
+  } });
+  t.after(() => service.stop()); service.start(); await service.refresh();
+  const initial = service.view(); assert.equal(initial.spotTransferPairs.length, 230); assert.equal(initial.metadataRevision, 3);
+  assert.deepEqual(initial.spotTransferPairs[0], { base: 'T0', exchanges: ['binance', 'gate'], networks: ['ETH'], checkedAt: NOW - SPOT_TRANSFER_TTL_MS + 1000, expiresAt: NOW + 1000 });
+  initial.spotTransferPairs[0].networks.push('INVALID'); assert.deepEqual(service.view().spotTransferPairs[0].networks, ['ETH']);
+  await service.update({ revision: 0, config: { requireSpotTransfer: true, blockedBases: ['T0'] } });
+  assert.equal(service.view().spotTransferPairs.length, 229); assert.ok(service.view().spotTransferPairs.every(pair => pair.base !== 'T0'));
+  now += 1000; assert.deepEqual(service.view().spotTransferPairs, []);
+  await service.refresh(); assert.equal(service.view().spotTransferPairs.length, 229);
+  failed = true; await service.refresh(); assert.deepEqual(service.view().spotTransferPairs, []);
+  await service.update({ revision: 1, config: { requireSpotTransfer: false, blockedBases: [] } });
+  assert.deepEqual(service.view().spotTransferPairs, []);
 });

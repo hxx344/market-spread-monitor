@@ -14,7 +14,7 @@ export function createOpportunitiesV2Reader(project = createPerpetualOpportuniti
     const value = previous.value;
     return { ...value, generatedAt: now, status: value.errorCode ? value.status : snapshot.status,
       exchanges: snapshot.exchanges.filter(x => CROSSEX_VENUES.includes(x.id)),
-      signals: value.signals.filter(signal => signal.expiresAt >= now && [signal.long, signal.short].every(q => snapshot.exchanges.some(x => x.id === q.exchange && x.status === 'live'))) };
+      signals: value.signals.filter(signal => (value.crossexFilter?.requireSpotTransfer ? now < signal.expiresAt : now <= signal.expiresAt) && [signal.long, signal.short].every(q => snapshot.exchanges.some(x => x.id === q.exchange && x.status === 'live'))) };
   };
 }
 const filters = { search: '', exchanges: CROSSEX_VENUES, pairMode: 'all', priceMode: 'book', crossCurrency: true, minSpreadPercent: 0, favoritesOnly: false, favorites: [], sortBy: 'gross' };
@@ -52,16 +52,16 @@ export function createPerpetualOpportunitiesV2(snapshot, now = Date.now(), getMa
   const quotes = markets.filter(q => q.exchange === 'binance' || crypto.has(q.base));
   const result = { schemaVersion: 2, mode: 'paper', source: 'market-monitor', monitorId: 'perpetual', generatedAt: now,
     status: snapshot.status, staleAfterMs: CROSS_EX_STALE_MS, exchanges: snapshot.exchanges.filter(x => CROSSEX_VENUES.includes(x.id)), quotes, signals: [], fx,
+    crossexFilter: { requireSpotTransfer: filter?.requireSpotTransfer ?? filter?.enabled ?? false, blockedBases: filter?.blockedBases ?? [], excluded: 0, revision: filter?.revision ?? 0 },
     ...(snapshot.storageError ? { storageError: snapshot.storageError } : {}),
   };
   if (quotes.length > CROSS_EX_MAX_QUOTES || new Set(quotes.map(q => `${q.exchange}:${q.symbol}`)).size !== quotes.length) return { ...result, status: 'unavailable', quotes: [], errorCode: quotes.length > CROSS_EX_MAX_QUOTES ? 'QUOTE_LIMIT_EXCEEDED' : 'DUPLICATE_QUOTES', error: '支持市场报价超出上限或存在重复合约，本次不发布部分信号。' };
   if (snapshot.storageError) return result;
   const eligible = quotes.filter(q => Number.isFinite(q.bid) && q.bid > 0 && Number.isFinite(q.ask) && q.ask >= q.bid && quotePriceTime(q, 'book') <= now + 1000 && ratesFor([q], fx, now));
   const ranked = rankPerpetualSpreads({ ...snapshot, staleAfterMs: CROSS_EX_STALE_MS, quotes: eligible }, filters, now, undefined, fx);
-  let excluded = 0;
   result.signals = ranked.flatMap(row => {
     const evidence = filter?.enabled ? filter.evaluate(row.long, row.short, now) : {};
-    if (!evidence) { excluded++; return []; }
+    if (!evidence) { result.crossexFilter.excluded++; return []; }
     const legs = [row.long, row.short], rates = ratesFor(legs, fx, now), pairKey = perpetualSpreadKey(row);
     const longRate = quoteCurrencyFx(row.long.quoteCurrency, fx, now), shortRate = quoteCurrencyFx(row.short.quoteCurrency, fx, now);
     const referenceBuyPrice = row.long.ask * longRate.ask, referenceSellPrice = row.short.bid * shortRate.bid;
@@ -71,7 +71,6 @@ export function createPerpetualOpportunitiesV2(snapshot, now = Date.now(), getMa
     return { id: createHash('sha256').update(JSON.stringify([pairKey, legs.map(version), fxVersions])).digest('hex'), pairKey, base: row.base, quoteCurrency: 'USDT', long: row.long, short: row.short,
       grossSpreadPercent: (referenceSellPrice / referenceBuyPrice - 1) * 100, referenceBuyPrice, referenceSellPrice, observedAt, expiresAt,
       ...(evidence.networks ? { spotTransfer: evidence } : {}) };
-  }).filter(row => row.expiresAt >= now && row.grossSpreadPercent > 0).sort((a, b) => b.grossSpreadPercent - a.grossSpreadPercent || a.pairKey.localeCompare(b.pairKey)).slice(0, CROSS_EX_MAX_SIGNALS);
-  if (filter) result.crossexFilter = { requireSpotTransfer: filter.requireSpotTransfer ?? filter.enabled, blockedBases: filter.blockedBases ?? [], excluded };
+  }).filter(row => (result.crossexFilter.requireSpotTransfer ? now < row.expiresAt : now <= row.expiresAt) && row.grossSpreadPercent > 0).sort((a, b) => b.grossSpreadPercent - a.grossSpreadPercent || a.pairKey.localeCompare(b.pairKey)).slice(0, CROSS_EX_MAX_SIGNALS);
   return result;
 }

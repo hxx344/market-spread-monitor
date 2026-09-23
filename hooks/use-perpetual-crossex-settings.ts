@@ -2,26 +2,23 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { normalizeCrossExBlockedBases, type CrossExFilterConfig } from "../lib/perpetual-crossex-config";
+import { indexSpotTransferPairs, parseCrossExSettings, type CrossExSettings } from "../lib/perpetual-crossex-eligibility";
 
-interface Settings {
-  available: boolean; revision: number; config: CrossExFilterConfig; error: string;
-  venues: { exchange: string; state: string; checkedAt: number | null; error: string }[];
-}
 const endpoint = "/api/monitors/perpetual/crossex-settings";
-async function request(signal: AbortSignal, body?: unknown): Promise<Settings> {
+async function request(signal: AbortSignal, body?: unknown): Promise<CrossExSettings> {
   const response = await fetch(endpoint, { cache: "no-store", signal, ...(body ? { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}) });
-  const data = await response.json() as Settings;
-  if (!response.ok) throw new Error(data?.error || "CrossEx 筛选设置读取失败");
-  if (!data || typeof data.available !== "boolean" || !Number.isSafeInteger(data.revision) || typeof data.config?.requireSpotTransfer !== "boolean" || !Array.isArray(data.config.blockedBases) || !Array.isArray(data.venues)) throw new Error("CrossEx 筛选响应无效，请升级 Monitor 后重试");
-  return { ...data, config: { ...data.config, blockedBases: normalizeCrossExBlockedBases(data.config.blockedBases) } };
+  const data = await response.json();
+  if (!response.ok) throw new Error(data && typeof data === "object" && "error" in data && typeof data.error === "string" ? data.error : "CrossEx 筛选设置读取失败");
+  return parseCrossExSettings(data);
 }
 
 /** One settings reader and write lock shared by the form and every market row. */
 export function usePerpetualCrossExSettings(active: boolean) {
-  const [data, setData] = useState<Settings | null>(null), [error, setError] = useState(""), [saveError, setSaveError] = useState(""), [saving, setSaving] = useState(false), [saved, setSaved] = useState(false);
+  const [data, setData] = useState<CrossExSettings | null>(null), [error, setError] = useState(""), [saveError, setSaveError] = useState(""), [saving, setSaving] = useState(false), [saved, setSaved] = useState(false);
   const [actionBase, setActionBase] = useState("");
   const savingRef = useRef(false), generation = useRef(0);
   const blockedBases = useMemo(() => new Set(data?.config.blockedBases), [data?.config.blockedBases]);
+  const spotTransferPairs = useMemo(() => indexSpotTransferPairs(data?.spotTransferPairs), [data?.spotTransferPairs]);
   useEffect(() => {
     let stopped = false, timer: ReturnType<typeof setTimeout> | undefined, controller: AbortController | null = null;
     const eligible = () => active && !stopped && !document.hidden && navigator.onLine;
@@ -61,7 +58,7 @@ export function usePerpetualCrossExSettings(active: boolean) {
       return await update({ blockedBases: normalizeCrossExBlockedBases(next) }, base);
     } catch (cause) { reportError(cause instanceof Error ? cause.message : "币种无效", input); return false; }
   }
-  return { data, error, saveError, saving, saved, disabled, blockedBases, actionBase, update, setBaseBlocked, reportError };
+  return { data, error, saveError, saving, saved, disabled, blockedBases, spotTransferPairs, actionBase, update, setBaseBlocked, reportError };
 }
 
 export type PerpetualCrossExController = ReturnType<typeof usePerpetualCrossExSettings>;
