@@ -20,7 +20,7 @@ test('real Binance archive starts April 1, exceeds 5,000 complete paired bars, a
   rows.forEach((row, index) => {
     if (index) assert.equal(row.time - rows[index - 1].time, BAR);
     assert.ok(row.time + BAR <= Date.parse(snapshot.metadata.fetchedAt));
-    assert.equal(row.spread, Math.round((row.brent - row.wti) * 1e6) / 1e6);
+    assert.ok(Math.abs(row.spread - (row.brent - row.wti) / row.wti * 100) < 1e-12);
   });
   assert.equal(filterRows(rows, '1d', BAR).length, 96);
   assert.equal(filterRows(rows, '1w', BAR).length, 672);

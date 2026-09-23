@@ -63,9 +63,9 @@ export class Monitor {
       next.events.unshift({ id: batchId, source: 'binance', time: new Date(now).toISOString(), status: 'sending', rules: due.map(item => ({ id: item.id, label: item.rule.label, metric: item.rule.metric, operator: item.rule.operator, threshold: item.rule.threshold, value: item.value })) });
       next.events = next.events.slice(0, 100);
       await this.persist(next);
-      const message = ['原油阈值告警', `采集时间：${market.fetchedAt}（UTC）`, '价格口径：Binance BZUSDT / CLUSDT 标记价，USDT/桶',
-        ...due.map(({ rule, value, id }) => `【${rule.label}】${METRICS[rule.metric]} ${value.toFixed(4)} ${rule.operator === 'gte' ? '≥' : '≤'} ${rule.threshold}\n事件 ${id}`),
-        `布伦特 ${values.brent.toFixed(4)} · WTI ${values.wti.toFixed(4)} · 价差 ${values.spread.toFixed(4)}`].join('\n');
+      const message = ['原油阈值告警', `采集时间：${market.fetchedAt}（UTC）`, '价格口径：Binance BZUSDT / CLUSDT 标记价，USDT/桶；百分比价差＝(布伦特 − WTI) ÷ WTI × 100%',
+        ...due.map(({ rule, value, id }) => `【${rule.label}】${METRICS[rule.metric]} ${value.toFixed(4)} ${rule.operator === 'gte' ? '≥' : '≤'} ${rule.threshold} ${rule.metric === 'spreadPercent' ? '%' : 'USDT/桶'}\n事件 ${id}`),
+        `布伦特 ${values.brent.toFixed(4)} · WTI ${values.wti.toFixed(4)} · 价差 ${values.spreadPercent.toFixed(4)}%`].join('\n');
       const delivered = structuredClone(this.data), event = delivered.events.find(item => item.id === batchId);
       try {
         await this.notify(message, () => { marketValues(market, this.clock()); });

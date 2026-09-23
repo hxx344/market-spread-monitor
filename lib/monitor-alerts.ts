@@ -1,3 +1,4 @@
+import { oilSpreadPercent } from '../modules/oil/spread.mjs';
 import type { AlertConfig, AlertView } from "./alert-types";
 
 export type MonitorAlertRule = {
@@ -70,21 +71,21 @@ export const hynixAlerts: MonitorAlertAdapter = {
 type OilConfig = { enabled: boolean; rules: { id: string; label: string; metric: string; operator: "gte" | "lte"; threshold: number; cooldownMinutes: number; hysteresis: number; enabled: boolean }[] };
 type OilStatus = { available: boolean; reason?: string; webhookConfigured: boolean; lastAttemptAt: string | null; lastSuccessAt: string | null; stale: boolean; error?: string; deliveryError?: string; market?: { brent: { markPx: number }; wti: { markPx: number } } };
 type OilEvent = { source?: string; id: string; time: string; status: MonitorAlertEvent["status"]; test?: boolean; error?: string; rules: { label: string; metric: string; operator: string; threshold: number; value: number }[] };
-const oilMetricLabel: Record<string, string> = { spread: "价差", brent: "布伦特", wti: "WTI" };
+const oilMetricLabel: Record<string, string> = { spreadPercent: "百分比价差", spread: "绝对价差", brent: "布伦特", wti: "WTI" };
 export const oilDraft = (config: OilConfig): MonitorAlertDraft => ({ enabled: config.enabled, rules: config.rules.map(rule => ({ id: rule.id, name: rule.label, metric: rule.metric, direction: rule.operator === "gte" ? "above" : "below", threshold: rule.threshold, cooldownMinutes: rule.cooldownMinutes, hysteresis: rule.hysteresis, enabled: rule.enabled })) });
 export const oilConfig = (draft: MonitorAlertDraft): OilConfig => ({ enabled: draft.enabled, rules: draft.rules.map(rule => ({ id: rule.id, label: rule.name, metric: rule.metric, operator: rule.direction === "above" ? "gte" : "lte", threshold: rule.threshold, cooldownMinutes: rule.cooldownMinutes, hysteresis: rule.hysteresis, enabled: rule.enabled })) });
 export const oilAlerts: MonitorAlertAdapter = {
-  metrics: [{ id: "spread", label: "布伦特 − WTI", unit: "USDT/桶", hysteresisUnit: "USDT/桶", min: -1e6, max: 1e6 }, { id: "brent", label: "布伦特价格", unit: "USDT/桶", hysteresisUnit: "USDT/桶", min: 0, max: 1e6 }, { id: "wti", label: "WTI 价格", unit: "USDT/桶", hysteresisUnit: "USDT/桶", min: 0, max: 1e6 }], maxRules: 50, nameMaxLength: 60, cooldownMax: 10080, hysteresisMax: 1e6,
-  example: "例如向上阈值为 5 USDT/桶、回差为 0.1：触发后需回落到 4.9 以下，再次达到 5 且冷却结束，才会再次提醒。",
-  newRule: draft => baseRule(draft, "spread", 30, 0.1),
+  metrics: [{ id: "spreadPercent", label: "价差 · 相对 WTI", unit: "%", hysteresisUnit: "百分点", min: -1e6, max: 1e6 }, { id: "spread", label: "绝对价差（旧口径）", unit: "USDT/桶", hysteresisUnit: "USDT/桶", min: -1e6, max: 1e6 }, { id: "brent", label: "布伦特价格", unit: "USDT/桶", hysteresisUnit: "USDT/桶", min: 0, max: 1e6 }, { id: "wti", label: "WTI 价格", unit: "USDT/桶", hysteresisUnit: "USDT/桶", min: 0, max: 1e6 }], maxRules: 50, nameMaxLength: 60, cooldownMax: 10080, hysteresisMax: 1e6,
+  example: "百分比价差以 WTI 为基准。阈值 5%、回差 0.1 个百分点：触发后需回落到 4.9% 以下，再次达到 5% 且冷却结束才提醒。已有绝对价差规则仍按 USDT/桶判断。",
+  newRule: draft => baseRule(draft, "spreadPercent", 30, 0.1),
   async load(signal, fetcher = fetch) {
     const status = await request<OilStatus>("/api/monitors/oil/status", signal, fetcher);
     if (!status.available) return empty(status.reason);
     const [config, events] = await Promise.all([request<{ revision: number; config: OilConfig }>("/api/monitors/oil/config", signal, fetcher), request<{ events: OilEvent[] }>("/api/monitors/oil/events", signal, fetcher)]);
     const market = status.market;
     return { available: true, revision: config.revision, draft: oilDraft(config.config), webhookConfigured: status.webhookConfigured, checkedAt: status.lastAttemptAt, lastSuccessAt: status.lastSuccessAt,
-      market: market ? `Binance 标记价${status.stale ? "（已过期）" : ""} · 布伦特 ${market.brent.markPx.toFixed(4)} / WTI ${market.wti.markPx.toFixed(4)} / 价差 ${(market.brent.markPx - market.wti.markPx).toFixed(4)} USDT/桶` : "服务器尚未取得有效行情。",
-      error: [status.error, status.deliveryError].filter(Boolean).join("；"), history: events.events.map(event => ({ id: event.id, time: event.time, status: event.status, description: event.test ? "测试消息" : event.rules.map(rule => `${event.source === 'hyperliquid' ? '[历史 Hyperliquid] ' : '[Binance] '}${rule.label} · ${oilMetricLabel[rule.metric] ?? rule.metric} ${rule.value.toFixed(4)} ${rule.operator === "gte" ? "≥" : "≤"} ${rule.threshold} ${event.source === 'hyperliquid' ? '美元' : 'USDT'}/桶`).join("；"), error: event.error })) };
+      market: market ? `Binance 标记价${status.stale ? "（已过期）" : ""} · 布伦特 ${market.brent.markPx.toFixed(4)} / WTI ${market.wti.markPx.toFixed(4)} / 价差 ${oilSpreadPercent(market.brent.markPx, market.wti.markPx)?.toFixed(4) ?? "—"}%` : "服务器尚未取得有效行情。",
+      error: [status.error, status.deliveryError].filter(Boolean).join("；"), history: events.events.map(event => ({ id: event.id, time: event.time, status: event.status, description: event.test ? "测试消息" : event.rules.map(rule => `${event.source === 'hyperliquid' ? '[历史 Hyperliquid] ' : '[Binance] '}${rule.label} · ${oilMetricLabel[rule.metric] ?? rule.metric} ${rule.value.toFixed(4)} ${rule.operator === "gte" ? "≥" : "≤"} ${rule.threshold} ${rule.metric === 'spreadPercent' ? '%' : event.source === 'hyperliquid' ? '美元/桶' : 'USDT/桶'}`).join("；"), error: event.error })) };
   },
   async save(draft, revision, signal, fetcher = fetch) {
     const result = await request<{ revision: number; config: OilConfig }>("/api/monitors/oil/config", signal, fetcher, { revision, config: oilConfig(draft) });

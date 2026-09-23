@@ -18,7 +18,7 @@ test('snapshot is exclusively Hyperliquid data with explicit contract mapping an
   assert.equal(rows.at(-1).date, snapshot.metadata.lastCommonObservation);
   assert.equal(rows.length, snapshot.metadata.pairedObservationRows);
   for (const row of rows) {
-    near(row.spread, row.brent - row.wti);
+    near(row.spread, (row.brent - row.wti) / row.wti * 100);
     assert.ok(Date.parse(row.date) + DAY <= Date.parse(snapshot.metadata.fetchedAt));
   }
   assert.equal(snapshot.data.some(row => row.date < '2026-03-04' && row.brent !== null), false);
@@ -119,7 +119,7 @@ test('monthly aggregation weights available observations and preserves sub-cent 
   near(months.reduce((sum, month) => sum + month.average * month.count, 0) / rows.length, summarize(rows).average);
   assert.equal(months.reduce((sum, month) => sum + month.count, 0), rows.length);
   const one = validateRows([{ date: '2026-03-04', brent: 100.001, wti: 99.999 }]);
-  assert.equal(one[0].spread, 0.002);
+  near(one[0].spread, 0.002 / 99.999 * 100);
   assert.throws(() => validateRows([rows[0], rows[0]]));
   const domain = chartDomain([-1.245, 4.21]);
   assert.ok(domain.min < -1.245 && domain.max > 4.21);

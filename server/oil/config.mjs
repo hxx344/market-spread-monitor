@@ -1,8 +1,10 @@
-export const METRICS = Object.freeze({ spread: '布伦特 − WTI 价差', brent: '布伦特价格', wti: 'WTI 价格' });
+import { decimalDifference, oilSpreadPercent } from '../../modules/oil/spread.mjs';
+
+export const METRICS = Object.freeze({ spreadPercent: '布伦特相对 WTI 价差 (%)', spread: '绝对价差', brent: '布伦特价格', wti: 'WTI 价格' });
 
 export function defaultConfig() {
   return { enabled: false, rules: [3, 5, 8].map((threshold, index) => ({
-    id: `spread-${index + 1}`, label: `价差 ${threshold} USDT`, metric: 'spread', operator: 'gte',
+    id: `spread-${index + 1}`, label: `价差 ${threshold}%`, metric: 'spreadPercent', operator: 'gte',
     threshold, cooldownMinutes: 30, hysteresis: 0.1, enabled: true
   })) };
 }
@@ -16,7 +18,7 @@ export function validateConfig(input) {
     if (typeof rule.label !== 'string' || !rule.label.trim() || rule.label.length > 60 || /[\r\n\x00-\x1f]/.test(rule.label)) throw new Error('梯度名称需要 1–60 个字符，不含换行');
     if (!Object.hasOwn(METRICS, rule.metric) || !['gte', 'lte'].includes(rule.operator) || typeof rule.enabled !== 'boolean') throw new Error('监控指标、方向或开关无效');
     for (const field of ['threshold', 'cooldownMinutes', 'hysteresis']) if (typeof rule[field] !== 'number' || !Number.isFinite(rule[field])) throw new Error('阈值、冷却时间和回差必须是有效数字');
-    if (Math.abs(rule.threshold) > 1e6 || (rule.metric !== 'spread' && rule.threshold <= 0)) throw new Error('价格阈值必须大于 0；价差可为负数；绝对值不能超过 100 万');
+    if (Math.abs(rule.threshold) > 1e6 || (['brent', 'wti'].includes(rule.metric) && rule.threshold <= 0)) throw new Error('价格阈值必须大于 0；价差可为负数；绝对值不能超过 100 万');
     if (rule.cooldownMinutes < 0 || rule.cooldownMinutes > 10080 || rule.hysteresis < 0 || rule.hysteresis > 1e6) throw new Error('冷却时间需在 0–10080 分钟内，回差需在 0–100 万内');
     const condition = JSON.stringify([rule.metric, rule.operator, rule.threshold]);
     if (conditions.has(condition)) throw new Error('相同指标、方向和阈值的梯度不能重复');
@@ -30,18 +32,6 @@ export function ruleFingerprint(rule) {
   return JSON.stringify([rule.metric, rule.operator, rule.threshold, rule.hysteresis, rule.enabled]);
 }
 
-function decimalDifference(left, right) {
-  const parts = value => {
-    const [mantissa, exponent = '0'] = String(value).split('e');
-    const [whole, fraction = ''] = mantissa.split('.');
-    return { integer: BigInt(whole + fraction), scale: fraction.length - Number(exponent) };
-  };
-  const a = parts(left), b = parts(right), scale = Math.max(0, a.scale, b.scale);
-  const difference = a.integer * 10n ** BigInt(scale - a.scale) - b.integer * 10n ** BigInt(scale - b.scale);
-  const digits = (difference < 0n ? -difference : difference).toString().padStart(scale + 1, '0');
-  return Number((difference < 0n ? '-' : '') + (scale ? `${digits.slice(0, -scale)}.${digits.slice(-scale)}` : digits));
-}
-
 export function marketValues(market, now = Date.now(), maxAge = 90_000) {
   const timestamp = Date.parse(market?.fetchedAt);
   if (!Number.isFinite(timestamp) || now - timestamp > maxAge || timestamp - now > 5000) throw new Error('行情已过期，暂停阈值判断');
@@ -49,7 +39,9 @@ export function marketValues(market, now = Date.now(), maxAge = 90_000) {
   if (![brent, wti].every(value => typeof value === 'number' && Number.isFinite(value) && value > 0)) throw new Error('行情价格无效，暂停阈值判断');
   // Subtract decimal quotes before converting the spread back to Number so
   // tiny quoted spreads remain equal to the same user-entered decimal threshold.
-  return { spread: decimalDifference(brent, wti), brent, wti };
+  const spreadPercent = oilSpreadPercent(brent, wti);
+  if (spreadPercent === null) throw new Error('行情价差无效，暂停阈值判断');
+  return { spread: decimalDifference(brent, wti), spreadPercent, brent, wti };
 }
 
 // One notification per threshold episode. Cooldown also spans separate episodes.

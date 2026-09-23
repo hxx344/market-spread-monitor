@@ -31,6 +31,31 @@ test('configuration validates all gradients and rejects malformed numeric values
   assert.equal(validateConfig({ enabled: true, rules: [rule({ threshold: -2 })] }).rules[0].threshold, -2);
 });
 
+test('percentage alerts use percentage-point hysteresis while legacy amount rules keep their meaning', async () => {
+  assert.ok(defaultConfig().rules.every(item => item.metric === 'spreadPercent' && item.label.endsWith('%')));
+  const percentage = rule({ id: 'percent', metric: 'spreadPercent', threshold: 5, hysteresis: 0.1, cooldownMinutes: 0 });
+  const legacy = rule({ id: 'amount', threshold: 5 });
+  assert.equal(validateConfig({ enabled: true, rules: [percentage, legacy] }).rules.length, 2);
+  assert.equal(validateConfig({ enabled: true, rules: [{ ...percentage, threshold: -5 }] }).rules[0].threshold, -5);
+  const f = fixture({ rules: [percentage, legacy] });
+  f.prices(42, 40); await f.monitor.tick();
+  assert.equal(f.persisted.events[0].rules.length, 1);
+  assert.equal(f.persisted.events[0].rules[0].metric, 'spreadPercent');
+  assert.equal(f.persisted.events[0].rules[0].value, 5);
+  assert.match(f.messages[0], /≥ 5 %/);
+  assert.match(f.messages[0], /价差 5.0000%/);
+  f.prices(41.96, 40); await f.monitor.tick();
+  assert.equal(f.monitor.data.states.percent.active, true, 'Equality at 4.9% does not rearm');
+  f.prices(41.95, 40); await f.monitor.tick();
+  assert.equal(f.monitor.data.states.percent.active, false);
+  f.prices(84, 80); await f.monitor.tick();
+  assert.equal(f.messages.length, 2);
+  const restart = fixture({ data: f.persisted }); restart.prices(84, 80); await restart.monitor.tick();
+  assert.equal(restart.messages.length, 0);
+  const exact = marketValues({ fetchedAt: new Date(0).toISOString(), brent: { markPx: 75.3 }, wti: { markPx: 75 } }, 0);
+  assert.equal(evaluateRule({ ...percentage, threshold: 0.4 }, {}, exact.spreadPercent, 0).shouldSend, true);
+});
+
 test('upward equality triggers; hysteresis requires crossing the complete reset margin', () => {
   const r = rule({ cooldownMinutes: 0 });
   let result = evaluateRule(r, {}, 5, 1000); assert.equal(result.shouldSend, true);
@@ -58,7 +83,7 @@ test('cooldown spans separate episodes and a pending episode sends after cooldow
 
 test('market freshness and finite positive marks are required; spread is Brent minus WTI', () => {
   const now = Date.UTC(2026, 8, 11), market = { fetchedAt: new Date(now).toISOString(), brent: { markPx: 81 }, wti: { markPx: 83 } };
-  assert.deepEqual(marketValues(market, now), { brent: 81, wti: 83, spread: -2 });
+  assert.deepEqual(marketValues(market, now), { brent: 81, wti: 83, spread: -2, spreadPercent: -2 / 83 * 100 });
   assert.throws(() => marketValues(market, now + 90_001), /过期/);
   assert.throws(() => marketValues({ ...market, wti: { markPx: null } }, now), /无效/);
   assert.throws(() => marketValues({ ...market, fetchedAt: new Date(now + 6000).toISOString() }, now), /过期/);

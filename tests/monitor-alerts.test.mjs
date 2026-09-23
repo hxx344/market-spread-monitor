@@ -29,6 +29,20 @@ test("oil editor roundtrips all metrics, decimal minutes and independent rule co
   assert.deepEqual(oilConfig(draft).rules.slice(1), oil.rules.slice(1));
 });
 
+test("new oil rules use percent, while amount configurations and historical event units remain explicit", async () => {
+  const fresh = oilAlerts.newRule(oilDraft(oil));
+  assert.equal(fresh.metric, 'spreadPercent');
+  assert.equal(oilAlerts.metrics.find(metric => metric.id === fresh.metric).unit, '%');
+  assert.equal(oilAlerts.metrics.find(metric => metric.id === fresh.metric).hysteresisUnit, '百分点');
+  const mixed = { ...oil, rules: [...oil.rules, { ...oil.rules[0], id: 'percent', metric: 'spreadPercent' }] };
+  assert.deepEqual(oilConfig(oilDraft(mixed)), mixed);
+  const events = ['spreadPercent', 'spread'].map(metric => ({ id: metric, time: '2026-09-23T00:00:00Z', status: 'sent', rules: [{ label: '阈值', metric, operator: 'gte', value: 5, threshold: 5 }] }));
+  const view = await oilAlerts.load(signal(), async url => Response.json(url.endsWith('status') ? { available: true, market: { brent: { markPx: 80 }, wti: { markPx: 75 } } } : url.endsWith('config') ? { revision: 1, config: mixed } : { events }));
+  assert.match(view.market, /价差 6.6667%/);
+  assert.match(view.history[0].description, /百分比价差 5.0000 ≥ 5 %/);
+  assert.match(view.history[1].description, /绝对价差 5.0000 ≥ 5 USDT\/桶/);
+});
+
 test("web-only oil availability does not request Linux-only configuration or events", async () => {
   const calls = [];
   const view = await oilAlerts.load(signal(), async url => { calls.push(url); return Response.json({ available: false, reason: "仅行情" }); });

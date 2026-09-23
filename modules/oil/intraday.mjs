@@ -1,4 +1,5 @@
 import { ASSETS, API_URL, SOURCE, HISTORY_START, fetchCandles } from './binance.mjs';
+import { oilSpreadPercent } from './spread.mjs';
 
 export const OIL_CANDLE_INTERVAL = '15m';
 export const OIL_CANDLE_MS = 900_000;
@@ -76,5 +77,8 @@ export async function fetchIntradaySnapshot(existing = null, options = {}) {
 }
 
 export function intradayChartRows(snapshot) {
-  return validateIntradaySnapshot(snapshot).data.filter(row => row.brent !== null && row.wti !== null).map(row => ({ ...row, date: new Date(row.time).toISOString(), spread: Math.round((row.brent - row.wti) * 1e6) / 1e6 }));
+  return validateIntradaySnapshot(snapshot).data.flatMap(row => {
+    const spread = oilSpreadPercent(row.brent, row.wti);
+    return spread === null ? [] : [{ ...row, date: new Date(row.time).toISOString(), spread }];
+  });
 }

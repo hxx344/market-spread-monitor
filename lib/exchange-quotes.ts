@@ -1,4 +1,5 @@
 import type { LiveQuote } from "./market";
+import { oilSpreadPercent } from '../modules/oil/spread.mjs';
 import { validateMarket } from '../modules/oil/binance.mjs';
 
 export const externalExchanges = ["bybit", "binance"] as const;
@@ -45,7 +46,7 @@ export function calculateExchangeSpread(quote: ExchangeQuote) {
   const units = exchangeContracts[quote.monitorId].leftUnits;
   const left = quote.left, right = quote.right;
   const equivalent = right.price / units;
-  const spread = left.price - equivalent, premium = (left.price / equivalent - 1) * 100;
+  const spread = left.price - equivalent, premium = quote.monitorId === "oil" ? oilSpreadPercent(left.price, right.price) ?? NaN : (left.price / equivalent - 1) * 100;
   const hasFunding = [left, right].every(leg => leg.fundingRate !== null && Number.isFinite(leg.fundingRate) && leg.fundingPrice !== null && leg.fundingPrice > 0 && leg.fundingIntervalHours !== null && leg.fundingIntervalHours > 0);
   const grossNotional = hasFunding ? units * left.fundingPrice! + right.fundingPrice! : null;
   const hourlyCashflow = hasFunding ? units * left.fundingPrice! * left.fundingRate! / left.fundingIntervalHours! - right.fundingPrice! * right.fundingRate! / right.fundingIntervalHours! : null;

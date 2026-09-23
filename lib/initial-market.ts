@@ -4,7 +4,8 @@ import { calculateShortSpreadFunding } from "../modules/oil/binance.mjs";
 import { hynixSummary, oilSummary } from "./monitor-summary.ts";
 import { createTrend } from "./monitor-trend.ts";
 import { binanceOilExchangeQuote, type ExternalQuoteSet } from "./exchange-quotes.ts";
-import type { createIntradaySnapshot } from "../modules/oil/intraday.mjs";
+import { intradayChartRows, type createIntradaySnapshot } from "../modules/oil/intraday.mjs";
+import { oilSpreadPercent } from "../modules/oil/spread.mjs";
 
 export type InitialMarketData = {
   renderedAt: number;
@@ -20,11 +21,11 @@ export function initialSummaries(initial: InitialMarketData | null) {
     } : undefined, { days: 7, intervalMs: 3_600_000, label: "7 天小时线", shortLabel: "7天", unit: "%" })),
     oil: oilSummary(oil ? {
       status: oil.quote ? oil.quote.status === "snapshot" ? "stale" : "live" : "loading",
-      spread: oil.quote ? oil.quote.brent.markPx - oil.quote.wti.markPx : null,
+      spread: oil.quote ? oilSpreadPercent(oil.quote.brent.markPx, oil.quote.wti.markPx) : null,
       fundingHourlyRate: oil.quote ? calculateShortSpreadFunding(oil.quote).hourlyRate : null,
       fundingBasis: "quantity", fetchedAt: oil.quote?.fetchedAt ?? null,
       comparison: oil.quote ? binanceOilExchangeQuote(oil.quote, oil.quote.status === "snapshot") : undefined,
-      history: oil.candles ? { points: oil.candles.data.filter(row => row.brent !== null && row.wti !== null).map(row => ({ time: row.time, value: row.brent! - row.wti! })), status: oil.candles.status, fetchedAt: oil.candles.metadata.fetchedAt } : undefined,
+      history: oil.candles ? { points: intradayChartRows(oil.candles).map(row => ({ time: row.time, value: row.spread })), status: oil.candles.status, fetchedAt: oil.candles.metadata.fetchedAt } : undefined,
     } : undefined),
   };
 }
