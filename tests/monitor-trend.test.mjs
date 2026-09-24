@@ -61,10 +61,44 @@ test("oil uses historical 15-minute spreads independently of the current mark sp
   assert.equal(summary.trend.intervalMs, 900_000);
 });
 
-test("old completed candles are marked pending independently of live quote freshness", () => {
-  const trend = createTrend({ ...history, points: [{ time: hour, value: 10 }, { time: 2 * hour, value: 11 }] }, options);
-  assert.equal(trendExpired(trend, 4 * hour), false);
-  assert.equal(trendExpired(trend, 4 * hour + 1), true);
-  assert.equal(trendExpired({ ...trend, status: "snapshot" }, 5 * hour), false);
-  assert.equal(trendExpired(createTrend(undefined, options), 5 * hour), false);
-});
+const boundary = Date.parse("2026-09-24T23:00:00+08:00");
+for (const [market, intervalMs] of [["oil", 900_000], ["hynix", hour]]) {
+  const beforeClose = createTrend({ status: "live", fetchedAt: new Date(boundary - 1000).toISOString(),
+    points: [{ time: boundary - 3 * intervalMs, value: 10 }, { time: boundary - 2 * intervalMs, value: 11 }],
+  }, { ...options, intervalMs });
+  const collectedAt = (trend, time) => ({ ...trend, fetchedAt: new Date(time).toISOString() });
+
+  test(`${market}: a new candle gets time for collection and browser polling after its close`, () => {
+    assert.equal(trendExpired(beforeClose, boundary), false);
+    assert.equal(trendExpired(beforeClose, boundary + 1), false);
+    assert.equal(trendExpired(beforeClose, boundary + 14_000), false);
+    const polled = collectedAt(beforeClose, boundary + 120_000);
+    assert.equal(trendExpired(polled, boundary + 150_000), false);
+    assert.equal(trendExpired(polled, boundary + 150_001), true);
+  });
+
+  test(`${market}: refreshing collection time cannot conceal missing candles, but a new bar recovers`, () => {
+    const now = boundary + 180_000;
+    const polled = collectedAt(beforeClose, now);
+    assert.equal(trendExpired(polled, now), true);
+    const recovered = { ...polled, points: [...polled.points, { time: boundary - intervalMs, value: 12 }] };
+    assert.equal(trendExpired(recovered, now), false);
+    assert.deepEqual(beforeClose.points.map(point => point.value), [10, 11]);
+  });
+
+  test(`${market}: stopped collection expires even before another candle is due`, () => {
+    const collected = collectedAt({ ...beforeClose, points: [{ time: boundary - intervalMs, value: 12 }] }, boundary);
+    assert.equal(trendExpired(collected, boundary + 150_000), false);
+    assert.equal(trendExpired(collected, boundary + 150_001), true);
+    assert.equal(trendExpired(collectedAt(collected, boundary + 180_000), boundary + 180_000), false);
+    for (const fetchedAt of [null, "invalid"]) assert.equal(trendExpired({ ...collected, fetchedAt }, boundary), true);
+  });
+
+  test(`${market}: retained history and empty states keep their own status`, () => {
+    for (const status of ["snapshot", "stale", "loading", "error"]) {
+      assert.equal(trendExpired({ ...beforeClose, status }, boundary + day), false);
+    }
+    assert.equal(trendExpired({ ...beforeClose, points: [] }, boundary + day), false);
+    assert.equal(trendExpired(createTrend(undefined, { ...options, intervalMs }), boundary), false);
+  });
+}

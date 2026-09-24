@@ -18,9 +18,17 @@ export function createTrend(history: TrendHistory | undefined, options: { days: 
   return { ...options, points, status: history ? error ? "stale" : history.status : error ? "error" : "loading", fetchedAt: history?.fetchedAt ?? null };
 }
 
+// Both histories use a 60s collector and a 60s browser poll; allow 30s for requests.
+const TREND_UPDATE_GRACE_MS = 2 * 60_000 + 30_000;
+
 export function trendExpired(trend: MonitorTrend, now: number) {
   const last = trend.points.at(-1);
-  return trend.status === "live" && Boolean(last && now - last.time > trend.intervalMs * 2);
+  if (trend.status !== "live" || !last) return false;
+  const fetchedAt = trend.fetchedAt === null ? NaN : Date.parse(trend.fetchedAt);
+  // Points use opening times. The following completed bar is due two periods later.
+  const nextCloseAt = last.time + 2 * trend.intervalMs;
+  return !Number.isFinite(fetchedAt) || now - fetchedAt > TREND_UPDATE_GRACE_MS
+    || now - nextCloseAt > TREND_UPDATE_GRACE_MS;
 }
 
 export function trendGeometry(points: TrendPoint[], intervalMs: number) {
