@@ -45,16 +45,24 @@ export function marketJobs({ oilIntervalMs = 30_000 } = {}) {
 /** Independent resident schedules; slow history never blocks current quotes. */
 export function createMarketCollector(store, { jobs = marketJobs(), clock = Date.now, timers = globalThis, onStored = () => {} } = {}) {
   const pending = new Map(), scheduled = new Map(), storageFailures = new Set();
+  const disabled = new Set();
+  const generations = new Map();
   let running = false;
   function collect(job) {
+    if (disabled.has(job.id)) return Promise.resolve(false);
     const key = `${job.id}/${job.action}`;
+    const generation = generations.get(job.id);
+    const cancelled = () => disabled.has(job.id) || generations.get(job.id) !== generation;
     if (pending.has(key)) return pending.get(key);
     const operation = Promise.resolve().then(async () => {
       let next;
       try {
+        if (cancelled()) return false;
         next = await job.load(store.raw(job.id, job.action));
+        if (cancelled()) return false;
         if (next?.status === 'snapshot') throw new Error('Upstream returned a retained snapshot');
       } catch {
+        if (cancelled()) return false;
         try { store.fail(job.id, job.action, '采集暂时失败，保留上次成功数据；后台将自动重试。'); storageFailures.delete(key); }
         catch { storageFailures.add(key); }
         return false;
@@ -69,26 +77,39 @@ export function createMarketCollector(store, { jobs = marketJobs(), clock = Date
         return false;
       }
       // Alerts consume the committed quote promptly, without delaying collection.
-      void Promise.resolve().then(() => onStored(job)).catch(() => {});
+      void Promise.resolve().then(() => { if (!cancelled()) return onStored(job); }).catch(() => {});
       return true;
     }).finally(() => pending.delete(key));
     pending.set(key, operation);
     return operation;
   }
+  function schedule(job) {
+    const generation = generations.get(job.id);
+    const tick = async () => {
+      scheduled.delete(job);
+      if (!running || disabled.has(job.id) || generations.get(job.id) !== generation) return;
+      const started = clock();
+      await collect(job);
+      if (running && !disabled.has(job.id) && generations.get(job.id) === generation) scheduled.set(job, timers.setTimeout(tick, Math.max(1000, job.intervalMs - (clock() - started))));
+    };
+    void tick();
+  }
   return {
     collect,
+    async pause(id) {
+      disabled.add(id); generations.set(id, (generations.get(id) ?? 0) + 1);
+      for (const [job, timer] of scheduled) if (job.id === id) { timers.clearTimeout(timer); scheduled.delete(job); }
+      await Promise.all([...pending].filter(([key]) => key.startsWith(`${id}/`)).map(([, promise]) => promise));
+    },
+    resume(id) {
+      if (!disabled.delete(id)) return;
+      if (running) for (const job of jobs) if (job.id === id) schedule(job);
+    },
     healthy: () => storageFailures.size === 0,
     start() {
       if (running) return;
       running = true;
-      for (const job of jobs) {
-        const tick = async () => {
-          const started = clock();
-          await collect(job);
-          if (running) scheduled.set(job, timers.setTimeout(tick, Math.max(1000, job.intervalMs - (clock() - started))));
-        };
-        void tick();
-      }
+      for (const job of jobs) if (!disabled.has(job.id)) schedule(job);
     },
     async stop() { running = false; for (const timer of scheduled.values()) timers.clearTimeout(timer); scheduled.clear(); await Promise.all(pending.values()); },
   };

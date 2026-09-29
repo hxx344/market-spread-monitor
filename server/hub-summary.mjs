@@ -10,6 +10,8 @@ export async function readHubSummary(services, now = Date.now(), monitorId = 'oi
   const entry = monitors.find(item => item.id === monitorId);
   if (!entry) throw new Error('监控模块不存在');
   const modules = metric('modules', '监控模块', monitors.length, '个');
+  const runtime = services.get(monitorId)?.runtime?.();
+  if (runtime && (!runtime.enabled || runtime.error)) return { updatedAt: null, health: { state: 'offline', message: `${entry.title}：${runtime.error || '监控已关闭'}`, staleAfterSeconds: 30 }, metrics: [modules] };
   if (monitorId === 'perpetual') {
     const value = services.get('perpetual')?.summary?.() ?? { state: 'offline', updatedAt: null, message: '永续采集未就绪', quoteCount: 0, exchangeCount: 0, liveExchangeCount: 0 };
     return { updatedAt: timestamp(value.updatedAt) ? new Date(value.updatedAt).toISOString() : null,

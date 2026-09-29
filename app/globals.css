@@ -166,6 +166,22 @@ main, .hub-intro, .hub-notifications, .hub-alert-settings, .hub-exchange-compari
 .hub-summary-card .hub-card-metrics strong { font-size: 26px; }
 .hub-summary-card .hub-card-note { margin-top: -4px; min-height: 18px; }
 .hub-summary-card .hub-card-status { line-height: 1.7; }
+.hub-summary-shell { display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--card); overflow: hidden; }
+.hub-summary-shell[data-active=true] { border-color: #92c6c6; background: var(--active-surface); }
+.hub-summary-shell .hub-summary-card { flex: 1; width: 100%; border: 0; border-radius: 0; background: transparent; cursor: pointer; }
+.hub-summary-shell .hub-summary-card:focus-visible { outline: 2px solid var(--primary); outline-offset: -3px; }
+.hub-monitor-controls { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 20px; border-top: 1px solid var(--border); min-height: 54px; font-size: 12px; color: var(--muted-foreground); }
+.hub-monitor-controls button { display: inline-flex; align-items: center; gap: 9px; min-height: 44px; cursor: pointer; color: var(--foreground); }
+.hub-monitor-controls button:disabled { cursor: default; opacity: .65; }
+.hub-monitor-controls button:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; border-radius: 4px; }
+.hub-monitor-controls i { display: block; width: 34px; height: 20px; padding: 3px; border-radius: 12px; background: #8190a1; }
+.hub-monitor-controls i::after { content: ''; display: block; width: 14px; height: 14px; border-radius: 50%; background: #fff; }
+.hub-monitor-controls [aria-checked=true] i { background: var(--primary); }
+.hub-monitor-controls [aria-checked=true] i::after { transform: translateX(14px); }
+.hub-summary-shell[data-disabled=true] .hub-card-metrics { opacity: .55; }
+.hub-card-status.disabled i { background: #8190a1; }
+.hub-monitor-error { margin: 0; padding: 0 20px 14px; font-size: 12px; color: var(--negative); }
+.hub-control-notice { margin: 0 32px 16px; font-size: 12px; color: var(--warning); }
 .hub-card-status.live > span { color: var(--positive); }
 .hub-summary-card .hub-card-metrics strong.positive, .positive, .exchange-comparison .positive { color: var(--positive); }
 .hub-summary-card .hub-card-metrics strong.negative, .negative, .exchange-comparison .negative { color: var(--negative); }

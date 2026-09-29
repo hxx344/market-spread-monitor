@@ -10,6 +10,7 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
   const monitor = getMonitor(id);
   const headers = { "Cache-Control": "no-store" };
   if (!monitor) return Response.json({ error: "监控模块不存在" }, { status: 404, headers });
+  if (name === 'runtime') return Response.json({ available: false, monitorId: id, enabled: true, revision: 0, running: false, reason: '当前为网页预览，连接常驻监控服务后可控制开关。' }, { headers });
   if (id === "perpetual" && name === "opportunities") return Response.json(unavailablePerpetualOpportunities(), { headers });
   if (id === "perpetual" && name === "opportunities-v2") return Response.json({ ...unavailablePerpetualOpportunities(), schemaVersion: 2, fx: null }, { headers });
   if (id === "perpetual" && name === "crossex-settings") return Response.json({ available: false, generatedAt: Date.now(), revision: 0, metadataRevision: 0, spotTransferPairs: [], config: { requireSpotTransfer: false, blockedBases: [] }, venues: [], error: "当前网页预览没有常驻后台，无法保存 CrossEx 推送筛选。" }, { headers });

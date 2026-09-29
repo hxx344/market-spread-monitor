@@ -10,7 +10,7 @@ export async function readInitialMarket(services) {
     read("oil", "candles/15m"),
     read('oil', 'exchanges/hyperliquid/quote'),
   ]);
-  return { renderedAt: Date.now(), hynix: { quote: hynixQuote, history: hynixHistory, exchanges: { bybit: hynixBybit, binance: hynixBinance } }, oil: { quote: oilQuote, candles: oilCandles, exchanges: { bybit: oilBybit, binance: oilBinance, hyperliquid: oilHyperliquid } } };
+  return { renderedAt: Date.now(), ...(services.controls ? { runtime: services.controls.view() } : {}), hynix: { quote: hynixQuote, history: hynixHistory, exchanges: { bybit: hynixBybit, binance: hynixBinance } }, oil: { quote: oilQuote, candles: oilCandles, exchanges: { bybit: oilBybit, binance: oilBinance, hyperliquid: oilHyperliquid } } };
 }
 
 export function registerInitialMarket(services) {

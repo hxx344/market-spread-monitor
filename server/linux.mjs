@@ -23,8 +23,8 @@ server = createServer(createHandler({ services, username, password, nextHandler:
 server.requestTimeout = 30_000;
 await new Promise((accept, reject) => { server.once("error", reject); server.listen(port, host, accept); });
 services.market.start();
-for (const service of services.values()) service.start();
-console.log(`Market Monitor is listening on http://${host}:${port}; ${[...services.keys()].join(', ')} monitors are running.`);
+for (const service of services.values()) await service.start();
+console.log(`Market Monitor is listening on http://${host}:${port}; ${[...services].filter(([, service]) => service.runtime().running).map(([id]) => id).join(', ') || 'no'} monitors are running.`);
 } catch (error) { releaseInitialMarket(); await Promise.allSettled([...services.values()].map(service => service.stop())); await services.market.stop(); await services.notifications.stop(); throw error; }
 let closing = false;
 async function shutdown() {

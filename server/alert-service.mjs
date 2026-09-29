@@ -141,6 +141,7 @@ export function createAlertService(store, { getQuote = loadQuote, deliver = send
     check,
     start() {
       if (polling) return;
+      stopped = false;
       const tick = () => { void check().catch(() => console.error("告警状态保存失败，请检查磁盘和目录权限。")); };
       polling = setInterval(tick, 10_000);
       tick();

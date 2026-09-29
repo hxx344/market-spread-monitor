@@ -1,4 +1,5 @@
 import type { LiveQuote, MarketData } from "./market";
+import type { MonitorRuntimeMap } from './monitor-control';
 import type { validateOilHistory, validateOilQuote } from "./market-validation";
 import { calculateShortSpreadFunding } from "../modules/oil/binance.mjs";
 import { hynixSummary, oilSummary } from "./monitor-summary.ts";
@@ -9,6 +10,7 @@ import { oilSpreadPercent } from "../modules/oil/spread.mjs";
 
 export type InitialMarketData = {
   renderedAt: number;
+  runtime?: MonitorRuntimeMap;
   hynix: { quote: LiveQuote | null; history: MarketData | null; exchanges?: ExternalQuoteSet };
   oil: { quote: (ReturnType<typeof validateOilQuote> & { status: "live" | "snapshot" }) | null; history?: ReturnType<typeof validateOilHistory> | null; candles?: ReturnType<typeof createIntradaySnapshot> | null; exchanges?: ExternalQuoteSet };
 };

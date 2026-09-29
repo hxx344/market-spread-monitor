@@ -1,6 +1,7 @@
 import { gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import { readHubSummary } from './hub-summary.mjs';
+import { monitors } from '../lib/monitors.ts';
 const compress = promisify(gzip);
 import { timingSafeEqual } from "node:crypto";
 
@@ -44,6 +45,11 @@ export function createHandler({ service, services, username, password, nextHandl
         response.end("Authentication required");
         return;
       }
+      if (services?.controls && path === '/api/monitors') {
+        if (request.method !== 'GET') return json(response, 405, { error: '不支持此请求方法' });
+        const runtime = services.controls.view();
+        return json(response, 200, { schemaVersion: 1, monitors: monitors.map(monitor => ({ ...monitor, runtime: runtime[monitor.id] })) });
+      }
       if (services && path === '/api/hub/summary') {
         if (request.method !== 'GET') return json(response, 405, { error: '不支持此请求方法' });
         const summaryUrl = new URL(request.url, 'http://localhost');
@@ -70,7 +76,10 @@ export function createHandler({ service, services, username, password, nextHandl
         if (!backend) return json(response, 404, { error: "监控模块不存在" });
         if (Object.hasOwn(backend.actions, action)) {
           if (!backend.actions[action].includes(request.method)) return json(response, 405, { error: "不支持此请求方法" });
-          if (action === 'stream' && typeof backend.stream === 'function') return backend.stream(request, response);
+          if (action === 'stream' && typeof backend.stream === 'function') {
+            try { return backend.stream(request, response); }
+            catch (error) { return json(response, error.status || 503, { error: error.message }); }
+          }
           const writing = request.method !== "GET";
           if (writing) {
             const origin = request.headers.origin;
@@ -80,6 +89,7 @@ export function createHandler({ service, services, username, password, nextHandl
           try { return await json(response, 200, await backend.handle(action, request.method, writing ? await body(request) : undefined), action === 'opportunities-v2' || (id === 'perpetual' && action === 'quote') ? request : undefined); }
           catch (error) { return json(response, error.status || (writing ? action.includes("test") ? 502 : 400 : 503), { error: writing ? error.message : "监控服务暂不可用" }); }
         }
+        return json(response, 404, { error: '模块不支持此接口' });
       }
       // Compatibility for clients of the original Hynix endpoints.
       if (services && ["/api/quote", "/api/alerts", "/api/alerts/test"].includes(path)) {

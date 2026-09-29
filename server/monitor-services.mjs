@@ -15,6 +15,7 @@ import { createFundamentalsClient } from './perpetual-fundamentals.mjs';
 import { openPerpetualAlertStore } from './perpetual-alert-store.mjs';
 import { openCrossExSettingsStore } from './perpetual-crossex-store.mjs';
 import { openPerpetualPaperStore } from './perpetual-paper-store.mjs';
+import { openMonitorControlStore, attachMonitorControl } from './monitor-control.mjs';
 
 const exchangeActions = Object.fromEntries(externalExchanges.map(exchange => [exchangeAction(exchange), ["GET"]]));
 
@@ -24,6 +25,7 @@ export async function createMonitorServices(directory, { externallyLocked = fals
   await oilStore.acquire();
   let marketStore, perpetualStore;
   try {
+    const controlStore = await openMonitorControlStore(directory);
     const pollSeconds = Number(env.OIL_POLL_INTERVAL_SECONDS || 30);
     if (!Number.isInteger(pollSeconds) || pollSeconds < 10 || pollSeconds > 3600) throw new Error("OIL_POLL_INTERVAL_SECONDS 必须为 10–3600 的整数");
     marketStore = await openMarketStore(join(directory, "market.sqlite"));
@@ -48,7 +50,6 @@ export async function createMonitorServices(directory, { externallyLocked = fals
     const previousOil = await oilStore.read(), oilData = activateBinanceSource(previousOil);
     if (oilData !== previousOil) await oilStore.write(oilData);
     const oil = new Monitor({ store: oilStore, data: oilData, fetchMarket: async () => read("oil", "quote", true), pollSeconds, ...oilOptions, notify: notifications.send, webhookConfigured: notifications.configured });
-    perpetualStore = await openPerpetualStore(join(directory, 'perpetual', 'market.sqlite'));
     let coinIds = {};
     if (env.PERPETUAL_COIN_IDS) {
       try {
@@ -56,12 +57,20 @@ export async function createMonitorServices(directory, { externallyLocked = fals
         if (!coinIds || typeof coinIds !== 'object' || Array.isArray(coinIds) || Object.keys(coinIds).length > 2000 || Object.entries(coinIds).some(([base, id]) => !/^[A-Z0-9._-]{1,40}$/.test(base) || typeof id !== 'string' || !/^[a-z0-9-]{1,120}$/.test(id))) throw new Error();
       } catch { throw new Error('PERPETUAL_COIN_IDS 必须为币种到 CoinGecko ID 的 JSON 对象'); }
     }
-    const perpetualAlertStore = await openPerpetualAlertStore(join(directory, 'perpetual'));
-    let perpetualPaperStore, paperUnavailableReason = '';
-    try { perpetualPaperStore = await openPerpetualPaperStore(join(directory, 'perpetual')); }
-    catch { paperUnavailableReason = '持仓记录无法读取，请修复或恢复 paper-positions.json；行情监控继续运行。'; }
-    const crossexStore = await openCrossExSettingsStore(join(directory, 'perpetual'));
-    const perpetual = createPerpetualService({ store: perpetualStore, crossexOptions: { store: crossexStore }, notifications, alertOptions: { store: perpetualAlertStore }, paperOptions: { store: perpetualPaperStore, unavailableReason: paperUnavailableReason }, qualityOptions: { fundamentals: createFundamentalsClient({ coinIds, apiKey: env.COINGECKO_DEMO_API_KEY || '' }) }, ...perpetualOptions });
+    async function createPerpetual() {
+      const store = await openPerpetualStore(join(directory, 'perpetual', 'market.sqlite'));
+      try {
+        const perpetualAlertStore = await openPerpetualAlertStore(join(directory, 'perpetual'));
+        let perpetualPaperStore, paperUnavailableReason = '';
+        try { perpetualPaperStore = await openPerpetualPaperStore(join(directory, 'perpetual')); }
+        catch { paperUnavailableReason = '持仓记录无法读取，请修复或恢复 paper-positions.json；行情监控继续运行。'; }
+        const crossexStore = await openCrossExSettingsStore(join(directory, 'perpetual'));
+        const service = createPerpetualService({ store, crossexOptions: { store: crossexStore }, notifications, alertOptions: { store: perpetualAlertStore }, paperOptions: { store: perpetualPaperStore, unavailableReason: paperUnavailableReason }, qualityOptions: { fundamentals: createFundamentalsClient({ coinIds, apiKey: env.COINGECKO_DEMO_API_KEY || '' }) }, ...perpetualOptions });
+        perpetualStore = store;
+        return service;
+      } catch (error) { store.close(); throw error; }
+    }
+    const perpetual = await createPerpetual();
     const services = new Map([
       ['perpetual', perpetual],
       ["hynix", {
@@ -93,6 +102,6 @@ export async function createMonitorServices(directory, { externallyLocked = fals
     ]);
     services.notifications = notifications;
     services.market = { start: () => collector.start(), healthy: () => collector.healthy(), status: () => marketStore.status(), async stop() { await collector.stop(); marketStore.close(); await oilStore.release(); } };
-    return services;
+    return attachMonitorControl(services, controlStore, { collector, factories: { perpetual: createPerpetual } });
   } catch (error) { perpetualStore?.close(); marketStore?.close(); await oilStore.release(); throw error; }
 }
