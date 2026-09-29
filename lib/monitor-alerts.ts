@@ -1,5 +1,6 @@
 import { oilSpreadPercent } from '../modules/oil/spread.mjs';
 import type { AlertConfig, AlertView } from "./alert-types";
+import { goldOilRatio, type GoldOilQuote } from './gold-oil.ts';
 
 export type MonitorAlertRule = {
   id: string; name: string; metric: string; direction: "above" | "below";
@@ -93,5 +94,32 @@ export const oilAlerts: MonitorAlertAdapter = {
   },
 };
 
+export const goldOilAlerts: MonitorAlertAdapter = {
+  metrics: [{ id: 'ratio', label: '金油比 XAU / CL', unit: '桶/盎司', hysteresisUnit: '桶/盎司', min: 0, max: 1e6 }],
+  maxRules: 50, nameMaxLength: 60, cooldownMax: 10080, hysteresisMax: 1e6,
+  example: '金油比＝黄金标记价 ÷ 原油标记价。阈值 50、回差 0.5 桶/盎司：触发后需回落到 49.5 以下，再次达到 50 且冷却结束才提醒。阈值和回差均为桶/盎司。',
+  newRule: draft => baseRule(draft, 'ratio', 30, 0.5),
+  async load(signal, fetcher = fetch) {
+    const status = await request<Omit<OilStatus, 'market'> & { market?: GoldOilQuote }>('/api/monitors/cl-xau/status', signal, fetcher);
+    if (!status.available) return empty(status.reason);
+    const [config, events] = await Promise.all([
+      request<{ revision: number; config: OilConfig }>('/api/monitors/cl-xau/config', signal, fetcher),
+      request<{ events: OilEvent[] }>('/api/monitors/cl-xau/events', signal, fetcher),
+    ]);
+    const market = status.market, ratio = market ? goldOilRatio(market.cl.price, market.xau.price) : null;
+    return { available: true, revision: config.revision, draft: oilDraft(config.config), webhookConfigured: status.webhookConfigured,
+      checkedAt: status.lastAttemptAt, lastSuccessAt: status.lastSuccessAt,
+      market: market ? `Binance 标记价${status.stale ? '（已过期）' : ''} · 金油比 XAU / CL ${ratio?.toFixed(4) ?? '—'} 桶/盎司 · 黄金 ${market.xau.price.toFixed(4)} USDT/盎司 / 原油 ${market.cl.price.toFixed(4)} USDT/桶` : '服务器尚未取得有效行情。',
+      error: [status.error, status.deliveryError].filter(Boolean).join('；'),
+      history: events.events.map(event => ({ id: event.id, time: event.time, status: event.status,
+        description: event.rules.map(rule => `[Binance] ${rule.label} · 金油比 ${rule.value.toFixed(4)} ${rule.operator === 'gte' ? '≥' : '≤'} ${rule.threshold} 桶/盎司`).join('；'), error: event.error })),
+    };
+  },
+  async save(draft, revision, signal, fetcher = fetch) {
+    const result = await request<{ revision: number; config: OilConfig }>('/api/monitors/cl-xau/config', signal, fetcher, { revision, config: oilConfig(draft) });
+    return { revision: result.revision, draft: oilDraft(result.config) };
+  },
+};
+
 /** All alert-capable monitors use the hub's fixed editor slot and this contract. */
-export const monitorAlertAdapters: Record<string, MonitorAlertAdapter> = { oil: oilAlerts, hynix: hynixAlerts };
+export const monitorAlertAdapters: Record<string, MonitorAlertAdapter> = { oil: oilAlerts, hynix: hynixAlerts, 'cl-xau': goldOilAlerts };

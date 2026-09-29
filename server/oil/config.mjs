@@ -9,16 +9,16 @@ export function defaultConfig() {
   })) };
 }
 
-export function validateConfig(input) {
+export function validateConfig(input, { metrics = METRICS, positiveMetrics = ['brent', 'wti'], thresholdError = '价格阈值必须大于 0；价差可为负数；绝对值不能超过 100 万' } = {}) {
   if (!input || typeof input.enabled !== 'boolean' || !Array.isArray(input.rules) || input.rules.length > 50) throw new Error('配置需包含总开关，最多允许 50 个梯度');
   const ids = new Set(), conditions = new Set();
   const rules = input.rules.map(rule => {
     if (!rule || typeof rule.id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(rule.id) || ['__proto__', 'constructor', 'prototype'].includes(rule.id) || ids.has(rule.id)) throw new Error('梯度 ID 无效或重复');
     ids.add(rule.id);
     if (typeof rule.label !== 'string' || !rule.label.trim() || rule.label.length > 60 || /[\r\n\x00-\x1f]/.test(rule.label)) throw new Error('梯度名称需要 1–60 个字符，不含换行');
-    if (!Object.hasOwn(METRICS, rule.metric) || !['gte', 'lte'].includes(rule.operator) || typeof rule.enabled !== 'boolean') throw new Error('监控指标、方向或开关无效');
+    if (!Object.hasOwn(metrics, rule.metric) || !['gte', 'lte'].includes(rule.operator) || typeof rule.enabled !== 'boolean') throw new Error('监控指标、方向或开关无效');
     for (const field of ['threshold', 'cooldownMinutes', 'hysteresis']) if (typeof rule[field] !== 'number' || !Number.isFinite(rule[field])) throw new Error('阈值、冷却时间和回差必须是有效数字');
-    if (Math.abs(rule.threshold) > 1e6 || (['brent', 'wti'].includes(rule.metric) && rule.threshold <= 0)) throw new Error('价格阈值必须大于 0；价差可为负数；绝对值不能超过 100 万');
+    if (Math.abs(rule.threshold) > 1e6 || (positiveMetrics.includes(rule.metric) && rule.threshold <= 0)) throw new Error(thresholdError);
     if (rule.cooldownMinutes < 0 || rule.cooldownMinutes > 10080 || rule.hysteresis < 0 || rule.hysteresis > 1e6) throw new Error('冷却时间需在 0–10080 分钟内，回差需在 0–100 万内');
     const condition = JSON.stringify([rule.metric, rule.operator, rule.threshold]);
     if (conditions.has(condition)) throw new Error('相同指标、方向和阈值的梯度不能重复');

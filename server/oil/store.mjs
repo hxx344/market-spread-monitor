@@ -2,7 +2,7 @@ import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { defaultConfig, validateConfig } from './config.mjs';
 
-export function emptyStore() { return { schemaVersion: 1, marketSource: 'binance', revision: 0, config: defaultConfig(), states: {}, events: [] }; }
+export function emptyStore(defaults = defaultConfig) { return { schemaVersion: 1, marketSource: 'binance', revision: 0, config: defaults(), states: {}, events: [] }; }
 
 export function activateBinanceSource(data) {
   if (data.marketSource === 'binance') return data;
@@ -10,7 +10,7 @@ export function activateBinanceSource(data) {
 }
 
 export class FileStore {
-  constructor(directory, externallyLocked = false) { this.externallyLocked = externallyLocked; this.directory = path.resolve(directory); this.file = path.join(this.directory, 'monitor.json'); this.lock = path.join(this.directory, 'monitor.lock'); }
+  constructor(directory, externallyLocked = false, { defaults = defaultConfig, validate = validateConfig } = {}) { this.defaults = defaults; this.validate = validate; this.externallyLocked = externallyLocked; this.directory = path.resolve(directory); this.file = path.join(this.directory, 'monitor.json'); this.lock = path.join(this.directory, 'monitor.lock'); }
   async acquire() {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     if (this.externallyLocked) return;
@@ -22,10 +22,10 @@ export class FileStore {
   async read() {
     let raw;
     try { raw = await readFile(this.file, 'utf8'); }
-    catch (error) { if (error.code === 'ENOENT') return emptyStore(); throw error; }
+    catch (error) { if (error.code === 'ENOENT') return emptyStore(this.defaults); throw error; }
     const data = JSON.parse(raw);
     if (data.schemaVersion !== 1 || !Number.isSafeInteger(data.revision) || data.revision < 0 || !data.states || typeof data.states !== 'object' || Array.isArray(data.states) || !Array.isArray(data.events)) throw new Error('持久化数据格式无效；请从备份恢复 monitor.json');
-    data.config = validateConfig(data.config);
+    data.config = this.validate(data.config);
     for (const state of Object.values(data.states)) {
       if (!state || typeof state.active !== 'boolean' || typeof state.alerted !== 'boolean' || (state.lastSentAt !== null && (!Number.isFinite(state.lastSentAt) || state.lastSentAt < 0)) || !Number.isFinite(state.nextAttemptAt) || state.nextAttemptAt < 0 || (state.eventId != null && typeof state.eventId !== 'string')) throw new Error('告警状态损坏；请从备份恢复 monitor.json');
     }

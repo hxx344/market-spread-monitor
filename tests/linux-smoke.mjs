@@ -40,10 +40,13 @@ try {
   const page = await fetch(base, { headers });
   assert.equal(page.status, 200);
   const markup = await page.text();
-  assert.ok(markup.includes('spark-line'), 'Initial HTML must include persisted trends before any browser JavaScript');
-  assert.equal((markup.match(/加载走势/g) ?? []).length, 0, 'Both histories are available directly from SQLite on first render');
+  for (const title of ['原油价差', '海力士 ADR']) {
+    const card = markup.match(new RegExp(`<article[^>]*aria-label="${title}"[^>]*>[\\s\\S]*?</article>`))?.[0];
+    assert.ok(card?.includes('spark-line'), `${title} must render its seeded SQLite trend before browser JavaScript`);
+    assert.doesNotMatch(card, /加载走势/, `${title} must not wait for a browser history request`);
+  }
   assert.match(page.headers.get('cache-control') ?? '', /no-store|private/, 'Database-backed HTML must not be reused as a static build snapshot');
-  for (const id of ["oil", "hynix"]) assert.ok(markup.includes(`data-alert-monitor="${id}"`), `${id} must render the shared alert editor`);
+  for (const id of ["oil", "cl-xau", "hynix"]) assert.ok(markup.includes(`data-alert-monitor="${id}"`), `${id} must render the shared alert editor`);
   const initial = await state();
   assert.equal(initial.available, true); assert.equal(initial.config.enabled, false);
   const updated = await fetch(`${base}/api/alerts`, { method: "PUT", headers: { ...headers, "Content-Type": "application/json", Origin: base }, body: JSON.stringify({ enabled: false, cooldownSeconds: 60, hysteresis: 0.5, revision: initial.revision, rules: [{ id: "smoke-above", name: "smoke-above", enabled: true, direction: "above", threshold: 40, cooldownSeconds: 90, hysteresis: 0.25 }, { id: "smoke-below", name: "smoke-below", enabled: true, direction: "below", threshold: 20 }] }) });

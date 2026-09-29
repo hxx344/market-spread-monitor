@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { hynixAlerts, hynixDraft, hynixConfig, oilAlerts, oilDraft, oilConfig, monitorAlertAdapters } from "../lib/monitor-alerts.ts";
+import { hynixAlerts, hynixDraft, hynixConfig, oilAlerts, oilDraft, oilConfig, goldOilAlerts, monitorAlertAdapters } from "../lib/monitor-alerts.ts";
 import { monitors } from "../lib/monitors.ts";
 
 const signal = () => new AbortController().signal;
@@ -79,4 +79,29 @@ test("every alert-capable monitor registers the common editor contract; HTTP cli
     const fresh = adapter.newRule({ enabled: false, rules: [] });
     assert.match(fresh.id, /^[a-zA-Z0-9_-]{1,64}$/); assert.ok(adapter.metrics.some(metric => metric.id === fresh.metric));
   }
+});
+
+test('gold/oil editor uses ratio units, isolated endpoints, canonical saves and retained event values', async () => {
+  const config = { enabled: true, rules: [{ ...oil.rules[0], id: 'ratio', label: '上沿', metric: 'ratio', threshold: 50, hysteresis: 0.5 }] }, calls = [];
+  const draft = oilDraft(config), fresh = goldOilAlerts.newRule(draft);
+  assert.equal(fresh.metric, 'ratio'); assert.equal(goldOilAlerts.metrics[0].unit, '桶/盎司'); assert.equal(goldOilAlerts.metrics[0].hysteresisUnit, '桶/盎司');
+  assert.equal(Number.isNaN(fresh.threshold), true);
+  const view = await goldOilAlerts.load(signal(), async url => {
+    calls.push(url);
+    return Response.json(url.endsWith('status') ? { available: true, stale: true, webhookConfigured: true, market: { cl: { price: 80 }, xau: { price: 4000 }, ratio: 999 }, error: 'offline' }
+      : url.endsWith('config') ? { revision: 2, config }
+      : { events: [{ id: 'event', time: '2026-09-30T00:00:00Z', status: 'sent', rules: [{ label: '旧下沿', operator: 'lte', value: 45, threshold: 46 }] }] });
+  });
+  assert.deepEqual(view.draft, draft); assert.equal(view.revision, 2); assert.match(view.market, /已过期.*50.0000 桶\/盎司/);
+  assert.match(view.history[0].description, /旧下沿.*45.0000 ≤ 46 桶\/盎司/); assert.equal(view.error, 'offline');
+  assert.ok(calls.every(url => url.startsWith('/api/monitors/cl-xau/')));
+  const saved = await goldOilAlerts.save(draft, 2, signal(), async (url, init) => {
+    assert.equal(url, '/api/monitors/cl-xau/config'); assert.deepEqual(JSON.parse(init.body), { revision: 2, config });
+    return Response.json({ revision: 3, config });
+  });
+  assert.deepEqual(saved, { revision: 3, draft });
+  await assert.rejects(goldOilAlerts.save(draft, 2, signal(), async () => Response.json({ error: 'conflict' }, { status: 409 })), /你的修改仍保留/);
+  calls.length = 0;
+  const unavailable = await goldOilAlerts.load(signal(), async url => { calls.push(url); return Response.json({ available: false, reason: '预览' }); });
+  assert.equal(unavailable.available, false); assert.deepEqual(calls, ['/api/monitors/cl-xau/status']);
 });
