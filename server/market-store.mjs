@@ -5,11 +5,13 @@ import { validateHynixQuote, validateHynixHistory, validateHynixFunding, validat
 import { comparisonExchanges, exchangeAction, validateComparisonQuote } from '../lib/exchange-quotes.ts';
 import { OIL_CANDLE_ACTION, validateIntradaySnapshot } from '../modules/oil/intraday.mjs';
 import { validateGoldOilQuote, validateGoldOilHistory } from '../lib/gold-oil.ts';
+import { validateGoldOilFunding } from '../lib/gold-oil-funding.ts';
 
 const validators = { 'hynix/quote': validateHynixQuote, 'hynix/history': validateHynixHistory, 'hynix/funding': validateHynixFunding, 'oil/quote': validateOilQuote, 'oil/history': validateOilHistory, 'oil/funding': validateOilFunding };
 validators[`oil/${OIL_CANDLE_ACTION}`] = validateIntradaySnapshot;
 validators['cl-xau/quote'] = validateGoldOilQuote;
 validators['cl-xau/history'] = validateGoldOilHistory;
+validators['cl-xau/funding'] = validateGoldOilFunding;
 for (const id of ['oil', 'hynix']) for (const exchange of comparisonExchanges(id)) validators[`${id}/${exchangeAction(exchange)}`] = value => validateComparisonQuote(value, exchange, id);
 export const datasetKeys = Object.keys(validators);
 const timestamp = value => Date.parse(value.fetchedAt ?? value.metadata?.fetchedAt);

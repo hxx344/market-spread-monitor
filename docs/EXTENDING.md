@@ -32,8 +32,9 @@ interface DataAdapter {
 | `hynix/history` | `points, fetchedAt, status, interval, firstAvailable, warnings` |
 | `hynix/funding` | `rows, metadata, status, error?`；每行 `time, adr, ordinary` 为已结算小时费率，缺腿为 `null` |
 | `oil/quote` | `brent, wti, fetchedAt`，每腿含 `markPx, oraclePx, funding` |
-| `cl-xau/quote` | Binance `cl, xau` 各含 `symbol, price, updatedAt`；`ratio = xau.price / cl.price`，单位桶/盎司；`fetchedAt` 取较早的腿时间 |
-| `cl-xau/history` | `points` 保存同 UTC 时段已收盘 15 分钟标记价 `time, cl, xau, ratio`；最多最近 7 天，缺腿为 `null`，不插值 |
+| `cl-xau/quote` | Binance `cl, xau` 各含 `symbol, price, updatedAt`；`ratio = xau.price / cl.price`，单位桶/盎司；`fetchedAt` 取较早的腿时间；可选 `funding.cl/xau` 保存 `rate, intervalHours, nextFundingAt`，缺失时为 `null`，不影响价格 |
+| `cl-xau/history` | `points` 保存同 UTC 时段已收盘 15 分钟标记价 `time, cl, xau, ratio`；从共同上市时间分页补齐，`coverageStart` 标识已回查起点，后续重查重叠区间与已知缺口；缺腿为 `null`，不插值 |
+| `cl-xau/funding` | 每 5 分钟增量采集实际结算 `points: {time, cl, xau}[]`，毫秒时间保留，两腿独立、无记录为 `null`；`coverageStart/coverageEnd` 标记两腿分页成功完成的查询区间；分页失败不推进覆盖范围或刷新旧时间 |
 | `oil/history` | `data, market, metadata, status` |
 | `oil/funding` | `data, metadata, status`，UTC 小时资金费 |
 | `perpetual/quote` | `schemaVersion, generatedAt, staleAfterMs, exchanges, quotes`；价格逐字段保留原更新时间，前端按模式过滤过期报价 |

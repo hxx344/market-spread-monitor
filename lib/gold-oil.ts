@@ -2,11 +2,13 @@ export const GOLD_OIL_INTERVAL_MS = 900_000;
 export const GOLD_OIL_QUOTE_MS = 30_000;
 export const GOLD_OIL_HISTORY_MS = 60_000;
 export const GOLD_OIL_STALE_MS = 75_000;
+export const GOLD_OIL_FUNDING_MS = 300_000;
 export const GOLD_OIL_SYMBOLS = { cl: 'CLUSDT', xau: 'XAUUSDT' } as const;
 type Leg = { symbol: string; price: number; updatedAt: string };
-export type GoldOilQuote = { source: 'Binance'; currency: 'USDT'; priceBasis: 'mark'; fetchedAt: string; cl: Leg; xau: Leg; ratio: number; status: 'live' | 'snapshot' };
+export type GoldOilFundingLeg = { rate: number; intervalHours: number; nextFundingAt: string };
+export type GoldOilQuote = { source: 'Binance'; currency: 'USDT'; priceBasis: 'mark'; fetchedAt: string; cl: Leg; xau: Leg; ratio: number; status: 'live' | 'snapshot'; funding: { cl: GoldOilFundingLeg; xau: GoldOilFundingLeg } | null };
 export type GoldOilPoint = { time: number; cl: number | null; xau: number | null; ratio: number | null };
-export type GoldOilHistory = { source: 'Binance'; currency: 'USDT'; priceBasis: 'mark'; interval: '15m'; fetchedAt: string; status: 'live' | 'snapshot'; points: GoldOilPoint[] };
+export type GoldOilHistory = { source: 'Binance'; currency: 'USDT'; priceBasis: 'mark'; interval: '15m'; fetchedAt: string; status: 'live' | 'snapshot'; points: GoldOilPoint[]; coverageStart?: number };
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('Invalid gold/oil data');
@@ -40,11 +42,21 @@ export function validateGoldOilQuote(input: unknown): GoldOilQuote {
   const cl = leg('cl'), xau = leg('xau'), times = [Date.parse(cl.updatedAt), Date.parse(xau.updatedAt)];
   const ratio = goldOilRatio(cl.price, xau.price);
   if (Math.abs(times[0] - times[1]) > 15_000 || Date.parse(base.fetchedAt) !== Math.min(...times) || ratio === null) throw Error('Unsynchronized gold/oil quote');
-  return { ...base, cl, xau, ratio };
+  let funding: GoldOilQuote['funding'] = null;
+  if (value.funding != null) {
+    const terms = object(value.funding);
+    const read = (key: 'cl' | 'xau') => {
+      const item = object(terms[key]), rate = item.rate, hours = positive(item.intervalHours), nextFundingAt = stamp(item.nextFundingAt);
+      if (typeof rate !== 'number' || !Number.isFinite(rate) || Math.abs(rate) > 1 || !Number.isInteger(hours) || hours > 24 || Date.parse(nextFundingAt) < Math.max(...times) - 60_000 || Date.parse(nextFundingAt) > Math.max(...times) + 25 * 3_600_000) throw Error('Invalid gold/oil funding');
+      return { rate, intervalHours: hours, nextFundingAt };
+    };
+    funding = { cl: read('cl'), xau: read('xau') };
+  }
+  return { ...base, cl, xau, ratio, funding };
 }
 export function validateGoldOilHistory(input: unknown): GoldOilHistory {
   const value = object(input), base = common(value);
-  if (value.interval !== '15m' || !Array.isArray(value.points) || !value.points.length || value.points.length > 672) throw Error('Invalid gold/oil history');
+  if (value.interval !== '15m' || !Array.isArray(value.points) || !value.points.length || value.points.length > 100_000) throw Error('Invalid gold/oil history');
   let previous = 0;
   const points = value.points.map(item => {
     const row = object(item), time = row.time;
@@ -54,14 +66,26 @@ export function validateGoldOilHistory(input: unknown): GoldOilHistory {
     return { time, cl, xau, ratio: goldOilRatio(cl, xau) };
   });
   if (!points.some(point => point.ratio !== null)) throw Error('No paired gold/oil history');
-  return { ...base, interval: '15m', points };
+  if (Date.parse(base.fetchedAt) - points[0].time > 100_000 * GOLD_OIL_INTERVAL_MS) throw Error('Gold/oil history span is too large');
+  const coverageStart = value.coverageStart;
+  if (coverageStart !== undefined && (typeof coverageStart !== 'number' || !Number.isSafeInteger(coverageStart) || coverageStart <= 0 || coverageStart > points[0].time)) throw Error('Invalid gold/oil history coverage');
+  return { ...base, interval: '15m', points, ...(typeof coverageStart === 'number' ? { coverageStart } : {}) };
 }
 
 /** Include explicit nulls so Recharts cannot join across a missing period. */
-export function goldOilChartPoints(history: GoldOilHistory | null, days: number) {
+export function goldOilChartPoints(history: GoldOilHistory | null, days: number | '1m') {
   if (!history?.points.length) return [];
   const end = Math.floor(Date.parse(history.fetchedAt) / GOLD_OIL_INTERVAL_MS) * GOLD_OIL_INTERVAL_MS;
-  const start = Math.max(history.points[0].time, end - days * 86_400_000);
+  let cutoff = end;
+  if (days === '1m') {
+    const date = new Date(end), month = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() - 1, 1));
+    const lastDay = new Date(Date.UTC(month.getUTCFullYear(), month.getUTCMonth() + 1, 0)).getUTCDate();
+    month.setUTCDate(Math.min(date.getUTCDate(), lastDay));
+    month.setUTCHours(date.getUTCHours(), date.getUTCMinutes());
+    cutoff = month.getTime();
+  } else cutoff = end - days * 86_400_000;
+  const first = history.coverageStart === undefined ? history.points[0].time : Math.ceil(history.coverageStart / GOLD_OIL_INTERVAL_MS) * GOLD_OIL_INTERVAL_MS;
+  const start = days === 0 ? first : Math.max(first, cutoff);
   const points = new Map(history.points.map(point => [point.time, point]));
   const rows: GoldOilPoint[] = [];
   for (let time = start; time < end; time += GOLD_OIL_INTERVAL_MS) rows.push(points.get(time) ?? { time, cl: null, xau: null, ratio: null });

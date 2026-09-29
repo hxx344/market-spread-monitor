@@ -8,7 +8,7 @@ import Link from "next/link";
 import dynamic from 'next/dynamic';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import { monitors } from "../lib/monitors";
-import { goldOilSummary, summaryExpired, summaryStatusLabels, summaryTimestamp, type MonitorSummary } from "../lib/monitor-summary";
+import { goldOilSummary, goldOilTrend, summaryExpired, summaryStatusLabels, summaryTimestamp, type MonitorSummary } from "../lib/monitor-summary";
 import { initialSummaries, type InitialMarketData } from "../lib/initial-market";
 import Dashboard from "./dashboard";
 import OilPanel from "./oil-panel";
@@ -49,7 +49,7 @@ export default function MonitorHub({ initial = null, initialMonitor = "oil" }: {
   const [perpetualVisited, setPerpetualVisited] = useState(initialMonitor === "perpetual");
   const [oil, setOil] = useState(() => initialSummaries(initial).oil);
   const [hynix, setHynix] = useState(() => initialSummaries(initial).hynix);
-  const [goldOil, setGoldOil] = useState(() => goldOilSummary(initial?.['cl-xau']?.quote ?? null));
+  const [goldOil, setGoldOil] = useState(() => goldOilSummary(initial?.['cl-xau']?.quote ?? null, false, goldOilTrend(initial?.['cl-xau']?.history ?? null)));
   const [perpetual, setPerpetual] = useState<MonitorSummary>({ status: "loading", fetchedAt: null, metrics: [{ label: "覆盖币种", value: "—" }, { label: "实时平台", value: "—" }], note: "CEX / DEX 永续合约 · 买卖盘口价差" });
   const summaries: Record<string, MonitorSummary> = { oil, hynix, perpetual, 'cl-xau': goldOil };
   // Stable setters keep mounted panels and their pollers intact on every quote.

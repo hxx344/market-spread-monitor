@@ -1,6 +1,7 @@
 import { oilSpreadPercent } from '../modules/oil/spread.mjs';
 import { monitors } from '../lib/monitors.ts';
 import { goldOilRatio } from '../lib/gold-oil.ts';
+import { currentGoldOilFunding } from '../lib/gold-oil-funding.ts';
 const timestamp = value => { const at = typeof value === 'number' ? value : Date.parse(value); return Number.isFinite(at) && at > 0 ? at : null; };
 const finite = value => typeof value === 'number' && Number.isFinite(value) ? value : null;
 const healthMessage = value => String(value).slice(0, 500);
@@ -25,10 +26,11 @@ export async function readHubSummary(services, now = Date.now(), monitorId = 'oi
   const stale = quote && (!at || at > now + 1000 || now - at > staleAfterSeconds * 1000 || quote.status === 'snapshot' || quote.collection?.stale);
   if (monitorId === 'cl-xau') {
     const cl = finite(quote?.cl?.price), xau = finite(quote?.xau?.price), ratio = goldOilRatio(cl, xau);
+    const funding = currentGoldOilFunding(quote);
     return { updatedAt: at ? new Date(at).toISOString() : null,
       health: { state: !quote ? 'offline' : stale ? 'stale' : ratio === null ? 'partial' : 'online', staleAfterSeconds,
         message: healthMessage(`金油比：XAU ÷ CL，单位桶/盎司；Binance 标记价格${!quote ? '；后台尚未取得报价' : stale ? '；报价已过期，保留原时间' : ratio === null ? '；价格无效' : ''}`) },
-      metrics: [metric('ratio', '金油比 XAU / CL', ratio, '桶/盎司'), metric('xau', '黄金 XAU', xau, 'USDT/盎司'), metric('cl', 'WTI 原油 CL', cl, 'USDT/桶'), modules] };
+      metrics: [metric('ratio', '金油比 XAU / CL', ratio, '桶/盎司'), metric('xau', '黄金 XAU', xau, 'USDT/盎司'), metric('cl', 'WTI 原油 CL', cl, 'USDT/桶'), metric('funding', '做空金油比资金费年化', funding ? funding.annualized * 100 : null, '%'), modules] };
   }
   const spreadPercent = monitorId === 'oil' ? oilSpreadPercent(finite(quote?.brent?.markPx), finite(quote?.wti?.markPx)) : null;
   const partial = monitorId === 'oil' && spreadPercent === null || quote?.status === 'partial' || quote?.status === 'connecting' || Boolean(quote?.collection?.error) || monitorId === 'hynix' && Boolean(quote?.fundingError);

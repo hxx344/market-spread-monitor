@@ -89,8 +89,8 @@ try {
   };
   let collected = inspect();
   for (let attempt = 0; attempt < 90 && collected.datasets.some(dataset => !dataset.attempt_ms); attempt++) { await delay(500); collected = inspect(); }
-  assert.equal(collected.datasets.length, 14);
-  assert.ok(collected.datasets.every(dataset => dataset.attempt_ms), "All fourteen datasets collect in the background");
+  assert.equal(collected.datasets.length, 15);
+  assert.ok(collected.datasets.every(dataset => dataset.attempt_ms), "All fifteen datasets collect in the background");
   const oilStatus = await fetch(`${base}/api/monitors/oil/status`, { headers }).then(r=>r.json());
   assert.ok(oilStatus.lastAttemptAt, "Oil monitor runs independently of page visits");
   // A live SSE response must not trap server.close() during shutdown.
