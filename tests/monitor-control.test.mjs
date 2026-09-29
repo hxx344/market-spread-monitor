@@ -14,7 +14,7 @@ import { readInitialMarket } from '../server/initial-market.mjs';
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
 async function until(condition) { for (let i = 0; i < 200; i++) { if (condition()) return; await delay(5); } assert.fail('Condition did not become true'); }
-const fresh = () => ({ version: 1, monitors: Object.fromEntries(['oil', 'hynix', 'perpetual'].map(id => [id, { enabled: true, revision: 0 }])) });
+const fresh = () => ({ version: 1, monitors: Object.fromEntries(['oil', 'cl-xau', 'hynix', 'perpetual'].map(id => [id, { enabled: true, revision: 0 }])) });
 const change = (services, id, enabled) => services.get(id).handle('runtime', 'PUT', { enabled, revision: services.get(id).runtime().revision });
 const shutdown = async services => { await Promise.all([...services.values()].map(service => service.stop())); await services.market.stop(); await services.notifications.stop(); };
 
@@ -122,7 +122,7 @@ test('resident switches close streams and sockets, reopen durable perpetual stor
       const quote = await services.get('perpetual').handle('quote', 'GET');
       assert.equal(quote.quotes[0].bid, 100 + cycle, 'Fresh service restores saved prices without deleting history');
     }
-    await change(services, 'perpetual', false); await change(services, 'hynix', false);
+    await change(services, 'perpetual', false); await change(services, 'hynix', false); await change(services, 'cl-xau', false);
     await new Promise(resolve => server.close(resolve)); server = null;
     await shutdown(services); services = null;
     const previousSockets = sockets.length, previousChecks = hynixChecks;

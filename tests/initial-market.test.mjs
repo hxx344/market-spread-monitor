@@ -16,6 +16,7 @@ test('first render reads persisted history immediately with collection stopped a
     const before = services.market.status();
     const data = await readInitialMarket(services);
     assert.equal(data.hynix.quote, null, 'Do not disguise a candle close as a current quote');
+    assert.deepEqual(data['cl-xau'], { quote: null, history: null });
     assert.ok(data.hynix.history.points.length > 1000);
     assert.equal(data.oil.quote.status, 'snapshot');
     assert.equal(data.oil.quote.collection.source, 'database');

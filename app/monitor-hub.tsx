@@ -8,10 +8,11 @@ import Link from "next/link";
 import dynamic from 'next/dynamic';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import { monitors } from "../lib/monitors";
-import { summaryExpired, summaryStatusLabels, summaryTimestamp, type MonitorSummary } from "../lib/monitor-summary";
+import { goldOilSummary, summaryExpired, summaryStatusLabels, summaryTimestamp, type MonitorSummary } from "../lib/monitor-summary";
 import { initialSummaries, type InitialMarketData } from "../lib/initial-market";
 import Dashboard from "./dashboard";
 import OilPanel from "./oil-panel";
+import GoldOilPanel from './gold-oil-panel';
 import MonitorSparkline from "./monitor-sparkline";
 import { trendExpired } from "../lib/monitor-trend";
 import NotificationSettings from "./notification-settings";
@@ -21,7 +22,7 @@ import ExchangeComparison from "./exchange-comparison";
 import { useMonitorControls } from '../lib/use-monitor-controls';
 const PerpetualPanel = dynamic(() => import('./perpetual-panel'), { loading: () => <p role="status">正在加载合约监控…</p> });
 
-const panels = { oil: memo(OilPanel), hynix: memo(Dashboard) };
+const panels = { oil: memo(OilPanel), hynix: memo(Dashboard), 'cl-xau': memo(GoldOilPanel) };
 
 const CardSummary = memo(function CardSummary({ summary, intervalMs, renderedAt, disabled = false }: { summary: MonitorSummary; intervalMs: number; renderedAt?: number; disabled?: boolean }) {
   const [now, setNow] = useState(() => renderedAt ?? Date.now());
@@ -40,7 +41,7 @@ const CardSummary = memo(function CardSummary({ summary, intervalMs, renderedAt,
   </>;
 });
 
-export default function MonitorHub({ initial = null, initialMonitor = "oil" }: { initial?: InitialMarketData | null; initialMonitor?: "oil" | "hynix" | "perpetual" }) {
+export default function MonitorHub({ initial = null, initialMonitor = "oil" }: { initial?: InitialMarketData | null; initialMonitor?: "oil" | "hynix" | "perpetual" | 'cl-xau' }) {
   const hub = useHubBridge("monitor");
   const controls = useMonitorControls(initial?.runtime, hub.active);
   const enabled = (id: string) => controls.runtime[id]?.enabled !== false && !controls.runtime[id]?.error;
@@ -48,10 +49,11 @@ export default function MonitorHub({ initial = null, initialMonitor = "oil" }: {
   const [perpetualVisited, setPerpetualVisited] = useState(initialMonitor === "perpetual");
   const [oil, setOil] = useState(() => initialSummaries(initial).oil);
   const [hynix, setHynix] = useState(() => initialSummaries(initial).hynix);
+  const [goldOil, setGoldOil] = useState(() => goldOilSummary(initial?.['cl-xau']?.quote ?? null));
   const [perpetual, setPerpetual] = useState<MonitorSummary>({ status: "loading", fetchedAt: null, metrics: [{ label: "覆盖币种", value: "—" }, { label: "实时平台", value: "—" }], note: "CEX / DEX 永续合约 · 买卖盘口价差" });
-  const summaries: Record<string, MonitorSummary> = { oil, hynix, perpetual };
+  const summaries: Record<string, MonitorSummary> = { oil, hynix, perpetual, 'cl-xau': goldOil };
   // Stable setters keep mounted panels and their pollers intact on every quote.
-  const summaryHandlers = { oil: setOil, hynix: setHynix };
+  const summaryHandlers = { oil: setOil, hynix: setHynix, 'cl-xau': setGoldOil };
   const selectMonitor = useCallback((id: string) => {
     if (id === 'perpetual') setPerpetualVisited(true);
     setActive(id);
@@ -96,7 +98,7 @@ export default function MonitorHub({ initial = null, initialMonitor = "oil" }: {
       <section className="hub-market-overview" aria-label="市场行情概览">{monitors.map(monitor => {
         const runtime = controls.runtime[monitor.id], pending = controls.pending[monitor.id], error = controls.errors[monitor.id] || runtime?.error;
         return <article key={monitor.id} className="hub-summary-shell" data-active={active === monitor.id} data-disabled={!enabled(monitor.id)} aria-label={monitor.title}>
-          <button type="button" className="hub-summary-card" aria-pressed={active === monitor.id} onClick={() => selectMonitor(monitor.id)}><span className="hub-card-heading"><i style={{background:monitor.accent}}/><span>{monitor.title}<small>{monitor.subtitle}{monitor.id === "perpetual" ? " · WS 行情" : ` · ${monitor.id === "oil" ? "Binance" : "Hyperliquid"}`}</small></span><em>{monitor.category}</em></span>{summaries[monitor.id] && <CardSummary summary={summaries[monitor.id]} intervalMs={monitor.quoteIntervalMs} renderedAt={initial?.renderedAt} disabled={!enabled(monitor.id)} />}</button>
+          <button type="button" className="hub-summary-card" aria-pressed={active === monitor.id} onClick={() => selectMonitor(monitor.id)}><span className="hub-card-heading"><i style={{background:monitor.accent}}/><span>{monitor.title}<small>{monitor.subtitle}{monitor.id === "perpetual" ? " · WS 行情" : ` · ${monitor.id === "hynix" ? "Hyperliquid" : "Binance"}`}</small></span><em>{monitor.category}</em></span>{summaries[monitor.id] && <CardSummary summary={summaries[monitor.id]} intervalMs={monitor.quoteIntervalMs} renderedAt={initial?.renderedAt} disabled={!enabled(monitor.id)} />}</button>
           <div className="hub-monitor-controls"><span>运行监控</span><button type="button" role="switch" aria-label={`${monitor.title}监控开关`} aria-checked={runtime?.enabled ?? true} aria-busy={pending || undefined} disabled={!runtime?.available || pending} title={runtime?.reason || '控制行情采集、自动告警及跟踪'} onClick={() => void controls.toggle(monitor.id)}><span>{pending ? '保存中…' : runtime?.error ? '重试切换' : !runtime ? '读取中…' : !runtime.available ? '预览模式' : runtime.enabled ? '已开启' : '已关闭'}</span><i aria-hidden="true"/></button></div>
           {error && <p className="hub-monitor-error" role="alert">{error}</p>}
         </article>;
@@ -105,7 +107,7 @@ export default function MonitorHub({ initial = null, initialMonitor = "oil" }: {
       <NotificationSettings active={hub.active}/>
       {monitors.filter(monitor => enabled(monitor.id) && (monitor.id === "oil" || monitor.id === "hynix")).map(monitor => { const id = monitor.id as "oil" | "hynix"; return <div key={id} hidden={active !== id} className="hub-exchange-comparison"><ExchangeComparison active={hub.active && active === id} monitorId={id} primary={summaries[id]?.comparison} initial={initial?.[id].exchanges} renderedAt={initial?.renderedAt}/></div>; })}
       <div className="hub-alert-settings">{monitors.filter(monitor => enabled(monitor.id) && monitor.capabilities.includes("alerts")).map(monitor => <div key={monitor.id} hidden={active !== monitor.id}>{monitorAlertAdapters[monitor.id] ? <AlertSettings active={hub.active && active === monitor.id} monitorId={monitor.id} title={monitor.title} adapter={monitorAlertAdapters[monitor.id]}/> : <p role="alert">该监控模块尚未接入统一告警设置。</p>}</div>)}</div>
-      {monitors.map(monitor => { const id = monitor.id as keyof typeof panels; const Panel = panels[id]; return <TabsContent key={monitor.id} value={monitor.id} forceMount className="hub-content">{!enabled(monitor.id) ? <p className="notice" role="status">{monitor.title}监控已关闭，行情采集、自动告警{monitor.id === 'perpetual' ? '和持仓跟踪' : ''}已暂停。配置和历史数据已保留，可通过上方开关重新开启。</p> : monitor.id === "perpetual" ? (perpetualVisited && <PerpetualPanel hubConnected={hub.connected} onSummary={setPerpetual} active={hub.active && active === "perpetual"}/>) : Panel ? <Panel initial={initial} onSummary={summaryHandlers[id]} active={hub.active && active === id} {...(id === "hynix" ? { summaryActive: hub.active } : {})} /> : <p role="alert">该监控模块尚未提供面板。</p>}</TabsContent>; })}
+      {monitors.map(monitor => { const id = monitor.id as keyof typeof panels; const Panel = panels[id]; return <TabsContent key={monitor.id} value={monitor.id} forceMount className="hub-content">{!enabled(monitor.id) ? <p className="notice" role="status">{monitor.title}监控已关闭，行情采集、自动告警{monitor.id === 'perpetual' ? '和持仓跟踪' : ''}已暂停。配置和历史数据已保留，可通过上方开关重新开启。</p> : monitor.id === "perpetual" ? (perpetualVisited && <PerpetualPanel hubConnected={hub.connected} onSummary={setPerpetual} active={hub.active && active === "perpetual"}/>) : Panel ? <Panel initial={initial} onSummary={summaryHandlers[id]} active={hub.active && active === id} {...(id !== "oil" ? { summaryActive: hub.active } : {})} /> : <p role="alert">该监控模块尚未提供面板。</p>}</TabsContent>; })}
     </Tabs>
   </div>;
 }

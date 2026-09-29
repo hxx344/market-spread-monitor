@@ -7,10 +7,12 @@ import { createTrend } from "./monitor-trend.ts";
 import { binanceOilExchangeQuote, type ExternalQuoteSet } from "./exchange-quotes.ts";
 import { intradayChartRows, type createIntradaySnapshot } from "../modules/oil/intraday.mjs";
 import { oilSpreadPercent } from "../modules/oil/spread.mjs";
+import type { GoldOilQuote, GoldOilHistory } from './gold-oil';
 
 export type InitialMarketData = {
   renderedAt: number;
   runtime?: MonitorRuntimeMap;
+  'cl-xau'?: { quote: GoldOilQuote | null; history: GoldOilHistory | null };
   hynix: { quote: LiveQuote | null; history: MarketData | null; exchanges?: ExternalQuoteSet };
   oil: { quote: (ReturnType<typeof validateOilQuote> & { status: "live" | "snapshot" }) | null; history?: ReturnType<typeof validateOilHistory> | null; candles?: ReturnType<typeof createIntradaySnapshot> | null; exchanges?: ExternalQuoteSet };
 };

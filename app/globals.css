@@ -143,7 +143,16 @@ main, .hub-intro, .hub-notifications, .hub-alert-settings, .hub-exchange-compari
 }
 .hub-market-tab[data-slot][data-state=active] { color: var(--primary); border-bottom-color: var(--primary); background: transparent; }
 .hub-market-tab[data-slot]:hover { color: var(--primary-hover); background: transparent; }
-.hub-market-overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 0 32px 20px; }
+.hub-market-overview { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 0 32px 20px; }
+.gold-oil-panel .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.gold-oil-method, .gold-oil-history-time { color: var(--muted-foreground); font-size: 12px; line-height: 1.8; padding: 16px 0; }
+.gold-oil-history-time { padding: 0 24px 18px; }
+@media(max-width: 700px) {
+  .gold-oil-panel .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .gold-oil-panel .primary-metric { grid-column: 1 / -1; }
+  .gold-oil-panel .metric-value { font-size: 26px; }
+  .gold-oil-panel .data-status { flex-wrap: wrap; }
+}
 .hub-summary-card {
   display: flex;
   flex-direction: column;

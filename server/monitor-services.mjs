@@ -16,6 +16,7 @@ import { openPerpetualAlertStore } from './perpetual-alert-store.mjs';
 import { openCrossExSettingsStore } from './perpetual-crossex-store.mjs';
 import { openPerpetualPaperStore } from './perpetual-paper-store.mjs';
 import { openMonitorControlStore, attachMonitorControl } from './monitor-control.mjs';
+import { GOLD_OIL_QUOTE_MS, GOLD_OIL_HISTORY_MS } from '../lib/gold-oil.ts';
 
 const exchangeActions = Object.fromEntries(externalExchanges.map(exchange => [exchangeAction(exchange), ["GET"]]));
 
@@ -36,7 +37,7 @@ export async function createMonitorServices(directory, { externallyLocked = fals
     });
     const read = (id, action, fresh = false) => {
       if (fresh && !collector.healthy()) throw new Error("行情数据库写入失败，暂停告警。");
-      const interval = action === OIL_CANDLE_ACTION ? OIL_CANDLE_REFRESH_MS : exchangeFromAction(action) ? EXCHANGE_REFRESH_MS : action === "quote" ? id === "oil" ? pollSeconds * 1000 : 10_000 : action === "history" && id === "hynix" ? 60_000 : 300_000;
+      const interval = id === 'cl-xau' ? action === 'quote' ? GOLD_OIL_QUOTE_MS : GOLD_OIL_HISTORY_MS : action === OIL_CANDLE_ACTION ? OIL_CANDLE_REFRESH_MS : exchangeFromAction(action) ? EXCHANGE_REFRESH_MS : action === "quote" ? id === "oil" ? pollSeconds * 1000 : 10_000 : action === "history" && id === "hynix" ? 60_000 : 300_000;
       const value = marketStore.read(id, action, { fresh, maxAgeMs: interval * 2 + 15_000 });
       return collector.healthy() ? value : { ...value, status: "snapshot", collection: { ...value.collection, stale: true, error: "行情数据库写入失败，保留已保存数据。" } };
     };
@@ -72,6 +73,11 @@ export async function createMonitorServices(directory, { externallyLocked = fals
     }
     const perpetual = await createPerpetual();
     const services = new Map([
+      ['cl-xau', {
+        start() {}, stop() {}, healthy: () => collector.healthy(),
+        actions: { quote: ['GET'], history: ['GET'] },
+        async handle(action, method) { if (method === 'GET' && ['quote', 'history'].includes(action)) return read('cl-xau', action); },
+      }],
       ['perpetual', perpetual],
       ["hynix", {
         start() { hynixRunning = true; hynix.start(); }, stop() { hynixRunning = false; return hynix.stop(); }, healthy: () => hynix.healthy(),

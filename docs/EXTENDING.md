@@ -32,6 +32,8 @@ interface DataAdapter {
 | `hynix/history` | `points, fetchedAt, status, interval, firstAvailable, warnings` |
 | `hynix/funding` | `rows, metadata, status, error?`；每行 `time, adr, ordinary` 为已结算小时费率，缺腿为 `null` |
 | `oil/quote` | `brent, wti, fetchedAt`，每腿含 `markPx, oraclePx, funding` |
+| `cl-xau/quote` | Binance `cl, xau` 各含 `symbol, price, updatedAt`；`ratio = xau.price / cl.price`，单位桶/盎司；`fetchedAt` 取较早的腿时间 |
+| `cl-xau/history` | `points` 保存同 UTC 时段已收盘 15 分钟标记价 `time, cl, xau, ratio`；最多最近 7 天，缺腿为 `null`，不插值 |
 | `oil/history` | `data, market, metadata, status` |
 | `oil/funding` | `data, metadata, status`，UTC 小时资金费 |
 | `perpetual/quote` | `schemaVersion, generatedAt, staleAfterMs, exchanges, quotes`；价格逐字段保留原更新时间，前端按模式过滤过期报价 |

@@ -5,15 +5,18 @@
 | 模块 | 保留能力 |
 | --- | --- |
 | 原油 | 布伦特 / WTI 标记价与价差、已收盘 15 分钟 K 线、时间筛选、月均值、历史多空资金费、等桶数 / 等名义资金费预估、价格与价差多档告警 |
+| 金油比（cl-xau） | Binance XAUUSDT / CLUSDT 标记价、XAU ÷ CL（桶/盎司）、最近 7 天已收盘 15 分钟走势、独立监控开关与持久化采集 |
 | 海力士 | 正股 / ADR 同口径美元价格、实时溢价、小时历史、SMA / 布林带 / Z-score、双向多档告警 |
 | 合约价差 | Binance / Bybit / OKX / Bitget / Gate 与 Lighter / RH-Lighter / Hyperliquid / Aster / Entropy 的公开永续行情、组合毛 / 净价差排名、持续性与报价收窄证据、开平仓盘口测算、模拟及手工持仓跟踪、组合自选、持续条件提醒与报价健康 |
 | 公共功能 | 单一登录和导航、手机布局、切换保留图表及规则草稿、独立配置与数据、接口版本、后台状态检查 |
 
-三张概览卡片各有独立的“运行监控”开关。关闭某个监控会停止该模块的后台行情采集、自动告警及前端刷新；关闭合约价差还会断开行情连接并暂停持仓跟踪。已保存配置、行情历史与持仓记录继续保留，重新开启后立即恢复采集。关闭会卸载对应详情面板，请先保存正在编辑的设置。
+四张概览卡片各有独立的“运行监控”开关。关闭某个监控会停止该模块的后台行情采集、自动告警及前端刷新；关闭合约价差还会断开行情连接并暂停持仓跟踪。已保存配置、行情历史与持仓记录继续保留，重新开启后立即恢复采集。关闭会卸载对应详情面板，请先保存正在编辑的设置。
 
-开关保存在现有 `ALERT_DATA_DIR/monitor-control.json`，刷新页面、重启服务和升级后继续生效；旧安装默认全部开启。多页面每 10 秒同步状态，返回可见页面时立即补查。网页预览不具备常驻服务控制能力，会显示不可操作的“预览模式”。`GET /api/monitors` 返回各模块的 `runtime`；`PUT /api/monitors/{oil|hynix|perpetual}/runtime` 使用 `{ "enabled": false, "revision": 0 }` 修改对应开关，版本冲突返回 409，关闭模块的业务接口返回 423。
+开关保存在现有 `ALERT_DATA_DIR/monitor-control.json`，刷新页面、重启服务和升级后继续生效；旧安装默认全部开启。多页面每 10 秒同步状态，返回可见页面时立即补查。网页预览不具备常驻服务控制能力，会显示不可操作的“预览模式”。`GET /api/monitors` 返回各模块的 `runtime`；`PUT /api/monitors/{oil|cl-xau|hynix|perpetual}/runtime` 使用 `{ "enabled": false, "revision": 0 }` 修改对应开关，版本冲突返回 409，关闭模块的业务接口返回 423。
 
 ## Linux 一键部署和升级
+
+金油比可通过 `/?monitor=cl-xau` 直接打开。报价每 30 秒采集，历史每 60 秒更新；缺腿或异常时间不会生成有效比值，失败保留 SQLite 中的旧值及原时间。界面展示北京时间和明确的过期状态。新增模块不改变原有监控开关，旧配置自动补入开启的 `cl-xau`。行情使用 [Binance 标记价格与标记价格 K 线接口](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data)。
 
 Ubuntu 22.04 / 24.04、Debian 12 / 13，支持 x86_64 和 ARM64：
 

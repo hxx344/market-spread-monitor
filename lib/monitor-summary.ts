@@ -1,11 +1,18 @@
 import type { LiveQuote } from "./market";
 import { createTrend, type MonitorTrend, type TrendHistory } from "./monitor-trend.ts";
 import { hynixExchangeQuote, type ExchangeQuote } from "./exchange-quotes.ts";
+import type { GoldOilQuote } from './gold-oil';
 
 export type SummaryStatus = "loading" | "live" | "snapshot" | "stale" | "error";
 export type SummaryMetric = { label: string; value: string; tone?: "positive" | "negative" };
 export type MonitorSummary = { status: SummaryStatus; fetchedAt: string | null; metrics: SummaryMetric[]; note?: string; trend?: MonitorTrend; comparison?: ExchangeQuote };
 export type SummaryProps = { onSummary?: (summary: MonitorSummary) => void };
+export function goldOilSummary(quote: GoldOilQuote | null, error = false): MonitorSummary {
+  return { status: quote ? error ? 'stale' : quote.status === 'snapshot' ? 'snapshot' : 'live' : error ? 'error' : 'loading',
+    fetchedAt: quote?.fetchedAt ?? null,
+    metrics: [{ label: '金油比 · 桶/盎司', value: quote ? quote.ratio.toFixed(3) : '—' }],
+    note: 'XAU ÷ CL · 每盎司黄金对应原油桶数' };
+}
 export type OilSummaryUpdate = {
   status: SummaryStatus;
   /** (Brent - WTI) / WTI * 100, already expressed as a percentage. */

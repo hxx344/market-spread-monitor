@@ -8,6 +8,7 @@ import { readExchangeQuote } from "./exchange-service.ts";
 import { loadOilIntraday } from "./oil-intraday-service.ts";
 import { OIL_CANDLE_ACTION } from "../modules/oil/intraday.mjs";
 import { loadPerpetualSnapshot } from './perpetual-service.ts';
+import { goldOilReader } from './gold-oil-service.ts';
 
 export interface DataAdapter {
   quote: () => Promise<unknown>;
@@ -17,6 +18,7 @@ export interface DataAdapter {
 }
 /** Add a data adapter here and a descriptor in monitors.ts to expose a new module. */
 export const dataAdapters: Record<string, DataAdapter> = {
+  'cl-xau': goldOilReader,
   perpetual: { quote: loadPerpetualSnapshot },
   hynix: { quote: loadQuote, history: loadMarket, funding: loadHynixFunding },
   oil: {

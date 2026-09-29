@@ -12,6 +12,8 @@ export async function openMonitorControlStore(directory) {
     const text = await readFile(file, 'utf8'), loaded = JSON.parse(text);
     if (text.length > 16_384 || loaded.version !== 1 || !loaded.monitors || Object.keys(loaded.monitors).some(id => !Object.hasOwn(state.monitors, id))) throw Error('Invalid state');
     for (const { id } of monitors) {
+      // Version 1 installations predate this module; retain all original switches.
+      if (id === 'cl-xau' && !Object.hasOwn(loaded.monitors, id)) continue;
       const value = loaded.monitors[id];
       if (!value || typeof value.enabled !== 'boolean' || !Number.isSafeInteger(value.revision) || value.revision < 0) throw Error('Invalid state');
       state.monitors[id] = { enabled: value.enabled, revision: value.revision };

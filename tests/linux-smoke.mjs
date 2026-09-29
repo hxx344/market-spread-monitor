@@ -61,7 +61,7 @@ try {
   assert.equal((await state()).config.webhookConfigured, true);
   assert.equal((await fetch(`${base}/api/monitors/oil/status`, { headers }).then(response => response.json())).webhookConfigured, true);
   const health = await fetch(`${base}/healthz`).then(r=>r.json());
-  assert.deepEqual(health.monitors.sort(), ["hynix", "oil", "perpetual"]);
+  assert.deepEqual(health.monitors.sort(), ['cl-xau', "hynix", "oil", "perpetual"]);
   const perpetualQuote = await fetch(`${base}/api/monitors/perpetual/quote`, { headers }).then(response => response.json());
   assert.equal(perpetualQuote.monitorId, 'perpetual');
   assert.ok(Array.isArray(perpetualQuote.exchanges) && Array.isArray(perpetualQuote.quotes));
@@ -89,8 +89,8 @@ try {
   };
   let collected = inspect();
   for (let attempt = 0; attempt < 90 && collected.datasets.some(dataset => !dataset.attempt_ms); attempt++) { await delay(500); collected = inspect(); }
-  assert.equal(collected.datasets.length, 12);
-  assert.ok(collected.datasets.every(dataset => dataset.attempt_ms), "All twelve datasets collect in the background");
+  assert.equal(collected.datasets.length, 14);
+  assert.ok(collected.datasets.every(dataset => dataset.attempt_ms), "All fourteen datasets collect in the background");
   const oilStatus = await fetch(`${base}/api/monitors/oil/status`, { headers }).then(r=>r.json());
   assert.ok(oilStatus.lastAttemptAt, "Oil monitor runs independently of page visits");
   // A live SSE response must not trap server.close() during shutdown.
