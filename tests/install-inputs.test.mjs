@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -56,6 +56,15 @@ test("documentation and tests do not change deployment keys or claim a new artif
   const original = installKeys(directory, environment, {});
   for (const name of ["README.md", "docs/deployment.md", "tests/new.test.mjs", ".github/workflows/verify.yml"]) write(directory, name, "changed");
   assert.deepEqual(installKeys(directory, { ...environment, sourceId: "docs-commit" }, {}), original);
+});
+
+test("installed runtime directory links are excluded before file hashing", t => {
+  const directory = fixture(t);
+  const target = join(directory, "runtime-target");
+  mkdirSync(target);
+  const original = installKeys(directory, environment, {});
+  symlinkSync(target, join(directory, ".runtime"), process.platform === "win32" ? "junction" : "dir");
+  assert.deepEqual(installKeys(directory, environment, {}), original);
 });
 
 test("Next server and shared-library imports rebuild while independent server entries reuse the build", t => {

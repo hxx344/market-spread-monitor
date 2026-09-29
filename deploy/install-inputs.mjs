@@ -27,7 +27,7 @@ function sourceFiles(directory, path = "") {
     const name = path ? `${path}/${entry.name}` : entry.name;
     // public/ is served verbatim, including Markdown or paths named docs/tests.
     // Only known root-level development material is irrelevant to deployment.
-    if (!path && ((entry.name.startsWith(".env") && !nextEnvironmentFiles.has(entry.name)) || entry.name.startsWith(".install-") || entry.name.startsWith(".tmp") || entry.name.endsWith(".tsbuildinfo") || name === "next-env.d.ts" || /\.md$/i.test(entry.name))) continue;
+    if (!path && (ignoredDirectories.has(entry.name) || (entry.name.startsWith(".env") && !nextEnvironmentFiles.has(entry.name)) || entry.name.startsWith(".install-") || entry.name.startsWith(".tmp") || entry.name.endsWith(".tsbuildinfo") || name === "next-env.d.ts" || /\.md$/i.test(entry.name))) continue;
     if (entry.isDirectory()) {
       if (path || !ignoredDirectories.has(entry.name)) files.push(...sourceFiles(directory, name));
     } else if (entry.isFile() || entry.isSymbolicLink()) files.push(name);
