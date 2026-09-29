@@ -38,7 +38,7 @@ async function fixture(t) {
     }
     return path;
   }
-  async function run(body) {
+  async function run(body, { realStorageReader = false } = {}) {
     // Remap only the fixed npm cache root; never inspect or remove a user's real cache.
     const definitions = installer.slice(0, entrypoint).replaceAll("/var/cache/market-spread-monitor", `${root}/npm-cache`);
     const script = `${definitions}
@@ -50,7 +50,7 @@ new_release=''
 storage_current=''
 storage_running=''
 storage_data_dir=''
-read_storage_protection() { :; }
+${realStorageReader ? "" : "read_storage_protection() { :; }"}
 # A second guard makes all destructive operations fail closed outside this fixture.
 rm() {
   local argument
@@ -221,4 +221,37 @@ require_space "$fixture_root/nonexistent/nested" 1000 1000
     if (scenario.message) assert.match(result.stderr, scenario.message);
     if (scenario.bytes < 1000 || Number(scenario.inodes) < 1000) assert.match(result.stdout, /reclaim attempted/);
   }
+});
+
+test("stable configuration reuses only its parsed data path while process protection stays fresh", linuxOnly, async t => {
+  const f = await fixture(t);
+  const result = await f.run(`
+config="$fixture_root/config"
+printf 'initial' > "$config"
+systemctl() { printf '1\\n' >> "$fixture_root/pid-reads"; printf '0\\n'; }
+systemd-run() { printf '1\\n' >> "$fixture_root/config-reads"; printf '%s/data-%s\\n' "$fixture_root" "$(cat "$config")"; }
+read_storage_protection
+read_storage_protection
+[[ $(wc -l < "$fixture_root/config-reads") == 1 && $(wc -l < "$fixture_root/pid-reads") == 2 ]]
+printf 'updated' > "$config"
+read_storage_protection
+[[ $(wc -l < "$fixture_root/config-reads") == 2 && "$storage_data_dir" == "$fixture_root/data-updated" ]]
+`, { realStorageReader: true });
+  assert.equal(result.code, 0, result.stderr);
+});
+
+test("verified size measurements skip dependency traversal without caching filesystem headroom", linuxOnly, async t => {
+  const f = await fixture(t);
+  const result = await f.run(`
+candidate_sizes='1000 100 2000 20'
+candidate="$base/current"
+du() { printf 'Unexpected dependency traversal\\n' >&2; return 90; }
+df() {
+  printf '1\\n' >> "$fixture_root/df-reads"
+  printf 'Filesystem Blocks Used Available Use%% Mounted\\nfixture 2000000000 1 1000000000 1%% /\\n'
+}
+check_build_space
+[[ $(wc -l < "$fixture_root/df-reads") == 6 ]]
+`);
+  assert.equal(result.code, 0, result.stderr);
 });

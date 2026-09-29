@@ -27,26 +27,30 @@ protects_path() {
 }
 
 read_storage_protection() {
-  local pid data_path
+  local pid data_path stamp
   storage_current=$(readlink -f "$base/current" 2>/dev/null || true)
   storage_running=''
   pid=$(systemctl show --property=MainPID --value market-spread-monitor.service 2>/dev/null || true)
   if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
     storage_running=$(readlink -f "/proc/$pid/cwd") || die '无法确认运行中服务目录，暂不清理版本。'
   fi
-  storage_data_dir=/var/lib/market-spread-monitor
   if [[ -f "$config" ]]; then
-    # Use systemd's EnvironmentFile parser; never execute config or print secrets.
-    data_path=$(systemd-run --quiet --wait --pipe --collect --unit="market-spread-monitor-storage-$$" --property="EnvironmentFile=$config" /usr/bin/printenv ALERT_DATA_DIR) || die '无法确认数据目录，暂不清理版本。'
-    [[ "$data_path" == /* ]] || die 'ALERT_DATA_DIR 必须为绝对路径，确认前不清理版本。'
-    storage_data_dir=$(realpath -m -- "$data_path")
-  fi
+    stamp=$(digest "$config")
+    if [[ "$stamp" != "${storage_config_stamp:-}" ]]; then
+      # Reuse only the parsed data path while the actual config is unchanged.
+      # Current/MainPID are always reread after a service switch or rollback.
+      data_path=$(systemd-run --quiet --wait --pipe --collect --unit="market-spread-monitor-storage-$$" --property="EnvironmentFile=$config" /usr/bin/printenv ALERT_DATA_DIR) || die '无法确认数据目录，暂不清理版本。'
+      [[ "$data_path" == /* ]] || die 'ALERT_DATA_DIR 必须为绝对路径，确认前不清理版本。'
+      storage_data_dir=$(realpath -m -- "$data_path")
+      storage_config_stamp=$stamp
+    fi
+  else storage_data_dir=/var/lib/market-spread-monitor; storage_config_stamp=''; fi
 }
 
 prune_releases() {
   local path keep='' newest=-1 modified removed=0
-  [[ -d "$base/releases" && ! -L "$base/releases" && $(readlink -f "$base/releases") == "$base/releases" ]] || return 0
   read_storage_protection
+  [[ -d "$base/releases" && ! -L "$base/releases" && $(readlink -f "$base/releases") == "$base/releases" ]] || return 0
   if [[ -n "${old_current:-}" ]]; then
     if [[ "$old_current" == /* ]]; then keep=$(realpath -m -- "$old_current"); else keep=$(realpath -m -- "$base/$old_current"); fi
     if ! managed_release "$keep" || [[ ! -f "$keep/.install-ready" || "$keep" == "$storage_current" ]]; then keep=''; fi
@@ -108,11 +112,15 @@ require_space() {
 
 check_build_space() {
   local dependency_kb=1048576 dependency_inodes=100000 build_kb=524288 build_inodes=10000 value
-  if [[ -n "$candidate" && -d "$candidate/node_modules" ]]; then
+  if [[ -n "$candidate_sizes" ]]; then
+    read -r dependency_kb dependency_inodes build_kb build_inodes <<< "$candidate_sizes"
+    (( build_kb >= 524288 )) || build_kb=524288
+    (( build_inodes >= 10000 )) || build_inodes=10000
+  elif [[ -n "$candidate" && -d "$candidate/node_modules" ]]; then
     dependency_kb=$(du -sk -- "$candidate/node_modules" | awk '{print $1}')
     dependency_inodes=$(du --inodes -s -- "$candidate/node_modules" | awk '{print $1}')
   fi
-  if [[ -n "$candidate" && -d "$candidate/.next" ]]; then
+  if [[ -z "$candidate_sizes" && -n "$candidate" && -d "$candidate/.next" ]]; then
     value=$(du -sk --exclude=cache -- "$candidate/.next" | awk '{print $1}')
     (( value <= build_kb )) || build_kb=$value
     value=$(du --inodes -s --exclude=cache -- "$candidate/.next" | awk '{print $1}')
@@ -136,20 +144,43 @@ probe_running() {
   [[ $(systemctl show --property=NeedDaemonReload --value market-spread-monitor.service) == no ]] || return 1
   pid=$(systemctl show --property=MainPID --value market-spread-monitor.service)
   [[ "$pid" =~ ^[1-9][0-9]*$ && $(readlink -f "/proc/$pid/cwd") == "$release" ]] || return 1
-  systemd-run --quiet --wait --pipe --collect --unit="market-spread-monitor-probe-$$" --property="EnvironmentFile=$config" "$runtime/bin/node" "$release/deploy/check-install.mjs" --once --quiet
+  systemd-run --quiet --wait --pipe --collect --unit="market-spread-monitor-probe-$$" --property="EnvironmentFile=$config" "$runtime/bin/node" "$release/deploy/check-install.mjs" --once --quiet --describe-after-check "$first_install" || return 1
+  install_described=1
 }
 
+atomic_marker() { printf '%s\n' "$2" > "$1.tmp-$$"; mv -f -- "$1.tmp-$$" "$1"; }
+
 record_success() {
-  printf '%s\n' "$release_id" > "$release/.install-source"
-  printf '%s\n' "$dependency_key" > "$release/.install-dependencies"
-  digest "$config" > "$release/.install-config"
-  unit_fingerprint > "$release/.install-unit"
+  local dependency_kb dependency_inodes build_kb build_inodes
+  if [[ "$release" == "$new_release" ]]; then
+    atomic_marker "$release/.install-source" "$release_id"
+    atomic_marker "$release/.install-build-source" "$build_source"
+  fi
+  atomic_marker "$release/.install-checked-source" "$release_id"
+  atomic_marker "$release/.install-dependencies" "$dependency_key"
+  atomic_marker "$release/.install-runtime" "$runtime_key"
+  atomic_marker "$release/.install-build" "$build_key"
+  atomic_marker "$release/.install-config" "$(digest "$config")"
+  atomic_marker "$release/.install-unit" "$(unit_fingerprint)"
+  if [[ -n "$candidate_sizes" ]]; then read -r dependency_kb dependency_inodes build_kb build_inodes <<< "$candidate_sizes"; fi
+  if (( ! reused )) || [[ -z "$candidate_sizes" ]]; then
+    dependency_kb=$(du -sk -- "$release/node_modules" | awk '{print $1}')
+    dependency_inodes=$(du --inodes -s -- "$release/node_modules" | awk '{print $1}')
+  fi
+  if (( ! reused_build )) || [[ -z "$candidate_sizes" ]]; then
+    build_kb=$(du -sk --exclude=cache -- "$release/.next" | awk '{print $1}')
+    build_inodes=$(du --inodes -s --exclude=cache -- "$release/.next" | awk '{print $1}')
+  fi
+  atomic_marker "$release/.install-storage.json" "{\"dependencies\":\"$dependency_key\",\"build\":\"$build_key\",\"dependencyKB\":$dependency_kb,\"dependencyInodes\":$dependency_inodes,\"buildKB\":$build_kb,\"buildInodes\":$build_inodes}"
+  touch "$release/.install-root-owned"
   touch "$release/.install-ready"
 }
 
 describe_install() {
   [[ ! -f "$base/.credentials-unshown" ]] || first_install=1
-  systemd-run --quiet --wait --pipe --collect --unit="market-spread-monitor-info-$$" --property="EnvironmentFile=$config" "$runtime/bin/node" "$release/deploy/check-install.mjs" --describe "$first_install"
+  if (( ! install_described )); then
+    systemd-run --quiet --wait --pipe --collect --unit="market-spread-monitor-info-$$" --property="EnvironmentFile=$config" "$runtime/bin/node" "$release/deploy/check-install.mjs" --describe "$first_install"
+  fi
   rm -f -- "$base/.credentials-unshown"
   printf '配置文件：%s\n服务日志：sudo journalctl -u market-spread-monitor -f\n升级：再次运行相同的安装命令。\n' "$config"
 }
@@ -198,8 +229,9 @@ main() {
   config=/etc/market-spread-monitor.env
   unit=/etc/systemd/system/market-spread-monitor.service
   local source_dir='' requested_port='' architecture node_name runtime release_id first_install=0 rebuild=0 cleanup_only=0 dependency_key='' candidate='' reused=0
+  local input_dir='' runtime_key='' build_key='' build_source='' reused_build=0 candidate_sizes='' candidate_valid=0 candidate_dependencies_valid=0 candidate_source_valid=1 install_described=0 npm_version
   scratch='' release='' new_release='' switching=0 old_current='' was_active=0
-  storage_current='' storage_running='' storage_data_dir='' storage_free_kb=0 storage_free_inodes=0
+  storage_current='' storage_running='' storage_data_dir='' storage_config_stamp='' storage_free_kb=0 storage_free_inodes=0
   build_required_kb=786432 build_required_inodes=15000
 
   while (( $# )); do
@@ -239,7 +271,6 @@ main() {
   flock -n 9 || die '已有部署正在运行，请等待结束'
   # Runs before mktemp/downloads, including when /tmp shares a full root filesystem.
   prune_releases
-  read_storage_protection
   if (( cleanup_only )); then
     reclaim_caches
     df -h -- /opt /tmp /var
@@ -294,19 +325,68 @@ main() {
   [[ $("$runtime/bin/node" --version) == v24.15.0 ]] || die '专用 Node.js 版本不匹配'
 
   if [[ -L "$base/current" ]]; then candidate=$(readlink -f "$base/current"); fi
-  if (( ! rebuild )) && [[ -n "$candidate" && -f "$candidate/.install-ready" && -f "$candidate/.next/BUILD_ID" && -d "$candidate/node_modules" && -f "$config" && -f "$unit" && $(readlink -f "$candidate/.runtime") == "$runtime" && $(cat "$candidate/.install-source") == "$release_id" ]]; then
-    release=$candidate
-    dependency_key=$(cat "$candidate/.install-dependencies")
-    check_config
+  [[ ! -f "$base/.credentials-unshown" ]] || first_install=1
+  # A checked commit may contain only docs/tests. It is deliberately separate
+  # from the source commit that actually produced the running release.
+  if (( ! rebuild )) && [[ -n "$candidate" && -f "$candidate/.install-ready" && -f "$candidate/.install-runtime" &&
+      -f "$candidate/.install-build" && -f "$candidate/.install-root-owned" &&
+      $(cat "$candidate/.install-checked-source" 2>/dev/null || true) == "$release_id" ]]; then
+    input_dir=$candidate
+  else
+    if [[ -z "$source_dir" ]]; then download "https://codeload.github.com/hxx344/market-spread-monitor/tar.gz/$release_id" "$scratch/source.tar.gz"; fi
+    mkdir "$scratch/source"
+    if [[ -z "$source_dir" ]]; then tar -xzf "$scratch/source.tar.gz" --strip-components=1 -C "$scratch/source";
+    else tar -xzf "$scratch/source.tar.gz" -C "$scratch/source"; fi
+    input_dir=$scratch/source
+  fi
+  [[ -f "$input_dir/deploy/check-install.mjs" && -f "$input_dir/deploy/install-inputs.mjs" && -f "$input_dir/deploy/market-spread-monitor.service" && -f "$input_dir/server/entrypoint.sh" ]] || die '发布文件不完整'
+  npm_version=$("$runtime/bin/node" "$runtime/lib/node_modules/npm/bin/npm-cli.js" --version)
+  local fingerprints
+  fingerprints=$("$runtime/bin/node" "$input_dir/deploy/install-inputs.mjs" "$input_dir" "$release_id" v24.15.0 "$npm_version" "$architecture" --all)
+  mapfile -t keys <<< "$fingerprints"
+  [[ ${#keys[@]} == 3 && ${keys[0]} =~ ^[a-f0-9]{64}$ && ${keys[1]} =~ ^[a-f0-9]{64}$ && ${keys[2]} =~ ^[a-f0-9]{64}$ ]] || die '安装输入摘要无效'
+  dependency_key=${keys[0]}; runtime_key=${keys[1]}; build_key=${keys[2]}
+  if [[ "$input_dir" == "$candidate" && $(cat "$candidate/.install-runtime") != "$runtime_key" ]]; then
+    # Root-local edits/damage cannot be relabelled as the checked Git commit.
+    if [[ -z "$source_dir" ]]; then download "https://codeload.github.com/hxx344/market-spread-monitor/tar.gz/$release_id" "$scratch/source.tar.gz"; fi
+    mkdir "$scratch/source"
+    if [[ -z "$source_dir" ]]; then tar -xzf "$scratch/source.tar.gz" --strip-components=1 -C "$scratch/source";
+    else tar -xzf "$scratch/source.tar.gz" -C "$scratch/source"; fi
+    input_dir=$scratch/source
+    fingerprints=$("$runtime/bin/node" "$input_dir/deploy/install-inputs.mjs" "$input_dir" "$release_id" v24.15.0 "$npm_version" "$architecture" --all)
+    mapfile -t keys <<< "$fingerprints"
+    [[ ${#keys[@]} == 3 && ${keys[0]} =~ ^[a-f0-9]{64}$ && ${keys[1]} =~ ^[a-f0-9]{64}$ && ${keys[2]} =~ ^[a-f0-9]{64}$ ]] || die '安装输入摘要无效'
+    dependency_key=${keys[0]}; runtime_key=${keys[1]}; build_key=${keys[2]}
+    # The source marker describes the original immutable source, not the edit.
+    candidate_source_valid=0
+  fi
+  if [[ -n "$candidate" && -f "$candidate/.install-ready" && -f "$candidate/.install-root-owned" &&
+      -d "$candidate/node_modules" && ! -L "$candidate/node_modules" && -x "$candidate/node_modules/.bin/next" &&
+      -f "$candidate/node_modules/.package-lock.json" && $(readlink -f "$candidate/.runtime") == "$runtime" ]] &&
+      (cd "$candidate"; "$runtime/bin/node" -e "require('next'); require('react')"); then
+    candidate_dependencies_valid=1
+    if "$runtime/bin/node" "$input_dir/deploy/install-inputs.mjs" "$candidate" --valid-build; then candidate_valid=1; fi
+    candidate_sizes=$("$runtime/bin/node" "$input_dir/deploy/install-inputs.mjs" "$candidate" --sizes)
+  fi
+  if (( ! rebuild && candidate_valid && candidate_source_valid )) && [[ -f "$config" && -f "$unit" &&
+      $(cat "$candidate/.install-runtime" 2>/dev/null || true) == "$runtime_key" &&
+      $(cat "$candidate/.install-build" 2>/dev/null || true) == "$build_key" ]]; then
+    release=$candidate; reused=1; reused_build=1
     if [[ $(cat "$release/.install-config") == "$(digest "$config")" && $(cat "$release/.install-unit") == "$(unit_fingerprint)" ]] && probe_running; then
       systemctl is-enabled --quiet market-spread-monitor.service || systemctl enable market-spread-monitor.service
-      log '当前已是最新版本，服务健康；跳过源码下载、依赖安装、构建和重启。'
+      atomic_marker "$release/.install-checked-source" "$release_id"
+      if [[ "$input_dir" == "$candidate" ]]; then log '当前已核对最新版本，服务健康；跳过源码下载、依赖安装、构建和重启。';
+      else log '已核对新提交，运行和构建内容未变；跳过依赖安装、构建和重启。'; fi
     else
-      log '版本未变，仅应用配置或恢复服务；跳过源码下载、依赖安装和构建。'
+      check_config
+      log '运行内容未变，仅应用配置或恢复服务；跳过依赖安装和构建。'
       systemctl daemon-reload
       systemctl restart market-spread-monitor.service
-      systemd-run --quiet --wait --pipe --collect --unit="market-spread-monitor-check-$$" --property="EnvironmentFile=$config" "$runtime/bin/node" "$release/deploy/check-install.mjs"
-      probe_running || die '服务恢复后未通过检查'
+      systemd-run --quiet --wait --pipe --collect --unit="market-spread-monitor-check-$$" --property="EnvironmentFile=$config" "$runtime/bin/node" "$release/deploy/check-install.mjs" --describe-after-check "$first_install"
+      install_described=1
+      local recovered_pid
+      recovered_pid=$(systemctl show --property=MainPID --value market-spread-monitor.service)
+      [[ "$recovered_pid" =~ ^[1-9][0-9]*$ && $(readlink -f "/proc/$recovered_pid/cwd") == "$release" ]] || die '服务恢复后版本目录不一致'
       systemctl enable market-spread-monitor.service
       record_success
     fi
@@ -334,28 +414,32 @@ main() {
 
   log '检测到需要部署的版本，正在准备源码；新版本准备完成后才会切换服务。'
   check_build_space
-  if [[ -z "$source_dir" ]]; then
-    download "https://codeload.github.com/hxx344/market-spread-monitor/tar.gz/$release_id" "$scratch/source.tar.gz"
-  fi
   release=$(mktemp -d "$base/releases/${release_id:0:12}-XXXXXXXX")
   new_release=$release
   touch "$release/.install-owned"
   chmod 0755 "$release"
-  if [[ -z "$source_dir" ]]; then
-    tar -xzf "$scratch/source.tar.gz" --strip-components=1 -C "$release"
-  else
-    tar -xzf "$scratch/source.tar.gz" -C "$release"
-  fi
+  # Only source files enter a candidate; generated/runtime trees are never copied here.
+  tar --exclude='./node_modules' --exclude='./.next' --exclude='./.runtime' --exclude='./.install-*' -C "$input_dir" -cf - . | tar -xf - -C "$release"
   [[ -f "$release/deploy/check-install.mjs" && -f "$release/deploy/install-inputs.mjs" && -f "$release/deploy/market-spread-monitor.service" && -f "$release/server/entrypoint.sh" ]] || die '发布文件不完整'
   check_config
   ln -s "$runtime" "$release/.runtime"
-  dependency_key=$("$runtime/bin/node" "$release/deploy/install-inputs.mjs" "$release" "$release_id" v24.15.0 "$("$runtime/bin/node" "$runtime/lib/node_modules/npm/bin/npm-cli.js" --version)" "$architecture")
-  if (( ! rebuild )) && [[ -n "$candidate" && -f "$candidate/.install-ready" && -f "$candidate/.install-dependencies" && $(cat "$candidate/.install-dependencies") == "$dependency_key" && -d "$candidate/node_modules" && ! -L "$candidate/node_modules" ]]; then
+  if (( ! rebuild && candidate_dependencies_valid )) && [[ -f "$candidate/.install-dependencies" && $(cat "$candidate/.install-dependencies") == "$dependency_key" ]]; then
     log '依赖未变，复用已安装依赖的独立副本。'
     if cp -a --reflink=auto "$candidate/node_modules" "$release/node_modules" && [[ -x "$release/node_modules/.bin/next" && -f "$release/node_modules/.package-lock.json" ]] && (cd "$release"; "$runtime/bin/node" -e "require('next'); require('react')"); then
       reused=1
+      if (( candidate_valid )) && [[ $(cat "$candidate/.install-build") == "$build_key" ]]; then
+        log 'Next 构建输入未变，复用已验证的独立构建副本。'
+        mkdir "$release/.next"
+        local artifact
+        for artifact in "$candidate/.next"/* "$candidate/.next"/.[!.]*; do
+          [[ -e "$artifact" && ${artifact##*/} != cache ]] || continue
+          cp -a --reflink=auto "$artifact" "$release/.next/"
+        done
+        if "$runtime/bin/node" "$release/deploy/install-inputs.mjs" "$release" --valid-build; then reused_build=1;
+        else rm -rf -- "$release/.next"; fi
+      fi
       # Compiler cache is optional; do not duplicate runtime caches or exhaust headroom.
-      if [[ -d "$candidate/.next/cache/webpack" && ! -L "$candidate/.next/cache/webpack" ]]; then
+      if (( ! reused_build )) && [[ -d "$candidate/.next/cache/webpack" && ! -L "$candidate/.next/cache/webpack" ]]; then
         local cache_kb cache_inodes
         cache_kb=$(du -sk -- "$candidate/.next/cache/webpack" | awk '{print $1}')
         cache_inodes=$(du --inodes -s -- "$candidate/.next/cache/webpack" | awk '{print $1}')
@@ -370,7 +454,9 @@ main() {
       rm -rf -- "$release/node_modules"
     fi
   fi
-  chown -R spread-monitor:spread-monitor "$release"
+  # Reused dependencies are already immutable and retain root ownership. Next
+  # writes to the candidate/.next, not into an existing dependency installation.
+  find "$release" -path "$release/node_modules" -prune -o -exec chown -h spread-monitor:spread-monitor {} +
   require_space "$base/releases" "$build_required_kb" "$build_required_inodes"
   (
     cd "$release"
@@ -378,10 +464,22 @@ main() {
       log '依赖发生变化或尚无缓存，正在安装依赖。'
       runuser -u spread-monitor -- env PATH="$runtime/bin:$PATH" NODE_ENV=development NEXT_TELEMETRY_DISABLED=1 npm_config_cache=/var/cache/market-spread-monitor npm ci --include=dev --include=optional --prefer-offline --no-audit --no-fund
     fi
-    log '正在构建变更后的代码。'
-    runuser -u spread-monitor -- env PATH="$runtime/bin:$PATH" NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 npm run build:linux
+    if (( ! reused_build )); then
+      log '正在构建变更后的代码（包含 Next 类型检查）。'
+      runuser -u spread-monitor -- env PATH="$runtime/bin:$PATH" NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 npm run build:linux
+    fi
   )
-  [[ -f "$release/.next/BUILD_ID" ]] || die '构建未生成可启动版本'
+  "$runtime/bin/node" "$release/deploy/install-inputs.mjs" "$release" --valid-build || die '构建未生成完整可启动版本'
+  build_source=$release_id
+  if (( reused_build )); then build_source=$(cat "$candidate/.install-build-source"); fi
+  # Source and dependencies are root-owned and read-only to the service. Only
+  # Next's runtime cache remains writable. Avoid traversing copied dependencies.
+  find "$release" -path "$release/node_modules" -prune -o -exec chown -h root:root {} +
+  find "$release" -path "$release/node_modules" -prune -o -type f -exec chmod a+r,go-w {} +
+  find "$release" -path "$release/node_modules" -prune -o -type d -exec chmod a+rx,go-w {} +
+  if (( ! reused )); then chown -R root:root "$release/node_modules"; chmod -R a+rX,go-w "$release/node_modules"; fi
+  install -d -m 0700 -o spread-monitor -g spread-monitor "$release/.next/cache"
+  chown -R spread-monitor:spread-monitor "$release/.next/cache"
   sed -e "s|^WorkingDirectory=.*|WorkingDirectory=$base/current|" -e "s|^ExecStart=.*|ExecStart=/bin/bash $base/current/server/entrypoint.sh|" "$release/deploy/market-spread-monitor.service" > "$scratch/market-spread-monitor.service"
   systemd-analyze verify "$scratch/market-spread-monitor.service" 2> "$scratch/unit-check.log" || {
     # The current symlink is intentionally not switched yet. Verify using the prepared release.
@@ -400,7 +498,8 @@ main() {
   systemctl daemon-reload
   systemctl start market-spread-monitor.service
   # Read EnvironmentFile through systemd itself; never execute or echo an existing config.
-  systemd-run --quiet --wait --pipe --collect --unit="market-spread-monitor-check-$$" --property="EnvironmentFile=$config" "$runtime/bin/node" "$release/deploy/check-install.mjs"
+  systemd-run --quiet --wait --pipe --collect --unit="market-spread-monitor-check-$$" --property="EnvironmentFile=$config" "$runtime/bin/node" "$release/deploy/check-install.mjs" --describe-after-check "$first_install"
+  install_described=1
   systemctl is-active --quiet market-spread-monitor.service || die '服务未保持运行'
   local main_pid
   main_pid=$(systemctl show --property=MainPID --value market-spread-monitor.service)

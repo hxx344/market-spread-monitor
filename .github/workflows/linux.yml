@@ -19,7 +19,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
-      - run: npm run typecheck
+      # next build includes the same TypeScript check; keep it enabled there.
       - run: npm run build:linux
       - run: node tests/linux-smoke.mjs
       - run: systemd-analyze verify deploy/market-spread-monitor.service

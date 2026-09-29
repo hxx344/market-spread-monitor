@@ -159,6 +159,18 @@ else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/n
   assert.deepEqual((await oilState()).config, oilConfig); assert.equal((await oilState()).revision, oilInitial.revision+1);
   assert.deepEqual(await sharedState(), sharedConfig);
 
+  console.log("Installer: docs/tests-only commits update checked source without relabelling or restarting the artifact");
+  const originalArtifactSource = await readFile(join(firstRelease, ".install-source"), "utf8");
+  await writeFile(join(baseline, "README.md"), (await readFile(join(baseline, "README.md"), "utf8")) + "\nInstaller documentation fixture.\n");
+  await writeFile(join(baseline, "tests/documentation-only.test.mjs"), "// Test-only source change.\n");
+  const docsOnly = await install(baseline);
+  assert.match(docsOnly, /运行和构建内容未变/);
+  assert.equal(await current(), firstRelease);
+  assert.equal(await pid(), firstPid);
+  assert.equal(await buildCount(), 1);
+  assert.equal(await readFile(join(firstRelease, ".install-source"), "utf8"), originalArtifactSource);
+  assert.notEqual(await readFile(join(firstRelease, ".install-checked-source"), "utf8"), originalArtifactSource);
+
   console.log("Installer: configuration changes only restart, and invalid configuration leaves the old process running");
   const expectedConfig = originalConfig.replace("OIL_POLL_INTERVAL_SECONDS=30", "OIL_POLL_INTERVAL_SECONDS=45");
   await replaceConfig(expectedConfig);
@@ -298,6 +310,39 @@ else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/n
   assert.deepEqual(await sharedState(), sharedConfig);
   console.log("Installer smoke passed: no-op, cache reuse, storage reclamation, space/inode preflight, config-only restart, recovery, rollback and shared Feishu persistence; no Feishu messages sent.");
   assert.equal(await databaseMarker(), 'persisted', 'Dependency rebuild preserves the existing SQLite database');
+
+  console.log("Installer: an independent server change reuses the verified Next artifact and preserves its provenance");
+  const compiledSource = await readFile(join(thirdRelease, ".install-build-source"), "utf8");
+  const buildBeforeBackend = await buildCount();
+  await writeFile(join(baseline, "server/linux.mjs"), originalServer + "\n// Independent server entry update.\n");
+  const backendOnly = await install(baseline);
+  const backendRelease = await current();
+  assert.notEqual(backendRelease, thirdRelease);
+  assert.match(backendOnly, /Next 构建输入未变/);
+  assert.equal(await buildCount(), buildBeforeBackend);
+  assert.equal(await readFile(join(backendRelease, ".install-build-source"), "utf8"), compiledSource);
+  assert.equal((await fetch(base, { headers })).status, 200);
+  assert.equal((await stat(join(backendRelease, "server/linux.mjs"))).uid, 0);
+  assert.equal((await stat(join(backendRelease, "node_modules/next/package.json"))).uid, 0);
+  assert.equal((await stat(join(backendRelease, "server/linux.mjs"))).mode & 0o022, 0);
+
+  console.log("Installer: a Next API server import invalidates the build");
+  const summaryFile = join(baseline, "server/hub-summary.mjs");
+  await writeFile(summaryFile, (await readFile(summaryFile, "utf8")) + "\n// Next-facing API implementation update.\n");
+  const importedChange = await install(baseline);
+  assert.ok(!importedChange.includes("Next 构建输入未变"));
+  assert.equal(await buildCount(), buildBeforeBackend + 1);
+
+  console.log("Installer: a damaged build manifest is rebuilt while valid dependencies remain reusable");
+  const damagedRelease = await current();
+  await run("sudo", ["rm", join(damagedRelease, ".next/build-manifest.json")]);
+  const repaired = await install(baseline);
+  assert.match(repaired, /依赖未变，复用已安装依赖/);
+  assert.ok(!repaired.includes("Next 构建输入未变"));
+  assert.equal(await buildCount(), buildBeforeBackend + 2);
+  assert.ok(existsSync(join(await current(), ".next/build-manifest.json")));
+  assert.equal(await databaseMarker(), 'persisted');
+  console.log("Complete installer timings:", JSON.stringify(timings));
 } finally {
   await run("sudo", ["systemctl", "stop", "market-spread-monitor.service"]).catch(() => {});
   assert.ok(resolve(scratch).startsWith(resolve(tmpdir()) + "/market-spread-installer-test-"));
