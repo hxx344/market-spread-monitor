@@ -8,11 +8,12 @@ import { binanceOilExchangeQuote, type ExternalQuoteSet } from "./exchange-quote
 import { intradayChartRows, type createIntradaySnapshot } from "../modules/oil/intraday.mjs";
 import { oilSpreadPercent } from "../modules/oil/spread.mjs";
 import type { GoldOilQuote, GoldOilHistory } from './gold-oil';
+import type { GoldOilFundingHistory } from './gold-oil-funding';
 
 export type InitialMarketData = {
   renderedAt: number;
   runtime?: MonitorRuntimeMap;
-  'cl-xau'?: { quote: GoldOilQuote | null; history: GoldOilHistory | null };
+  'cl-xau'?: { quote: GoldOilQuote | null; history: GoldOilHistory | null; funding?: GoldOilFundingHistory | null };
   hynix: { quote: LiveQuote | null; history: MarketData | null; exchanges?: ExternalQuoteSet };
   oil: { quote: (ReturnType<typeof validateOilQuote> & { status: "live" | "snapshot" }) | null; history?: ReturnType<typeof validateOilHistory> | null; candles?: ReturnType<typeof createIntradaySnapshot> | null; exchanges?: ExternalQuoteSet };
 };

@@ -50,8 +50,8 @@ async page => {
     const metric = panel.getByRole('region', { name: '金油比报价' });
     await metric.locator('.metric-number').filter({ hasText: '50.000' }).waitFor();
     await page.clock.runFor(1000);
-    await panel.locator('.gold-chart .recharts-line-curve').first().waitFor();
-    await panel.locator('.gold-funding-chart .recharts-line-curve').first().waitFor();
+    await panel.locator('.gold-chart .gold-line').first().waitFor();
+    await panel.locator('.gold-funding-chart .gold-line').first().waitFor();
     check(await panel.getByRole('button', { name: '1 周', exact: true }).getAttribute('aria-pressed') === 'true', 'Default one-week range');
     check((await panel.innerText()).includes('671 / 672'), 'Missing leg is counted honestly');
     check(await panel.locator('.metric').count() === 4, 'Same four-card layout as oil');
@@ -66,7 +66,7 @@ async page => {
     check((await panel.innerText()).includes('6499 / 6500'), 'All history exceeds seven days');
     check(await panel.getByRole('listitem').count() === 3, 'Monthly bars cover July through September');
     await panel.getByRole('button', { name: '黄金 / 原油价格', exact: true }).click();
-    check(await panel.locator('.gold-chart .recharts-line-curve').count() === 2, 'Two price series with independent axes');
+    check(await panel.locator('.gold-chart .gold-line').count() === 2, 'Two price series with independent axes');
     check((await panel.innerText()).includes('黄金 · 左轴 USDT/盎司'), 'Gold axis unit visible');
     await panel.getByRole('button', { name: '金油比走势', exact: true }).click();
     await panel.getByRole('button', { name: '日均小时率', exact: true }).click();
@@ -99,7 +99,7 @@ async page => {
     check(quoteReads === paused, 'Disabled module stops reads');
     await toggle.click(); await metric.locator('.metric-number').filter({ hasText: '50.000' }).waitFor();
     await page.setViewportSize({ width: 390, height: 844 }); await page.clock.runFor(1000);
-    await panel.locator('.gold-chart .recharts-line-curve').first().waitFor();
+    await panel.locator('.gold-chart .gold-line').first().waitFor();
     check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Mobile fits viewport');
     await panel.getByRole('button', { name: '全部', exact: true }).click();
     await panel.locator('.data-details summary').click();

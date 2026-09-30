@@ -14,9 +14,11 @@ async function request(action: string, signal: AbortSignal) {
 export function useGoldOilFeed(initial: InitialMarketData | null | undefined, active: boolean, summaryActive: boolean) {
   const [quote, setQuote] = useState<GoldOilQuote | null>(initial?.['cl-xau']?.quote ?? null);
   const [history, setHistory] = useState<GoldOilHistory | null>(initial?.['cl-xau']?.history ?? null);
-  const [funding, setFunding] = useState<GoldOilFundingHistory | null>(null);
+  const [funding, setFunding] = useState<GoldOilFundingHistory | null>(initial?.['cl-xau']?.funding ?? null);
   const [quoteError, setQuoteError] = useState(false), [historyError, setHistoryError] = useState(false), [fundingError, setFundingError] = useState(false);
   const polls = useRef<Record<string, ReturnType<typeof startActivityPolling>>>({});
+  const hydrated = useRef({ history: Boolean(initial?.['cl-xau']?.history), funding: Boolean(initial?.['cl-xau']?.funding), readAt: initial?.renderedAt ?? 0 });
+  const activated = useRef(false);
   useEffect(() => {
     if (!summaryActive) return;
     const controls = polls.current;
@@ -30,12 +32,15 @@ export function useGoldOilFeed(initial: InitialMarketData | null | undefined, ac
     if (!active) return;
     const controls = polls.current;
     const history = startActivityPolling({ intervalMs: GOLD_OIL_HISTORY_MS, timeoutMs: 60_000,
+      immediate: activated.current || !hydrated.current.history || Date.now() - hydrated.current.readAt >= GOLD_OIL_HISTORY_MS,
       load: async signal => validateGoldOilHistory(await request('history', signal)),
       onData: value => { setHistory(value); setHistoryError(false); }, onError: () => setHistoryError(true) });
     const funding = startActivityPolling({ intervalMs: GOLD_OIL_FUNDING_MS, timeoutMs: 60_000,
+      immediate: activated.current || !hydrated.current.funding || Date.now() - hydrated.current.readAt >= GOLD_OIL_FUNDING_MS,
       load: async signal => validateGoldOilFunding(await request('funding', signal)),
       onData: value => { setFunding(value); setFundingError(false); }, onError: () => setFundingError(true) });
     controls.history = history; controls.funding = funding;
+    activated.current = true;
     return () => { delete controls.history; delete controls.funding; history.stop(); funding.stop(); };
   }, [active]);
   return { quote, history, funding, quoteError, historyError, fundingError, refresh: () => { for (const poll of Object.values(polls.current)) void poll.refresh(); } };

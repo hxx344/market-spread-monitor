@@ -72,7 +72,7 @@ export function validateGoldOilHistory(input: unknown): GoldOilHistory {
   return { ...base, interval: '15m', points, ...(typeof coverageStart === 'number' ? { coverageStart } : {}) };
 }
 
-/** Include explicit nulls so Recharts cannot join across a missing period. */
+/** Include explicit nulls so charts cannot join across a missing period. */
 export function goldOilChartPoints(history: GoldOilHistory | null, days: number | '1m') {
   if (!history?.points.length) return [];
   const end = Math.floor(Date.parse(history.fetchedAt) / GOLD_OIL_INTERVAL_MS) * GOLD_OIL_INTERVAL_MS;

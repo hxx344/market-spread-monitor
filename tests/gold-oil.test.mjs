@@ -15,11 +15,23 @@ import { createDataReader } from '../lib/monitor-service.ts';
 import { goldOilSummary, goldOilTrend } from '../lib/monitor-summary.ts';
 import { currentGoldOilFunding, parseGoldOilFunding, analyzeGoldOilFunding } from '../lib/gold-oil-funding.ts';
 import { goldOilStatistics, sampleGoldOilPoints, adjacentRatioChange } from '../lib/gold-oil-analysis.ts';
+import { chartDomain, chartPath } from '../lib/gold-oil-chart.ts';
 
 const now = Date.UTC(2026, 8, 30, 12), stamp = new Date(now).toISOString();
 const ticker = (symbol, markPrice, time = now) => ({ symbol, markPrice: String(markPrice), time });
 const quote = () => parseGoldOilQuote(ticker('CLUSDT', 80), ticker('XAUUSDT', 4000), now);
 const candle = (time, price) => [time, String(price), String(price), String(price), String(price), '0', time + STEP - 1];
+
+test('SVG paths break on nulls and retain isolated values; domains handle flat, negative and absent series', () => {
+  const rows = [4, null, -2, -1, null, 0].map((value, time) => ({ time, value }));
+  const path = chartPath(rows, row => row.value, time => time * 10, value => value * 2);
+  assert.equal(path, 'M0.00,8.00L0.00,8.00M20.00,-4.00L20.00,-4.00L30.00,-2.00M50.00,0.00L50.00,0.00');
+  assert.deepEqual(chartDomain([null]), { min: -1, max: 1 });
+  for (const values of [[0], [50, 50], [-0.0001, 0.0002]]) {
+    const domain = chartDomain(values, 0);
+    assert.ok(domain.min < Math.min(0, ...values) && domain.max > Math.max(0, ...values));
+  }
+});
 const metadata = () => ({ symbols: ['CL', 'XAU'].map(baseAsset => ({ symbol: `${baseAsset}USDT`, baseAsset, quoteAsset: 'USDT', marginAsset: 'USDT', contractType: 'TRADIFI_PERPETUAL', status: 'TRADING', onboardDate: now - 2000 * STEP })) });
 async function temporary(t) { const directory = await mkdtemp(join(tmpdir(), 'gold-oil-')); t.after(() => rm(directory, { recursive: true, force: true })); return directory; }
 
@@ -108,7 +120,10 @@ test('resident APIs read only caches, expose ratio summary and pause independent
   const services = await createMonitorServices(directory, { env: {}, marketOptions: { jobs: [] } });
   try {
     const before = services.market.status(); await assert.rejects(services.get('cl-xau').handle('quote', 'GET'), /尚未收到/);
-    assert.deepEqual((await readInitialMarket(services))['cl-xau'], { quote: null, history: null }); assert.deepEqual(services.market.status(), before);
+    const initial = (await readInitialMarket(services))['cl-xau'];
+    assert.equal(initial.quote, null); assert.equal(initial.history, null);
+    assert.deepEqual(initial.funding.points, savedFunding.points, 'Funding comes from persisted data before any browser read');
+    assert.deepEqual(services.market.status(), before);
     assert.equal((await readHubSummary(services, now, 'cl-xau')).health.state, 'offline');
     assert.deepEqual((await services.get('cl-xau').handle('funding', 'GET')).points, savedFunding.points);
     await services.get('cl-xau').handle('runtime', 'PUT', { enabled: false, revision: 0 }); await assert.rejects(services.get('cl-xau').handle('history', 'GET'), { status: 423 });
