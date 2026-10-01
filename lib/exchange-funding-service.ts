@@ -1,5 +1,5 @@
 import { exchangeDefinition, type Exchange } from './exchange-quotes.ts';
-import { normalizeSettledFunding, validateExchangeFundingHistory, HISTORY_WINDOW_MS, type ExchangeFundingHistory, type SettledFundingRecord } from './exchange-funding-history.ts';
+import { normalizeSettledFunding, validateExchangeFundingHistory, HISTORY_WINDOW_MS, type ExchangeFundingHistory, type FundingHistoryRange, type SettledFundingRecord } from './exchange-funding-history.ts';
 import { createCexFundingHistoryReader } from './exchange-funding-cex.ts';
 import { parseLighterOilMarkets } from './oil-dex.ts';
 
@@ -48,32 +48,80 @@ export function createExchangeFundingReader({ fetcher = fetch, clock = Date.now 
     }).finally(() => { lighterPending = undefined; });
     return lighterPending;
   }
-  async function readLeg(exchange: Exclude<Exchange, 'variational'>, symbol: string, now: number) {
-    if (exchange === 'hyperliquid') return parseHyperliquidFundingHistory(await request('https://api.hyperliquid.xyz/info', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'fundingHistory', coin: symbol, startTime: now - HISTORY_WINDOW_MS, endTime: now }) }), symbol, now);
+  async function readLeg(exchange: Exclude<Exchange, 'variational'>, symbol: string, range: FundingHistoryRange) {
+    if (exchange === 'hyperliquid') {
+      const records: SettledFundingRecord[] = [];
+      let cursor = range.from;
+      // Time-range info responses contain at most 500 records. Keep exact ms.
+      // https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint#pagination
+      for (let page = 0; page < 10; page++) {
+        const input = await request('https://api.hyperliquid.xyz/info', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'fundingHistory', coin: symbol, startTime: cursor, endTime: range.to }) });
+        const parsed = parseHyperliquidFundingHistory(input, symbol, range.to);
+        if (!Array.isArray(input)) throw Error('Invalid Hyperliquid funding page');
+        if (parsed.some(row => row.time < cursor)) throw Error('Hyperliquid funding pagination did not advance');
+        records.push(...parsed);
+        if (input.length < 500) return normalizeSettledFunding(records, range.to);
+        if (!parsed.length) throw Error('Hyperliquid funding pagination did not advance');
+        const next = Math.max(...parsed.map(row => row.time)) + 1;
+        if (next <= cursor) throw Error('Hyperliquid funding pagination did not advance');
+        if (next > range.to) return normalizeSettledFunding(records, range.to);
+        cursor = next;
+      }
+      throw Error('Hyperliquid funding pagination limit exceeded');
+    }
     if (exchange === 'lighter') {
       const market = (await discoverLighter()).find(item => item.symbol === symbol);
       if (!market) throw Error('Lighter oil contract unavailable');
-      const query = new URLSearchParams({ market_id: String(market.marketId), resolution: '1h', start_timestamp: String(Math.floor((now - HISTORY_WINDOW_MS) / 1000)), end_timestamp: String(Math.floor(now / 1000)), count_back: '168' });
-      return parseLighterFundingHistory(await request(`https://mainnet.zklighter.elliot.ai/api/v1/fundings?${query}`), market.marketId, now);
+      const records: SettledFundingRecord[] = [];
+      // 25-day hourly windows stay below the documented 750-record response cap.
+      for (let from = range.from; from <= range.to;) {
+        const to = Math.min(range.to, from + 25 * 86_400_000);
+        // fundings applies candle-style start boundaries: a fractional-hour start
+        // skips the next settlement. Request from the preceding whole hour, then
+        // filter exact bounds locally so neither the first row nor a seam is lost.
+        const requestStart = Math.floor(from / 3_600_000) * 3600 - 3600;
+        const query = new URLSearchParams({ market_id: String(market.marketId), resolution: '1h', start_timestamp: String(requestStart), end_timestamp: String(Math.floor(to / 1000)), count_back: '0' });
+        const input = await request(`https://mainnet.zklighter.elliot.ai/api/v1/fundings?${query}`);
+        const parsed = parseLighterFundingHistory(input, market.marketId, range.to);
+        if (list(object(input).fundings).length >= 750 || parsed.some(row => row.time > to)) throw Error('Incomplete Lighter funding time window');
+        records.push(...parsed.filter(row => row.time >= from && row.time <= to));
+        from = to + 1;
+      }
+      return normalizeSettledFunding(records, range.to);
     }
-    return readCex(exchange, symbol);
+    return readCex(exchange, symbol, range);
   }
   return async (exchange: Exchange, previous?: ExchangeFundingHistory | null): Promise<ExchangeFundingHistory> => {
     const definition = exchangeDefinition(exchange, 'oil');
     const startedAt = clock();
     if (exchange === 'variational') return validateExchangeFundingHistory({ exchange, monitorId: 'oil', currency: definition.currency, fetchedAt: new Date(startedAt).toISOString(), status: 'live', availability: 'unsupported', reason: 'Variational 公开接口尚未提供可核实的历史实际结算费率。', left: { symbol: definition.left, fetchedAt: null, error: '' }, right: { symbol: definition.right, fetchedAt: null, error: '' }, rows: [] }, exchange);
-    const results = await Promise.allSettled([readLeg(exchange, definition.left, startedAt), readLeg(exchange, definition.right, startedAt)]);
-    if (results.every(result => result.status === 'rejected')) throw Error('Actual funding history unavailable');
-    const fetchedAt = new Date(clock()).toISOString(), rows = new Map<number, ExchangeFundingHistory['rows'][number]>();
     const old = previous ? validateExchangeFundingHistory(previous, exchange) : null;
+    const coverage = { from: startedAt - HISTORY_WINDOW_MS, to: startedAt };
+    const ranges = (['left', 'right'] as const).map(side => {
+      const previousCoverage = old?.[side].coverage;
+      // New/legacy snapshots backfill the whole window; later updates overlap a day.
+      const from = previousCoverage && previousCoverage.from <= coverage.from && previousCoverage.to >= coverage.from ? Math.max(coverage.from, previousCoverage.to - 86_400_000) : coverage.from;
+      return { from, to: coverage.to };
+    });
+    const results = await Promise.allSettled([readLeg(exchange, definition.left, ranges[0]), readLeg(exchange, definition.right, ranges[1])]);
+    if (results.every(result => result.status === 'rejected')) throw Error('Actual funding history unavailable');
+    // The snapshot is anchored to the requested end, excluding settlements that
+    // happened during pagination and keeping a stable 60-day window for all pages.
+    const fetchedAt = new Date(startedAt).toISOString(), rows = new Map<number, ExchangeFundingHistory['rows'][number]>();
     const legs = (['left', 'right'] as const).map((side, index) => {
       const result = results[index], symbol = definition[side];
-      const records = result.status === 'fulfilled' ? normalizeSettledFunding(result.value, Date.parse(fetchedAt)) : normalizeSettledFunding((old?.rows ?? []).filter(row => row[`${side}Rate`] !== null).map(row => ({ time: row.time, rate: row[`${side}Rate`]! })), Date.parse(fetchedAt));
+      const previousRecords = (old?.rows ?? []).filter(row => row[`${side}Rate`] !== null).map(row => ({ time: row.time, rate: row[`${side}Rate`]! }));
+      const merged = new Map(previousRecords.map(row => [row.time, row]));
+      if (result.status === 'fulfilled') for (const row of result.value) merged.set(row.time, row);
+      const records = normalizeSettledFunding([...merged.values()], startedAt);
       for (const record of records) {
         const row = rows.get(record.time) ?? { time: record.time, leftRate: null, rightRate: null };
         row[`${side}Rate`] = record.rate; rows.set(record.time, row);
       }
-      return { symbol, fetchedAt: result.status === 'fulfilled' ? fetchedAt : old?.[side].fetchedAt ?? null, error: result.status === 'fulfilled' ? '' : '本合约历史结算费率暂时读取失败，保留上次成功记录。' };
+      const previousCoverage = old?.[side].coverage;
+      // Expired rows were pruned above, so their former coverage cannot be claimed.
+      const retainedCoverage = previousCoverage && previousCoverage.to >= coverage.from ? { from: Math.max(previousCoverage.from, coverage.from), to: previousCoverage.to } : null;
+      return { symbol, fetchedAt: result.status === 'fulfilled' ? fetchedAt : old?.[side].fetchedAt ?? null, error: result.status === 'fulfilled' ? '' : '本合约历史结算费率暂时读取失败，保留上次成功记录。', coverage: result.status === 'fulfilled' ? coverage : retainedCoverage };
     });
     return validateExchangeFundingHistory({ exchange, monitorId: 'oil', currency: definition.currency, fetchedAt, status: 'live', availability: 'supported', reason: legs.some(leg => leg.error) ? '部分合约更新失败，请查看各合约采集时间。' : '', left: legs[0], right: legs[1], rows: [...rows.values()] }, exchange);
   };

@@ -1,4 +1,4 @@
-import type { SettledFundingRecord } from './exchange-funding-history.ts';
+import { HISTORY_WINDOW_MS, type FundingHistoryRange, type SettledFundingRecord } from './exchange-funding-history.ts';
 
 export type CexFundingExchange = 'binance' | 'bybit' | 'okx' | 'bitget';
 type JsonObject = Record<string, unknown>;
@@ -6,7 +6,8 @@ type ReaderOptions = {
   request: (url: string, init?: RequestInit) => Promise<unknown>;
   clock?: () => number;
 };
-const PAGE_SIZE = 40;
+const PAGE_SIZES: Record<CexFundingExchange, number> = { binance: 1000, bybit: 200, okx: 400, bitget: 100 };
+const MAX_PAGES = 32;
 const symbols: Record<CexFundingExchange, readonly string[]> = {
   binance: ['BZUSDT', 'CLUSDT'],
   bybit: ['BZUSDT', 'CLUSDT'],
@@ -73,25 +74,55 @@ export function parseCexFundingHistory(exchange: CexFundingExchange, symbol: str
   return [...records].sort(([a], [b]) => a - b).map(([time, rate]) => ({ time, rate }));
 }
 
-/** One small public-history request per leg; transport owns HTTP checks/timeouts. */
+/** Read the complete requested settlement interval; transport owns HTTP checks/timeouts. */
 export function createCexFundingHistoryReader({ request, clock = Date.now }: ReaderOptions) {
-  return async (exchange: CexFundingExchange, symbol: string): Promise<SettledFundingRecord[]> => {
+  return async (exchange: CexFundingExchange, symbol: string, range?: FundingHistoryRange): Promise<SettledFundingRecord[]> => {
     validateContract(exchange, symbol);
     const now = timestamp(clock());
-    let url: URL;
-    if (exchange === 'binance') {
-      url = new URL('https://fapi.binance.com/fapi/v1/fundingRate');
-      url.search = new URLSearchParams({ symbol, limit: String(PAGE_SIZE), endTime: String(now) }).toString();
-    } else if (exchange === 'bybit') {
-      url = new URL('https://api.bybit.com/v5/market/funding/history');
-      url.search = new URLSearchParams({ category: 'linear', symbol, limit: String(PAGE_SIZE), endTime: String(now) }).toString();
-    } else if (exchange === 'okx') {
-      url = new URL('https://www.okx.com/api/v5/public/funding-rate-history');
-      url.search = new URLSearchParams({ instId: symbol, limit: String(PAGE_SIZE) }).toString();
-    } else {
-      url = new URL('https://api.bitget.com/api/v2/mix/market/history-fund-rate');
-      url.search = new URLSearchParams({ symbol, productType: 'USDT-FUTURES', pageSize: String(PAGE_SIZE), pageNo: '1' }).toString();
+    const from = timestamp(range?.from ?? now - HISTORY_WINDOW_MS), to = timestamp(range?.to ?? now);
+    if (from > to || to > now) throw new Error('Invalid CEX funding history range');
+    const pageSize = PAGE_SIZES[exchange], records = new Map<number, number>();
+    let cursor = exchange === 'binance' ? from : exchange === 'okx' ? to + 1 : to;
+    let previousOldest = Infinity;
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      let url: URL;
+      if (exchange === 'binance') {
+        // Binance returns the earliest results from an inclusive startTime.
+        url = new URL('https://fapi.binance.com/fapi/v1/fundingRate');
+        url.search = new URLSearchParams({ symbol, limit: String(pageSize), startTime: String(cursor), endTime: String(to) }).toString();
+      } else if (exchange === 'bybit') {
+        url = new URL('https://api.bybit.com/v5/market/funding/history');
+        url.search = new URLSearchParams({ category: 'linear', symbol, limit: String(pageSize), endTime: String(cursor) }).toString();
+      } else if (exchange === 'okx') {
+        // OKX after means strictly earlier; to + 1 includes a settlement at to.
+        url = new URL('https://www.okx.com/api/v5/public/funding-rate-history');
+        url.search = new URLSearchParams({ instId: symbol, limit: String(pageSize), after: String(cursor) }).toString();
+      } else {
+        // Bitget has no time cursor. Deduplication also handles page offsets
+        // shifting when a new settlement appears during this read.
+        url = new URL('https://api.bitget.com/api/v2/mix/market/history-fund-rate');
+        url.search = new URLSearchParams({ symbol, productType: 'USDT-FUTURES', pageSize: String(pageSize), pageNo: String(page) }).toString();
+      }
+      const response = await request(url.toString()), rawCount = rows(exchange, response).length;
+      if (!rawCount) break;
+      if (rawCount > pageSize) throw new Error('Invalid CEX funding history page size');
+      const settlements = parseCexFundingHistory(exchange, symbol, response, now);
+      if (!settlements.length) throw new Error('CEX funding history pagination did not advance');
+      const oldest = settlements[0].time, newest = settlements[settlements.length - 1].time;
+      if (exchange !== 'bitget' && newest > to) throw new Error('Invalid CEX funding history page range');
+      for (const { time, rate } of settlements) {
+        if (records.has(time) && records.get(time) !== rate) throw new Error('Conflicting CEX funding settlements');
+        records.set(time, rate);
+      }
+      const forward = exchange === 'binance';
+      if (forward ? newest < cursor : oldest >= previousOldest || (exchange === 'bybit' && oldest > cursor) || (exchange === 'okx' && oldest >= cursor)) {
+        throw new Error('CEX funding history pagination did not advance');
+      }
+      if (rawCount < pageSize || (forward ? newest >= to : oldest <= from)) break;
+      if (page === MAX_PAGES) throw new Error('CEX funding history pagination exceeded page limit');
+      previousOldest = oldest;
+      cursor = forward ? newest + 1 : exchange === 'okx' ? oldest : oldest - 1;
     }
-    return parseCexFundingHistory(exchange, symbol, await request(url.toString()), now);
+    return [...records].filter(([time]) => time >= from && time <= to).sort(([a], [b]) => a - b).map(([time, rate]) => ({ time, rate }));
   };
 }

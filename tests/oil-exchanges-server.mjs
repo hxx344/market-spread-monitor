@@ -23,9 +23,10 @@ function exchangeFundingHistory(exchange, now = Date.now()) {
   const spec = exchangeDefinition(exchange, 'oil'), at = new Date(now).toISOString();
   const unsupported = exchange === 'variational';
   const settled = Math.floor(now / 3_600_000) * 3_600_000 - 3_600_000;
+  const coverage = unsupported ? null : { from: now - 60 * 24 * 3_600_000, to: now };
   return { exchange, monitorId: 'oil', currency: spec.currency, fetchedAt: at, status: 'live', availability: unsupported ? 'unsupported' : 'supported',
     reason: unsupported ? 'Variational 暂无公开的市场已结算资金费历史接口；当前统计不作为历史结算。' : '',
-    left: { symbol: spec.left, fetchedAt: unsupported ? null : at, error: '' }, right: { symbol: spec.right, fetchedAt: unsupported ? null : at, error: '' },
+    left: { symbol: spec.left, fetchedAt: unsupported ? null : at, error: '', coverage }, right: { symbol: spec.right, fetchedAt: unsupported ? null : at, error: '', coverage },
     rows: unsupported ? [] : [
       { time: settled + 17, leftRate: null, rightRate: -0.0002 },
       { time: settled, leftRate: 0.0001, rightRate: null },

@@ -141,7 +141,7 @@ npm run start:windows
 - `GET /api/monitors/{id}/history`：历史与采集时间，失败保留真实快照并标明状态。
 - `GET /api/monitors/oil/candles/15m`：原油同一 UTC 时段已收盘的 15 分钟 K 线。Linux 只读 Binance 独立数据集 `oil/binance/candles/15m`；原 Hyperliquid 库记录保留，不混入新曲线。
 - `GET /api/monitors/{id}/exchanges/{exchange}/quote`：同一平台内两腿实时报价及可取得的资金费率、结算周期和下次结算时间；原油支持 `hyperliquid`、`bybit`、`binance`、`lighter`、`variational`、`okx`、`bitget`，海力士支持 `bybit`、`binance`。Linux 只读数据库，首次无数据返回 503，更新失败保留上次报价及原时间并标明过期。
-- `GET /api/monitors/oil/exchanges/{exchange}/funding-history`：点击原油比较表的做空／做多价差年化，展开最近 7 天内每个合约最多 20 次实际结算费率。后台每 5 分钟独立采集并保存，GET 只读数据库；两腿保留各自结算时间和采集时间，单腿失败不影响另一腿更新，旧记录明确标注。费率为交易所原始正负值（正值多方支付），方向切换只改变收付说明；没有历史计费价格，不将这些记录换算为历史价差年化。OKX 使用 `realizedRate`，Lighter 按 `direction` 还原符号并将百分数转为小数，Hyperliquid 保留原始毫秒时间。Variational 公开接口尚无可核实的历史结算记录，显示原因。
+- `GET /api/monitors/oil/exchanges/{exchange}/funding-history`：点击原油比较表的做空／做多价差年化，展开最近两个月（60 天）的实际结算历史，每个合约明细独立分页，每页 200 次。支持最近 7／30／60 天及自选北京时间区间，包含开始、不含结束；每腿原始费率累计和本方向收付累计使用区间内全部记录简单求和，翻页不影响累计，未取得记录显示“—”，真实零费率仍显示零。快捷区间按分钟向内取整，实际起止时间显示在面板中。后台首次分页回补完整 60 天，此后每 5 分钟重取最近一天并合并，GET 只读数据库；各腿保留独立采集时间及查询覆盖范围，失败保留旧记录，旧版 20 条快照会自动回补。范围未覆盖或旧快照覆盖未知时明确标注，不将缺失值补零。收付累计正值收款、负值付款；没有历史计费价格，不将单腿费率累计解释为等桶数价差组合收益或历史年化。OKX 使用 `realizedRate`，Lighter 按 `direction` 还原符号、将百分数转为小数并用重叠时间窗防止结算边界漏数，Hyperliquid 保留原始毫秒时间。Variational 公开接口尚无可核实的历史结算记录，显示原因。
 - `GET /api/monitors/oil/funding`：原油已结算资金费历史。
 - Linux 专用告警接口按模块 ID 隔离。
 

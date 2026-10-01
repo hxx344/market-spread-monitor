@@ -18,12 +18,13 @@ async page => {
     if (requestMode === 'fail') return route.fulfill({ status: 503, json: { error: 'Fixture history outage' } });
     const data = await (await route.fetch()).json();
     if (requestMode === 'partial') {
-      data.right.error = 'WTI 历史暂不可用。'; data.right.fetchedAt = null;
+      data.right.error = 'WTI 历史暂不可用。'; data.right.fetchedAt = null; data.right.coverage = null;
       data.rows = data.rows.filter(row => row.leftRate !== null).map(row => ({ ...row, rightRate: null }));
     }
     if (requestMode === 'older') {
       data.fetchedAt = new Date(Date.now() - 30_000).toISOString();
       data.left.fetchedAt = data.fetchedAt; data.right.fetchedAt = data.fetchedAt;
+      for (const leg of [data.left, data.right]) leg.coverage = { from: Date.parse(data.fetchedAt) - 60 * 24 * 3_600_000, to: Date.parse(data.fetchedAt) };
       data.rows[0].rightRate = 0.5;
     }
     if (requestMode === 'empty') data.rows = [];
@@ -82,7 +83,7 @@ async page => {
   await firstFailure.getByText('历史结算读取失败，稍后重试。已有记录保留。', { exact: true }).waitFor();
   mode = 'empty';
   await firstFailure.getByRole('button', { name: '刷新 Hyperliquid 资金费历史', exact: true }).click();
-  await firstFailure.locator('[data-funding-leg="left"]').getByText('最近 7 天暂无可用结算记录。', { exact: true }).waitFor();
+  await firstFailure.locator('[data-funding-leg="left"]').getByText('所选区间暂无可用结算记录。', { exact: true }).waitFor();
   check(await firstFailure.locator('tbody tr').count() === 0, 'Successful empty history does not create fake zero records');
   mode = 'slow';
   await oil.getByRole('button', { name: '查看 Bybit 做空价差的资金费结算历史', exact: true }).click();
@@ -101,8 +102,8 @@ async page => {
   await oil.getByRole('button', { name: '查看 Lighter 做空价差的资金费结算历史', exact: true }).click();
   const lighter = oil.locator('[data-funding-exchange="lighter"]');
   await lighter.locator('.exchange-funding-table').first().waitFor();
-  check(await lighter.getByText('−0.00307223%', { exact: true }).count() === 1, 'Funding rates preserve up to eight decimal percentage places');
-  check(await lighter.getByText('+1e-10%', { exact: true }).count() === 1, 'Small nonzero settlements never display as zero');
+  check(await lighter.locator('tbody').getByText('−0.00307223%', { exact: true }).count() === 1, 'Funding rates preserve up to eight decimal percentage places');
+  check(await lighter.locator('tbody').getByText('+1e-10%', { exact: true }).count() === 1, 'Small nonzero settlements never display as zero');
   check((await lighter.locator('[data-funding-leg="right"] tbody time').first().getAttribute('title')).endsWith('.017Z'), 'Original settlement milliseconds remain inspectable');
   await lighter.screenshot({ path: 'output/playwright/oil-funding-history-desktop.png' });
   await page.setViewportSize({ width: 390, height: 844 });
