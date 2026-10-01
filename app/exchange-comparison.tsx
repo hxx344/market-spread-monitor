@@ -1,12 +1,13 @@
 "use client";
 
-import { memo, useEffect, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import { memo, useEffect, useId, useRef, useState } from "react";
+import { ChevronDown, RefreshCw } from "lucide-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
-import { calculateExchangeSpread, displayComparisonExchanges, exchangeContracts, exchangeDefinition, exchangeNames, externalQuoteStale, type ExchangeLeg, type ExchangeQuote, type ExternalQuoteSet, type SpreadMarket } from "../lib/exchange-quotes";
+import { calculateExchangeSpread, displayComparisonExchanges, exchangeContracts, exchangeDefinition, exchangeNames, externalQuoteStale, type Exchange, type ExchangeLeg, type ExchangeQuote, type ExternalQuoteSet, type SpreadMarket } from "../lib/exchange-quotes";
 import { useExchangeQuotes } from "../hooks/use-exchange-quotes";
 import { summaryTimestamp } from "../lib/monitor-summary";
 import { startActivityPolling } from "../lib/polling";
+import ExchangeFundingHistoryPanel, { type FundingHistorySelection } from "./exchange-funding-history";
 
 const signed = (value: number | null | undefined, digits = 2, suffix = "") => { if (value == null) return "—"; const rounded = Number(value.toFixed(digits)); return `${rounded > 0 ? "+" : rounded < 0 ? "−" : ""}${Math.abs(rounded).toFixed(digits)}${suffix}`; };
 const tone = (value: number | null | undefined) => value == null || value === 0 ? "" : value > 0 ? "positive" : "negative";
@@ -18,7 +19,19 @@ const settlement = (leg: ExchangeLeg) => leg.nextFundingAt ? `${summaryTimestamp
 function ExchangeComparison({ monitorId, primary, initial, renderedAt, active = true }: { monitorId: SpreadMarket; primary?: ExchangeQuote; initial?: ExternalQuoteSet; renderedAt?: number; active?: boolean }) {
   const { quotes, errors, loading, refresh } = useExchangeQuotes(monitorId, initial, active);
   const [now, setNow] = useState(() => renderedAt ?? Date.now());
+  const [historySelection, setHistorySelection] = useState<FundingHistorySelection | null>(null);
+  const historyId = useId();
+  const historyTrigger = useRef<HTMLButtonElement | null>(null);
   const contracts = exchangeContracts[monitorId], oil = monitorId === "oil";
+  function selectHistory(exchange: Exchange, direction: FundingHistorySelection["direction"], trigger: HTMLButtonElement) {
+    historyTrigger.current = trigger;
+    setHistorySelection(current => current?.exchange === exchange && current.direction === direction ? null : { exchange, direction });
+  }
+  function closeHistory() {
+    setHistorySelection(null);
+    historyTrigger.current?.focus({ preventScroll: true });
+    historyTrigger.current?.scrollIntoView({ block: "nearest", behavior: "auto" });
+  }
   useEffect(() => {
     if (!active) return;
     const clock = startActivityPolling({ intervalMs: 5000, load: async () => Date.now(), onData: setNow, onError: () => {} });
@@ -41,11 +54,12 @@ function ExchangeComparison({ monitorId, primary, initial, renderedAt, active = 
         <TableCell data-label={`${contracts.leftLabel} / ${oil ? "WTI" : "正股 ÷ 10"}`}><span className="exchange-prices"><span>{price(quote?.left.price, oil ? 3 : 2)}</span><span className="exchange-separator" aria-hidden="true">/</span><span>{price(metrics?.equivalent, oil ? 3 : 2)}</span></span><small className="exchange-pair-symbols">{quote ? `${quote.left.symbol} / ${quote.right.symbol}` : `${definition.left} / ${definition.right}`}</small></TableCell>
         <TableCell data-label={oil ? "价差 (%)" : "价差"}><strong className={tone(oil ? metrics?.premium : metrics?.spread)}>{signed(oil ? metrics?.premium : metrics?.spread, oil ? 3 : 2, oil ? "%" : "")}</strong></TableCell>
         {!oil && <TableCell data-label="ADR 溢价率"><strong className={tone(metrics?.premium)}>{signed(metrics?.premium, 2, "%")}</strong></TableCell>}
-        <TableCell data-label="做空价差年化"><strong className={tone(metrics?.shortAnnualized)}>{signed(metrics?.shortAnnualized == null ? null : metrics.shortAnnualized * 100, 2, "%")}</strong></TableCell>
-        <TableCell data-label="做多价差年化"><strong className={tone(metrics?.longAnnualized)}>{signed(metrics?.longAnnualized == null ? null : metrics.longAnnualized * 100, 2, "%")}</strong></TableCell>
+        <TableCell data-label="做空价差年化">{oil ? <button type="button" className={`exchange-funding-trigger ${tone(metrics?.shortAnnualized)}`} onClick={event => selectHistory(exchange, "short", event.currentTarget)} aria-label={`查看 ${exchangeNames[exchange]} 做空价差的资金费结算历史`} aria-expanded={historySelection?.exchange === exchange && historySelection.direction === "short"} aria-controls={historyId}><strong>{signed(metrics?.shortAnnualized == null ? null : metrics.shortAnnualized * 100, 2, "%")}</strong><ChevronDown size={13} aria-hidden="true"/></button> : <strong className={tone(metrics?.shortAnnualized)}>{signed(metrics?.shortAnnualized == null ? null : metrics.shortAnnualized * 100, 2, "%")}</strong>}</TableCell>
+        <TableCell data-label="做多价差年化">{oil ? <button type="button" className={`exchange-funding-trigger ${tone(metrics?.longAnnualized)}`} onClick={event => selectHistory(exchange, "long", event.currentTarget)} aria-label={`查看 ${exchangeNames[exchange]} 做多价差的资金费结算历史`} aria-expanded={historySelection?.exchange === exchange && historySelection.direction === "long"} aria-controls={historyId}><strong>{signed(metrics?.longAnnualized == null ? null : metrics.longAnnualized * 100, 2, "%")}</strong><ChevronDown size={13} aria-hidden="true"/></button> : <strong className={tone(metrics?.longAnnualized)}>{signed(metrics?.longAnnualized == null ? null : metrics.longAnnualized * 100, 2, "%")}</strong>}</TableCell>
       </TableRow>)}</TableBody>
     </Table>
-    <p className="exchange-caption">正值收款，负值付款；按当前费率简单年化，以两腿总名义金额为分母。{oil ? "做空：空布伦特、多 WTI；做多反向。" : "做空：空 ADR、多正股；做多反向。"}</p>
+    <p className="exchange-caption">正值收款，负值付款；按当前费率简单年化，以两腿总名义金额为分母。{oil ? "做空：空布伦特、多 WTI；做多反向。点击年化可查看最近实际结算。" : "做空：空 ADR、多正股；做多反向。"}</p>
+    {oil ? <ExchangeFundingHistoryPanel id={historyId} selection={historySelection} active={active} now={now} onClose={closeHistory}/> : null}
     <details className="exchange-details"><summary>资金费周期与计算口径</summary><div className="exchange-details-body">
       {rows.map(({ exchange, quote, error }) => <article key={exchange}><strong>{exchangeNames[exchange]}</strong>{quote ? <><p>{quote.left.symbol}：{rate(quote.left.fundingRate)} / {quote.left.fundingIntervalHours ?? "—"} 小时；{quote.right.symbol}：{rate(quote.right.fundingRate)} / {quote.right.fundingIntervalHours ?? "—"} 小时。</p>{quote.fundingFetchedAt && <p>资金费名义金额使用{fundingPriceLabels[quote.fundingPriceBasis]}。</p>}{quote.fundingFetchedAt && <p>资金费采集：{summaryTimestamp(quote.fundingFetchedAt)} 北京时间。</p>}<p>下次结算：{contracts.leftLabel} {settlement(quote.left)}；{contracts.rightLabel} {settlement(quote.right)} 北京时间。</p>{quote.fundingError && <p className="exchange-stale">{quote.fundingError}</p>}</> : <p>尚未取得有效报价。</p>}{error && <p className="exchange-stale">{error}</p>}</article>)}
       <p>净年化 =（空腿名义 × 空腿费率 ÷ 空腿周期小时 − 多腿名义 × 多腿费率 ÷ 多腿周期小时）÷ 两腿总名义 × 8,760。各腿按各自周期换算；费率或周期缺失时显示“—”，不按零费率计算。</p>

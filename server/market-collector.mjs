@@ -12,6 +12,8 @@ import { fetchIntradaySnapshot, OIL_CANDLE_ACTION, OIL_CANDLE_REFRESH_MS } from 
 import oilIntradayArchive from '../public/oil/data/binance-15m.json' with { type: 'json' };
 import { createGoldOilReader } from '../lib/gold-oil-service.ts';
 import { GOLD_OIL_QUOTE_MS, GOLD_OIL_HISTORY_MS, GOLD_OIL_FUNDING_MS } from '../lib/gold-oil.ts';
+import { exchangeFundingAction, HISTORY_REFRESH_MS } from '../lib/exchange-funding-history.ts';
+import { createExchangeFundingReader } from '../lib/exchange-funding-service.ts';
 
 export function seedMarketDatabase(store) {
   store.write('hynix', 'history', getMarketSnapshot(), { seed: true });
@@ -24,6 +26,7 @@ export function seedMarketDatabase(store) {
 
 export function marketJobs({ oilIntervalMs = 30_000 } = {}) {
   const readExchange = createExchangeReader();
+  const readFundingHistory = createExchangeFundingReader();
   const goldOil = createGoldOilReader();
   const fetchMarket = async () => marketFromExchangeQuote(await readExchange('binance', 'oil'));
   return [
@@ -44,6 +47,7 @@ export function marketJobs({ oilIntervalMs = 30_000 } = {}) {
     { id: 'hynix', action: 'funding', intervalMs: 300_000, load: previous => fetchHynixFundingSnapshot(previous ?? hynixFundingArchive, { signal: AbortSignal.timeout(12_000) }) },
     { id: 'oil', action: 'funding', intervalMs: 300_000, load: previous => fetchFundingSnapshot(previous ?? oilFundingArchive) },
     ...['oil', 'hynix'].flatMap(id => comparisonExchanges(id).map(exchange => ({ id, action: exchangeAction(exchange), intervalMs: EXCHANGE_REFRESH_MS, load: () => readExchange(exchange, id) }))),
+    ...comparisonExchanges('oil').map(exchange => ({ id: 'oil', action: exchangeFundingAction(exchange), intervalMs: HISTORY_REFRESH_MS, load: previous => readFundingHistory(exchange, previous) })),
     { id: 'oil', action: OIL_CANDLE_ACTION, intervalMs: OIL_CANDLE_REFRESH_MS, load: previous => fetchIntradaySnapshot(previous ?? oilIntradayArchive) },
   ];
 }

@@ -190,7 +190,7 @@ test('new exchange snapshots survive restart and upstream failure; all APIs and 
     }
     assert.equal(initial.oil.exchanges.lighter.status, 'snapshot');
     assert.deepEqual(services.market.status(), before);
-    const jobs = marketJobs().filter(job => job.action.startsWith('exchanges/'));
+    const jobs = marketJobs().filter(job => job.action.startsWith('exchanges/') && job.action.endsWith('/quote'));
     assert.equal(jobs.length, 9); assert.ok(jobs.every(job => job.intervalMs === 15000));
     assert.equal(jobs.filter(job => job.id === 'hynix').length, 2);
   } finally {

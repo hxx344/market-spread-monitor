@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { DatabaseSync } from "node:sqlite";
+import { datasetKeys, storageKey } from '../server/market-store.mjs';
 
 const directory = await mkdtemp(join(tmpdir(), "market-spread-linux-smoke-"));
 const probe = createServer();
@@ -92,8 +93,8 @@ try {
   };
   let collected = inspect();
   for (let attempt = 0; attempt < 90 && collected.datasets.some(dataset => !dataset.attempt_ms); attempt++) { await delay(500); collected = inspect(); }
-  assert.equal(collected.datasets.length, 19);
-  assert.ok(collected.datasets.every(dataset => dataset.attempt_ms), "All nineteen datasets collect in the background");
+  assert.deepEqual(collected.datasets.map(dataset => dataset.key).sort(), datasetKeys.map(storageKey).sort());
+  assert.ok(collected.datasets.every(dataset => dataset.attempt_ms), "All registered datasets collect in the background");
   for (const exchange of ['lighter', 'variational', 'okx', 'bitget']) {
     assert.ok(collected.datasets.some(dataset => dataset.key === `oil/exchanges/${exchange}/quote`), `${exchange} collects without a browser`);
     assert.ok(!collected.datasets.some(dataset => dataset.key === `hynix/exchanges/${exchange}/quote`), `${exchange} is oil-only`);

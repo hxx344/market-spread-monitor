@@ -18,8 +18,10 @@ import { openPerpetualPaperStore } from './perpetual-paper-store.mjs';
 import { openMonitorControlStore, attachMonitorControl } from './monitor-control.mjs';
 import { GOLD_OIL_QUOTE_MS, GOLD_OIL_HISTORY_MS, GOLD_OIL_FUNDING_MS } from '../lib/gold-oil.ts';
 import { goldOilAlertDefaults, validateGoldOilAlerts, goldOilAlertDefinition, confirmGoldOilTriggers } from './gold-oil/alerts.mjs';
+import { exchangeFundingAction, fundingExchangeFromAction } from '../lib/exchange-funding-history.ts';
 
 const exchangeActions = market => Object.fromEntries(comparisonExchanges(market).map(exchange => [exchangeAction(exchange), ["GET"]]));
+const exchangeFundingActions = Object.fromEntries(comparisonExchanges('oil').map(exchange => [exchangeFundingAction(exchange), ['GET']]));
 
 /** Runtime adapters own their schedule, storage and API. They share one HTTP server. */
 export async function createMonitorServices(directory, { externallyLocked = false, env = process.env, notificationOptions, hynixOptions, oilOptions, goldOilOptions, marketOptions, perpetualOptions } = {}) {
@@ -111,7 +113,7 @@ export async function createMonitorServices(directory, { externallyLocked = fals
         async handle(action, method, input) {
           if (action === "status" && method === "GET") return { ...oil.status(), available: true, monitorId: "oil" };
           if (action === OIL_CANDLE_ACTION && method === "GET") return read("oil", action);
-          if ((["quote", "history", "funding"].includes(action) || exchangeFromAction(action)) && method === "GET") return read("oil", action);
+          if ((["quote", "history", "funding"].includes(action) || exchangeFromAction(action) || fundingExchangeFromAction(action)) && method === "GET") return read("oil", action);
           if (action === "config" && method === "GET") return oil.configuration();
           if (action === "events" && method === "GET") return { events: oil.data.events };
           if (action === "config" && method === "PUT") {
@@ -120,7 +122,7 @@ export async function createMonitorServices(directory, { externallyLocked = fals
           }
           if (action === "test-notification" && method === "POST") { await notifications.test(); return { ok: true }; }
         },
-        actions: { quote: ["GET"], history: ["GET"], funding: ["GET"], [OIL_CANDLE_ACTION]: ["GET"], ...exchangeActions('oil'), status: ["GET"], config: ["GET", "PUT"], events: ["GET"], "test-notification": ["POST"] },
+        actions: { quote: ["GET"], history: ["GET"], funding: ["GET"], [OIL_CANDLE_ACTION]: ["GET"], ...exchangeActions('oil'), ...exchangeFundingActions, status: ["GET"], config: ["GET", "PUT"], events: ["GET"], "test-notification": ["POST"] },
       }],
     ]);
     services.notifications = notifications;
