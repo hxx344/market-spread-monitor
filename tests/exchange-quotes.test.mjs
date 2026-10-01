@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
-import { calculateExchangeSpread, validateExchangeQuote, hynixExchangeQuote, externalQuoteStale } from '../lib/exchange-quotes.ts';
+import { calculateExchangeSpread, validateExchangeQuote, hynixExchangeQuote, externalQuoteStale, comparisonExchanges, displayComparisonExchanges, exchangeDefinition } from '../lib/exchange-quotes.ts';
 import { parseBybitQuote, parseBinanceQuote, createExchangeReader } from '../lib/exchange-service.ts';
 import { openMarketStore } from '../server/market-store.mjs';
 import { createMarketCollector, marketJobs } from '../server/market-collector.mjs';
@@ -25,8 +25,47 @@ function fixtures(now = NOW) {
 }
 function quote(exchange, market, now = NOW) {
   const f = fixtures(now);
-  return exchange === 'bybit' ? parseBybitQuote(market, f.bybitInstruments, f.bybitTickers, now) : parseBinanceQuote(market, f.binanceInstruments, f.binanceTickers, f.binanceFunding, now);
+  if (exchange === 'bybit') return parseBybitQuote(market, f.bybitInstruments, f.bybitTickers, now);
+  const base = parseBinanceQuote(market, f.binanceInstruments, f.binanceTickers, f.binanceFunding, now);
+  if (exchange === 'binance') return base;
+  const definition = exchangeDefinition(exchange, market);
+  return validateExchangeQuote({ ...base, exchange, currency: definition.currency, fundingPriceBasis: definition.fundingPriceBasis,
+    left: { ...base.left, symbol: definition.left }, right: { ...base.right, symbol: definition.right },
+  }, exchange, market);
 }
+
+test('oil expands to seven exchanges with distinct symbols and currencies; Hynix retains its original scope', () => {
+  assert.deepEqual(comparisonExchanges('oil'), ['hyperliquid', 'bybit', 'binance', 'lighter', 'variational', 'okx', 'bitget']);
+  assert.deepEqual(comparisonExchanges('hynix'), ['bybit', 'binance']);
+  assert.deepEqual(displayComparisonExchanges('hynix'), ['hyperliquid', 'bybit', 'binance']);
+  for (const exchange of ['lighter', 'variational', 'okx', 'bitget']) {
+    const value = quote(exchange, 'oil');
+    assert.equal(calculateExchangeSpread(value).premium, 4);
+    assert.throws(() => validateExchangeQuote(value, exchange, 'hynix'), /Unsupported/);
+    assert.throws(() => validateExchangeQuote({ ...value, left: { ...value.left, symbol: 'BTC' } }, exchange, 'oil'));
+    const wrongCurrency = value.currency === 'USDC' ? 'USDT' : 'USDC';
+    assert.throws(() => validateExchangeQuote({ ...value, currency: wrongCurrency }, exchange, 'oil'));
+  }
+});
+
+test('Lighter preserves independent index funding notional and explicitly estimated settlement time', () => {
+  const value = quote('lighter', 'oil');
+  value.left.fundingPrice = 110; value.right.fundingPrice = 90;
+  value.left.nextFundingEstimated = true; value.right.nextFundingEstimated = true;
+  const validated = validateExchangeQuote(value, 'lighter', 'oil');
+  assert.equal(validated.left.fundingPrice, 110);
+  assert.equal(validated.left.nextFundingEstimated, true);
+  assert.equal(calculateExchangeSpread(validated).shortAnnualized, (110 * 0.0004 / 4 - 90 * 0.0008 / 4) / 200 * 8760);
+  assert.throws(() => validateExchangeQuote({ ...value, fundingPriceBasis: 'mark' }, 'lighter', 'oil'));
+  assert.throws(() => validateExchangeQuote({ ...value, left: { ...value.left, fundingPrice: null } }, 'lighter', 'oil'));
+});
+
+test('OKX funding uses its documented slower refresh while mark prices keep the normal freshness deadline', () => {
+  const value = { ...quote('okx', 'oil'), fundingFetchedAt: new Date(NOW - 90_000).toISOString() };
+  assert.equal(externalQuoteStale(value, NOW), false);
+  assert.equal(externalQuoteStale(value, NOW + 31_000), true);
+  assert.equal(externalQuoteStale({ ...value, fundingFetchedAt: new Date(NOW).toISOString() }, NOW + 45_001), true);
+});
 
 test('fixed quantity spreads annualize each leg separately; mark notional and 10:1 Hynix ratio are respected', () => {
   const hynix = calculateExchangeSpread(quote('binance', 'hynix'));
@@ -119,19 +158,23 @@ test('new exchange snapshots survive restart and upstream failure; all APIs and 
   let store, services, server;
   try {
     const now = Date.now(); store = await openMarketStore(join(directory, 'market.sqlite'));
-    for (const id of ['oil', 'hynix']) for (const exchange of ['bybit', 'binance']) store.write(id, `exchanges/${exchange}/quote`, quote(exchange, id, now));
+    for (const id of ['oil', 'hynix']) for (const exchange of comparisonExchanges(id).filter(exchange => exchange !== 'hyperliquid')) store.write(id, `exchanges/${exchange}/quote`, quote(exchange, id, now));
     const collector = createMarketCollector(store, { jobs: [] });
     await collector.collect({ id: 'hynix', action: 'exchanges/bybit/quote', load() { throw Error('offline'); } });
     const snapshot = store.read('hynix', 'exchanges/bybit/quote');
     assert.equal(snapshot.status, 'snapshot'); assert.equal(snapshot.fetchedAt, new Date(now).toISOString());
     assert.equal(externalQuoteStale(snapshot, now), true);
+    await collector.collect({ id: 'oil', action: 'exchanges/lighter/quote', load() { throw Error('offline'); } });
+    const retained = store.read('oil', 'exchanges/lighter/quote');
+    assert.equal(retained.status, 'snapshot'); assert.equal(retained.fetchedAt, new Date(now).toISOString());
+    assert.equal(retained.left.price, 104);
     await collector.stop(); store.close(); store = null;
     services = await createMonitorServices(directory, { env: {}, marketOptions: { jobs: [] } });
     server = createServer(createHandler({ services, username: 'admin', password: 'exchange-test-password', nextHandler(_req, res) { res.writeHead(404).end(); } }));
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const base = `http://127.0.0.1:${server.address().port}`, headers = { Authorization: `Basic ${Buffer.from('admin:exchange-test-password').toString('base64')}` };
     const before = services.market.status();
-    for (const id of ['oil', 'hynix']) for (const exchange of ['bybit', 'binance']) {
+    for (const id of ['oil', 'hynix']) for (const exchange of comparisonExchanges(id).filter(exchange => exchange !== 'hyperliquid')) {
       const url = `${base}/api/monitors/${id}/exchanges/${exchange}/quote`;
       assert.equal((await fetch(url)).status, 401);
       const response = await fetch(url, { headers }); assert.equal(response.status, 200);
@@ -140,9 +183,16 @@ test('new exchange snapshots survive restart and upstream failure; all APIs and 
     }
     const initial = await readInitialMarket(services);
     assert.equal(initial.hynix.exchanges.bybit.status, 'snapshot'); assert.equal(initial.oil.exchanges.binance.left.price, 104);
+    for (const exchange of ['lighter', 'variational', 'okx', 'bitget']) {
+      assert.equal(initial.oil.exchanges[exchange].left.price, 104);
+      assert.equal(initial.hynix.exchanges[exchange], undefined);
+      assert.equal((await fetch(`${base}/api/monitors/hynix/exchanges/${exchange}/quote`, { headers })).status, 404);
+    }
+    assert.equal(initial.oil.exchanges.lighter.status, 'snapshot');
     assert.deepEqual(services.market.status(), before);
     const jobs = marketJobs().filter(job => job.action.startsWith('exchanges/'));
-    assert.equal(jobs.length, 5); assert.ok(jobs.every(job => job.intervalMs === 15000));
+    assert.equal(jobs.length, 9); assert.ok(jobs.every(job => job.intervalMs === 15000));
+    assert.equal(jobs.filter(job => job.id === 'hynix').length, 2);
   } finally {
     if (server) await new Promise(resolve => server.close(resolve));
     if (services) { await Promise.all([...services.values()].map(service => service.stop())); await services.market.stop(); await services.notifications.stop(); }

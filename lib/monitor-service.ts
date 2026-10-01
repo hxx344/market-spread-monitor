@@ -3,7 +3,7 @@ import { loadQuote } from "./quote-service.ts";
 import { loadMarket } from "./market-service.ts";
 import { loadHynixFunding } from "./hynix-funding-service.ts";
 import { loadOilMarket, loadOilDaily, loadOilFunding } from './oil-market-service.ts';
-import { exchangeFromAction, type SpreadMarket } from "./exchange-quotes.ts";
+import { exchangeFromAction, supportsExchange, type SpreadMarket } from "./exchange-quotes.ts";
 import { readExchangeQuote } from "./exchange-service.ts";
 import { loadOilIntraday } from "./oil-intraday-service.ts";
 import { OIL_CANDLE_ACTION } from "../modules/oil/intraday.mjs";
@@ -34,7 +34,7 @@ export function createDataReader(adapters = dataAdapters, clock = Date.now, exch
   const pending = new Map<string, Promise<unknown>>();
   return async function read(id: string, action: string) {
     const exchange = exchangeFromAction(action);
-    if (exchange && id !== 'oil' && id !== 'hynix') throw new Error('Unsupported monitor capability');
+    if (exchange && !supportsExchange(id, exchange)) throw new Error('Unsupported monitor capability');
     if (!getMonitor(id) || !Object.hasOwn(adapters, id) || (!["quote", "history", "funding", OIL_CANDLE_ACTION].includes(action) && !exchange)) throw new Error("Unknown monitor action");
     const loader = exchange ? () => exchangeReader(exchange, id as SpreadMarket) : adapters[id][action as keyof DataAdapter];
     if (!loader) throw new Error("Unsupported monitor capability");

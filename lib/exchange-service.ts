@@ -1,5 +1,7 @@
-import { exchangeContracts, validateExchangeQuote, oilExchangeQuote, validateComparisonQuote, type Exchange, type ExchangeLeg, type ExchangeQuote, type ExternalExchange, type SpreadMarket } from "./exchange-quotes.ts";
+import { exchangeContracts, validateExchangeQuote, oilExchangeQuote, validateComparisonQuote, supportsExchange, type Exchange, type ExchangeLeg, type ExchangeQuote, type ExternalExchange, type SpreadMarket } from "./exchange-quotes.ts";
 import { fetchMarket as fetchHyperliquidOil } from '../modules/oil/hyperliquid.mjs';
+import { createOilCexReader } from './oil-cex.ts';
+import { createOilDexReader } from './oil-dex.ts';
 
 type JsonObject = Record<string, unknown>;
 const obj = (value: unknown): JsonObject => { if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid exchange response"); return value as JsonObject; };
@@ -79,8 +81,13 @@ export function createExchangeReader({ fetcher = fetch, clock = Date.now } = {})
     } while (cursor);
     return items;
   }
+  const readOilCex = createOilCexReader({ request, shared, clock });
+  const readOilDex = createOilDexReader({ request, shared, clock });
   return async (exchange: Exchange, monitorId: SpreadMarket): Promise<ExchangeQuote> => {
     if (!Object.hasOwn(exchangeContracts, monitorId)) throw new Error("Unknown spread market");
+    if (!supportsExchange(monitorId, exchange)) throw new Error('Unsupported exchange comparison market');
+    if (exchange === 'okx' || exchange === 'bitget') return readOilCex(exchange);
+    if (exchange === 'lighter' || exchange === 'variational') return readOilDex(exchange);
     if (exchange === 'hyperliquid') {
       if (monitorId !== 'oil') throw new Error('Unsupported Hyperliquid comparison market');
       return validateComparisonQuote(await shared('hyperliquid/oil', 1000, async () => oilExchangeQuote(await fetchHyperliquidOil({ fetcher }))), exchange, monitorId);

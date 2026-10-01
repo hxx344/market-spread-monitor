@@ -5,6 +5,16 @@ import { createHandler } from "../server/http.mjs";
 import { monitors } from "../lib/monitors.ts";
 import { createDataReader } from "../lib/monitor-service.ts";
 
+test('new oil comparisons cannot dispatch through Hynix preview routes', async () => {
+  const calls = [];
+  const read = createDataReader({ oil: { quote: async () => ({}) }, hynix: { quote: async () => ({}) } }, Date.now, async (exchange, id) => { calls.push([exchange, id]); return { exchange, id }; });
+  for (const exchange of ['lighter', 'variational', 'okx', 'bitget']) {
+    assert.deepEqual(await read('oil', `exchanges/${exchange}/quote`), { exchange, id: 'oil' });
+    await assert.rejects(read('hynix', `exchanges/${exchange}/quote`), /Unsupported/);
+  }
+  assert.equal(calls.length, 4);
+});
+
 test("registered modules isolate cached requests and retry failed live quotes", async () => {
   let calls = 0, now = 100, fail = false;
   const read = createDataReader({ oil: { quote: async () => { calls++; if (fail) throw Error("offline"); return { brent: 80 }; }, history: async () => ({ status: "snapshot", fetchedAt: "original" }) }, hynix: { quote: async () => ({ premium: 2 }), history: async () => ({}) } }, () => now);

@@ -7,7 +7,7 @@ import { openNotificationStore } from "./notification-store.mjs";
 import { createNotificationService } from "./notification-service.mjs";
 import { openMarketStore } from "./market-store.mjs";
 import { createMarketCollector, marketJobs, seedMarketDatabase } from "./market-collector.mjs";
-import { externalExchanges, exchangeAction, exchangeFromAction, EXCHANGE_REFRESH_MS } from "../lib/exchange-quotes.ts";
+import { comparisonExchanges, exchangeAction, exchangeFromAction, EXCHANGE_REFRESH_MS } from "../lib/exchange-quotes.ts";
 import { OIL_CANDLE_ACTION, OIL_CANDLE_REFRESH_MS } from "../modules/oil/intraday.mjs";
 import { openPerpetualStore } from './perpetual-store.mjs';
 import { createPerpetualService } from './perpetual-service.mjs';
@@ -19,7 +19,7 @@ import { openMonitorControlStore, attachMonitorControl } from './monitor-control
 import { GOLD_OIL_QUOTE_MS, GOLD_OIL_HISTORY_MS, GOLD_OIL_FUNDING_MS } from '../lib/gold-oil.ts';
 import { goldOilAlertDefaults, validateGoldOilAlerts, goldOilAlertDefinition, confirmGoldOilTriggers } from './gold-oil/alerts.mjs';
 
-const exchangeActions = Object.fromEntries(externalExchanges.map(exchange => [exchangeAction(exchange), ["GET"]]));
+const exchangeActions = market => Object.fromEntries(comparisonExchanges(market).map(exchange => [exchangeAction(exchange), ["GET"]]));
 
 /** Runtime adapters own their schedule, storage and API. They share one HTTP server. */
 export async function createMonitorServices(directory, { externallyLocked = false, env = process.env, notificationOptions, hynixOptions, oilOptions, goldOilOptions, marketOptions, perpetualOptions } = {}) {
@@ -104,7 +104,7 @@ export async function createMonitorServices(directory, { externallyLocked = fals
           if (action === "alerts" && method === "PUT") return hynix.update(input);
           if (action === "alerts/test" && method === "POST") return hynix.test();
         },
-        actions: { quote: ["GET"], history: ["GET"], funding: ["GET"], ...exchangeActions, alerts: ["GET", "PUT"], "alerts/test": ["POST"] },
+        actions: { quote: ["GET"], history: ["GET"], funding: ["GET"], ...exchangeActions('hynix'), alerts: ["GET", "PUT"], "alerts/test": ["POST"] },
       }],
       ["oil", {
         start() { oilRunning = true; oil.start(); }, healthy: () => !oil.storageError, async stop() { oilRunning = false; await oil.stop(); },
@@ -120,7 +120,7 @@ export async function createMonitorServices(directory, { externallyLocked = fals
           }
           if (action === "test-notification" && method === "POST") { await notifications.test(); return { ok: true }; }
         },
-        actions: { quote: ["GET"], history: ["GET"], funding: ["GET"], [OIL_CANDLE_ACTION]: ["GET"], ...exchangeActions, 'exchanges/hyperliquid/quote': ['GET'], status: ["GET"], config: ["GET", "PUT"], events: ["GET"], "test-notification": ["POST"] },
+        actions: { quote: ["GET"], history: ["GET"], funding: ["GET"], [OIL_CANDLE_ACTION]: ["GET"], ...exchangeActions('oil'), status: ["GET"], config: ["GET", "PUT"], events: ["GET"], "test-notification": ["POST"] },
       }],
     ]);
     services.notifications = notifications;

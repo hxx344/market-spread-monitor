@@ -92,8 +92,12 @@ try {
   };
   let collected = inspect();
   for (let attempt = 0; attempt < 90 && collected.datasets.some(dataset => !dataset.attempt_ms); attempt++) { await delay(500); collected = inspect(); }
-  assert.equal(collected.datasets.length, 15);
-  assert.ok(collected.datasets.every(dataset => dataset.attempt_ms), "All fifteen datasets collect in the background");
+  assert.equal(collected.datasets.length, 19);
+  assert.ok(collected.datasets.every(dataset => dataset.attempt_ms), "All nineteen datasets collect in the background");
+  for (const exchange of ['lighter', 'variational', 'okx', 'bitget']) {
+    assert.ok(collected.datasets.some(dataset => dataset.key === `oil/exchanges/${exchange}/quote`), `${exchange} collects without a browser`);
+    assert.ok(!collected.datasets.some(dataset => dataset.key === `hynix/exchanges/${exchange}/quote`), `${exchange} is oil-only`);
+  }
   const oilStatus = await fetch(`${base}/api/monitors/oil/status`, { headers }).then(r=>r.json());
   assert.ok(oilStatus.lastAttemptAt, "Oil monitor runs independently of page visits");
   // A live SSE response must not trap server.close() during shutdown.
