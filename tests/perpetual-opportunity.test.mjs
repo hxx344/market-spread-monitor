@@ -8,6 +8,16 @@ const row = (long = {}, short = {}, extra = {}) => ({ base: "BTC", long: quote("
 const budget = { takerOverrides: {}, slippagePercent: 0.1 };
 const estimate = (value = row(), input = {}, time = now) => estimatePerpetualHoldingScenario(value, budget, { holdingHours: 8, exitSpreadPercent: 0.5, ...input }, time);
 
+test("funding discovery's 24-hour flat-spread scenario does not count a negative entry spread as a loss", () => {
+  const value = row({ fundingRate: 0, fundingIntervalHours: 1 }, { fundingRate: 0.0006, fundingIntervalHours: 8 }, { spreadPercent: -2 });
+  const result = estimate(value, { holdingHours: 24, exitSpreadPercent: value.spreadPercent });
+  assert.equal(result.long.settlements, 24);
+  assert.equal(result.short.settlements, 3);
+  assert.equal(result.convergencePercent, 0);
+  assert.ok(Math.abs(result.fundingPercent - 0.18) < 1e-10);
+  assert.ok(Math.abs(result.estimatedNetPercent + 0.12) < 1e-10, "Positive carry remains a loss after round-trip costs");
+});
+
 test("holding scenarios count actual settlement schedules separately and combine correctly signed cashflows", () => {
   const result = estimate(row({ fundingRate: 0.001, fundingIntervalHours: 4, nextFundingAt: now + hour }, { fundingRate: 0.002, fundingIntervalHours: 8, nextFundingAt: now + 7 * hour }));
   assert.equal(result.long.settlements, 2); assert.equal(result.short.settlements, 1);

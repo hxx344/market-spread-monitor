@@ -9,10 +9,12 @@ export interface PerpetualFilters {
   priceMode: PerpetualPriceMode;
   crossCurrency: boolean;
   minSpreadPercent: number;
+  /** Minimum positive short-minus-long funding carry, in percentage points per eight hours. */
+  minFundingSpreadPercent?: number;
   favoritesOnly: boolean;
   favorites: string[];
-  /** The threshold uses the selected ranking metric. Omitted means gross. */
-  sortBy?: "gross" | "net";
+  /** Gross/net use minSpreadPercent; funding uses its independent eight-hour threshold. */
+  sortBy?: "gross" | "net" | "funding";
   favoritePairs?: string[];
   blockedPairs?: string[];
 }
@@ -66,9 +68,10 @@ export function quoteIsFresh(quote: PerpetualQuote, mode: PerpetualPriceMode, no
 }
 
 export function normalizedFunding8h(quote: PerpetualQuote, now?: number): number | null {
-  if (quote.fundingRate === null || !Number.isFinite(quote.fundingRate) || !positive(quote.fundingIntervalHours)) return null;
-  if (now !== undefined && (!quote.fundingAt || now - quote.fundingAt > 300_000 || quote.fundingAt > now + 5_000)) return null;
-  return quote.fundingRate * 8 / quote.fundingIntervalHours;
+  if (quote.fundingRate === null || !Number.isFinite(quote.fundingRate) || !positive(quote.fundingIntervalHours) || quote.fundingIntervalHours > 168) return null;
+  if (now !== undefined && (!Number.isFinite(now) || typeof quote.fundingAt !== "number" || !Number.isFinite(quote.fundingAt) || quote.fundingAt <= 0 || now - quote.fundingAt > 300_000 || quote.fundingAt > now + 5_000)) return null;
+  const normalized = quote.fundingRate * 8 / quote.fundingIntervalHours;
+  return Number.isFinite(normalized) ? normalized : null;
 }
 
 export function quotePrice(quote: PerpetualQuote, mode: PerpetualPriceMode, side: "buy" | "sell"): number | null {
@@ -104,8 +107,9 @@ function rankingContext(snapshot: PerpetualSnapshot, filters: PerpetualFilters, 
   const blockedPairs = new Set(filters.blockedPairs);
   const search = filters.search.trim().toUpperCase();
   const netSort = filters.sortBy === "net";
+  const fundingSort = filters.sortBy === "funding";
   const compare = (a: PerpetualSpread, b: PerpetualSpread) =>
-    (netSort ? b.netSpreadPercent! - a.netSpreadPercent! : b.spreadPercent - a.spreadPercent)
+    (fundingSort ? b.fundingSpread8h! - a.fundingSpread8h! : netSort ? b.netSpreadPercent! - a.netSpreadPercent! : b.spreadPercent - a.spreadPercent)
     || compareText(a.base, b.base) || compareLegs(a.long, a.short, b.long, b.short);
   return { compare, collect(base: string, source: Iterable<PerpetualQuote>, bestPerBase: boolean): PerpetualSpread[] {
     if (snapshot.status === "unavailable" || (search && !base.includes(search))) return [];
@@ -143,15 +147,17 @@ function rankingContext(snapshot: PerpetualSnapshot, filters: PerpetualFilters, 
         const roundTripFeePercent = longLeg.fee === null || shortLeg.fee === null ? null : 2 * (longLeg.fee + shortLeg.fee);
         const netUnavailableReason = filters.priceMode === "mark" ? "mark" : roundTripFeePercent === null ? "fees" : !validFeePercent(budget.slippagePercent) ? "budget" : null;
         const netSpreadPercent = netUnavailableReason === null ? spreadPercent - roundTripFeePercent! - budget.slippagePercent : null;
-        const metric = netSort ? netSpreadPercent : spreadPercent;
-        if (metric === null || metric < filters.minSpreadPercent) continue;
+        const longFunding = longLeg.funding, shortFunding = shortLeg.funding;
+        const fundingSpread8h = longFunding === null || shortFunding === null ? null : shortFunding - longFunding;
+        const metric = fundingSort ? fundingSpread8h === null ? null : fundingSpread8h * 100 : netSort ? netSpreadPercent : spreadPercent;
+        if (metric === null) continue;
+        if (fundingSort ? !Number.isFinite(metric) || metric <= 0 || metric < (filters.minFundingSpreadPercent ?? 0) : metric < filters.minSpreadPercent) continue;
         if (blockedPairs.size || (filters.favoritesOnly && !favorites.has(base))) {
           const key = perpetualSpreadKey({ base, long, short });
           if (blockedPairs.has(key) || (filters.favoritesOnly && !favorites.has(base) && !favoritePairs.has(key))) continue;
         }
         if (best && (metric < bestMetric || (metric === bestMetric && compareLegs(long, short, best.long, best.short) >= 0))) continue;
-        const longFunding = longLeg.funding, shortFunding = shortLeg.funding;
-        const row: PerpetualSpread = { base, long, short, buyPrice, sellPrice, spreadPercent, fundingSpread8h: longFunding === null || shortFunding === null ? null : shortFunding - longFunding,
+        const row: PerpetualSpread = { base, long, short, buyPrice, sellPrice, spreadPercent, fundingSpread8h,
           updatedAt: Math.min(longLeg.time, shortLeg.time), crossCurrency, roundTripFeePercent, netSpreadPercent, netUnavailableReason,
           fxAdjusted: crossCurrency, fxAt: crossCurrency ? Math.min(longLeg.fx!.at, shortLeg.fx!.at) : null,
           rawSpreadPercent: (sellPrice / buyPrice - 1) * 100, referenceBuyPrice, referenceSellPrice };
@@ -351,7 +357,7 @@ export function createPerpetualRankingSelector() {
 
 export const defaultPerpetualFilters: PerpetualFilters = {
   search: "", exchanges: null, pairMode: "all", priceMode: "book", crossCurrency: false,
-  minSpreadPercent: 0, favoritesOnly: false, favorites: [],
+  minSpreadPercent: 0, minFundingSpreadPercent: 0, favoritesOnly: false, favorites: [],
   sortBy: "gross", favoritePairs: [], blockedPairs: [],
 };
 
@@ -369,9 +375,10 @@ export function parsePerpetualPreferences(value: string | null): PerpetualFilter
       priceMode: parsed.priceMode === "mark" ? "mark" : "book",
       crossCurrency: parsed.crossCurrency === true,
       minSpreadPercent: typeof parsed.minSpreadPercent === "number" && Number.isFinite(parsed.minSpreadPercent) ? Math.min(1000, Math.max(-100, parsed.minSpreadPercent)) : 0,
+      minFundingSpreadPercent: typeof parsed.minFundingSpreadPercent === "number" && Number.isFinite(parsed.minFundingSpreadPercent) ? Math.min(1000, Math.max(0, parsed.minFundingSpreadPercent)) : 0,
       favoritesOnly: parsed.favoritesOnly === true,
       favorites: strings(parsed.favorites),
-      sortBy: parsed.sortBy === "net" ? "net" : "gross",
+      sortBy: parsed.sortBy === "funding" ? "funding" : parsed.sortBy === "net" ? "net" : "gross",
       favoritePairs: parsePairKeys(parsed.favoritePairs),
       blockedPairs: parsePairKeys(parsed.blockedPairs),
     };
