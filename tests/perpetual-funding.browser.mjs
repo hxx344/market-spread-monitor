@@ -6,7 +6,7 @@ async page => {
   const origin = 'http://127.0.0.1:3193', hour = 3_600_000, anchor = Date.UTC(2026, 9, 6);
   let now = anchor;
   const check = (condition, message) => { if (!condition) throw new Error(message); };
-  const errors = [], externalRequests = [], counts = new Map();
+  const errors = [], externalRequests = [], historyRequests = [], counts = new Map();
   const onPageError = error => errors.push(error.message);
   page.on('pageerror', onPageError);
   const bases = ['BTC', 'ETH', 'SOL', 'ADA'];
@@ -59,6 +59,20 @@ async page => {
       } });
       if (path.endsWith('/perpetual/quote')) return route.fulfill({ json: snapshot() });
       if (path.endsWith('/perpetual/stream')) return route.fulfill({ status: 503, body: 'fixture polling only' });
+      if (path.endsWith('/perpetual/funding-history')) {
+        const { pairs } = route.request().postDataJSON();
+        historyRequests.push(pairs);
+        const pending = historyRequests.length === 1;
+        const legs = Object.fromEntries(pairs.flatMap(pair => [pair.longKey, pair.shortKey]).map(key => {
+          const [exchange, symbol] = key.split(':'), isBtc = symbol === 'BTCUSDT';
+          const hours = isBtc ? [96, 88, 80, 72, 64, 56, 48, 40, 32, 24, 16, 8, 0] : [32, 24, 16, 8, 0];
+          return [key, { key, exchange, symbol, identity: `${key}:fixture`, status: pending ? 'pending' : 'ready', fetchedAt: pending ? null : anchor,
+            coverage: pending ? null : { from: anchor - 96 * hour, to: anchor }, error: '',
+            records: pending ? [] : hours.map(offset => ({ time: anchor - offset * hour, rate: !isBtc ? 0 : exchange === 'gate' ? .0002 : offset < 24 ? .0003 : .0001 })),
+          }];
+        }));
+        return route.fulfill({ json: { schemaVersion: 1, generatedAt: now, legs } });
+      }
       return route.fulfill({ status: 503, json: { error: 'Unavailable fixture detail' } });
     });
     const rankingRows = page.locator('.perp-table > tbody > tr:not(.perp-detail-row)');
@@ -87,6 +101,7 @@ async page => {
     check(await sort.inputValue() === 'gross', 'Initial ranking is gross spread');
     await checkDirection('BTC', 'Binance', 'Gate');
     check((await rowFor('BTC').innerText()).includes('+2.000%'), 'Default BTC direction has a positive gross spread');
+    check(historyRequests.length === 0, 'Spread ranking does not request settled funding history');
 
     await filters.click();
     await page.getByLabel('最低毛价差 / %', { exact: true }).fill('1.5');
@@ -99,7 +114,24 @@ async page => {
     const fundingText = await rowFor('BTC').innerText();
     check(fundingText.includes('−3.883%'), 'A negative gross spread remains eligible in the receiving-funding direction');
     check(fundingText.includes('+0.0600%'), 'Eight-hour funding spread uses each leg\'s actual period');
-    check(fundingText.includes('24h 资金费 +0.1800%') && fundingText.includes('24h 扣费后 −0.1200%'), '24h funding and cost-adjusted estimates assume unchanged spread');
+    check(fundingText.includes('未来 24h 资金费 +0.1800%') && fundingText.includes('未来 24h 扣费后 −0.1200%'), 'Future estimates are explicitly separated from settled history');
+    for (let attempt = 0; attempt < 100 && !historyRequests.length; attempt++) await tick(100);
+    check((await rowFor('BTC').locator('[data-history-hours="24"]').innerText()).includes('采集中'), 'Pending history is never displayed as zero');
+    await tick(3000);
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if ((await rowFor('BTC').locator('[data-history-hours="24"] dd').innerText()) === '+0.0300%') break;
+      await tick(100);
+    }
+    check(historyRequests[0].every(pair => pair.longKey.startsWith('gate:') && pair.shortKey.startsWith('binance:')), 'History requests preserve each funding opportunity direction');
+    check(await rowFor('BTC').locator('[data-history-hours="24"] dd').innerText() === '+0.0300%', 'Past 1 day sums settled short-minus-long funding in the displayed direction');
+    check(await rowFor('BTC').locator('[data-history-hours="72"] dd').innerText() === '−0.0300%', 'Past 3 days uses its own settled window rather than scaling 1 day or extrapolating current rates');
+    check(await rowFor('ETH').locator('[data-history-hours="24"] dd').innerText() === '0.0000%', 'Complete true-zero settlements display zero');
+    check(await rowFor('ETH').locator('[data-history-hours="72"] dd').innerText() === '—', 'Insufficient history stays missing rather than zero');
+    check((await rowFor('ETH').locator('[data-history-hours="72"]').innerText()).includes('历史不足'), 'History completeness is visible beside the missing value');
+    await rowFor('BTC').locator('.perp-funding-history summary').click();
+    const historicalEvidence = await rowFor('BTC').locator('.perp-funding-history').innerText();
+    check(historicalEvidence.includes('2026-10-06 08:00') && historicalEvidence.includes('多腿费率累计 +0.0600% · 3 次') && historicalEvidence.includes('空腿费率累计 +0.1500% · 9 次'), 'History exposes the common cutoff, leg totals and actual settlement counts');
+    await rowFor('BTC').locator('.perp-funding-history summary').click();
     const longSchedule = await rowFor('BTC').locator('.perp-long .perp-funding-schedule').innerText();
     const shortSchedule = await rowFor('BTC').locator('.perp-short .perp-funding-schedule').innerText();
     check(longSchedule.includes('+0.0200% / 8h') && longSchedule.includes('2026-10-06 10:00'), 'Funding row shows the long leg period and future settlement');
@@ -122,11 +154,11 @@ async page => {
     await waitBases([]);
     await favorites.click(); await waitBases(['BTC', 'ETH']);
 
+    // Next/React may defer the first lazy/Suspense commit until the browser clock advances.
+    await page.clock.resume();
     await rowFor('BTC').getByRole('button', { name: /^展开 BTC，/ }).click();
     await page.getByText('行情已暂停', { exact: true }).waitFor();
     const holdingHours = page.getByLabel(/^预计持有 \/ 小时/);
-    // Allow React's lazy/Suspense commit before freezing the evidence clock again.
-    await page.clock.resume();
     await holdingHours.waitFor();
     now = await page.evaluate(() => Date.now()) + 100;
     await page.clock.pauseAt(new Date(now));
@@ -147,6 +179,10 @@ async page => {
 
     await page.setViewportSize({ width: 390, height: 844 });
     check(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'Funding ranking has no whole-page overflow at 390px');
+    check(await rowFor('BTC').locator('[data-history-hours="24"] dd').innerText() === '+0.0300%', 'Mobile keeps both past windows visible');
+    await rowFor('BTC').locator('.perp-funding-history summary').click();
+    check(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'Expanded history has no whole-page overflow at 390px');
+    await rowFor('BTC').locator('.perp-funding-history summary').click();
     await checkDirection('BTC', 'Gate', 'Binance');
     await rowFor('BTC').getByRole('button', { name: /^展开 BTC，/ }).click();
     await page.getByRole('tab', { name: '各平台报价', exact: true }).click();
@@ -157,6 +193,10 @@ async page => {
 
     await page.setViewportSize({ width: 1280, height: 900 });
     await grossView.click(); await waitBases(['BTC']);
+    const historyBeforePause = historyRequests.length;
+    await tick(60000);
+    check(historyRequests.length === historyBeforePause, 'Leaving funding opportunities pauses history polling');
+    check(await page.locator('.perp-funding-history').count() === 0, 'Spread ranking does not reuse funding direction history');
     check(await sort.inputValue() === 'gross', 'Returning to spread ranking restores gross sort');
     await checkDirection('BTC', 'Binance', 'Gate');
     await filters.click();
@@ -166,7 +206,7 @@ async page => {
     check(await fundingView.getAttribute('aria-pressed') === 'true', 'Sort select and funding tab stay synchronized');
     check(errors.length === 0, `Unexpected page errors: ${errors.join('; ')}`);
     check(externalRequests.length === 0, `Unexpected external requests were blocked: ${externalRequests.join(', ')}`);
-    return { passed: true, checks: ['opposite funding direction', '8h normalization and order', '24h cost estimate', 'independent threshold', 'missing and stale funding excluded', 'directional favorites', 'future settlements and periods', 'gross restoration', '1280px desktop and 390px mobile'], requests: Object.fromEntries(counts) };
+    return { passed: true, checks: ['opposite funding direction', '8h normalization and order', '24h cost estimate', 'settled 1-day/3-day direction and distinct windows', 'true zero versus incomplete history', 'pending polling and inactive pause', 'leg settlement evidence', 'independent threshold', 'missing and stale funding excluded', 'directional favorites', 'future settlements and periods', 'gross restoration', '1280px desktop and 390px mobile'], requests: Object.fromEntries(counts) };
   } finally {
     page.off('pageerror', onPageError);
     await page.clock.resume();

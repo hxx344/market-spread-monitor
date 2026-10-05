@@ -1,22 +1,26 @@
 import { HISTORY_WINDOW_MS, type FundingHistoryRange, type SettledFundingRecord } from './exchange-funding-history.ts';
 
-export type CexFundingExchange = 'binance' | 'bybit' | 'okx' | 'bitget';
+export type CexFundingExchange = 'binance' | 'bybit' | 'okx' | 'bitget' | 'aster';
 type JsonObject = Record<string, unknown>;
 type ReaderOptions = {
   request: (url: string, init?: RequestInit) => Promise<unknown>;
   clock?: () => number;
+  /** Server-owned exact contracts from a validated market directory. Oil callers omit this. */
+  contracts?: Partial<Record<CexFundingExchange, readonly string[]>>;
+  bitgetProductType?: 'USDT-FUTURES' | 'USDC-FUTURES';
 };
-const PAGE_SIZES: Record<CexFundingExchange, number> = { binance: 1000, bybit: 200, okx: 400, bitget: 100 };
+const PAGE_SIZES: Record<CexFundingExchange, number> = { binance: 1000, bybit: 200, okx: 400, bitget: 100, aster: 1000 };
 const MAX_PAGES = 32;
 const symbols: Record<CexFundingExchange, readonly string[]> = {
   binance: ['BZUSDT', 'CLUSDT'],
   bybit: ['BZUSDT', 'CLUSDT'],
   okx: ['BZ-USDT-SWAP', 'CL-USDT-SWAP'],
   bitget: ['BZUSDT', 'CLUSDT'],
+  aster: [],
 };
 
-function validateContract(exchange: CexFundingExchange, symbol: string) {
-  if (!Object.hasOwn(symbols, exchange) || !symbols[exchange].includes(symbol)) throw new Error('Unsupported CEX oil funding contract');
+function validateContract(exchange: CexFundingExchange, symbol: string, contracts: ReaderOptions['contracts'] = symbols) {
+  if (!Object.hasOwn(PAGE_SIZES, exchange) || !contracts || !Object.hasOwn(contracts, exchange) || !contracts[exchange]?.includes(symbol)) throw new Error('Unsupported CEX oil funding contract');
 }
 function object(value: unknown): JsonObject {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid CEX funding response');
@@ -36,7 +40,7 @@ function timestamp(value: unknown): number {
   return time;
 }
 function rows(exchange: CexFundingExchange, input: unknown): unknown[] {
-  if (exchange === 'binance') {
+  if (exchange === 'binance' || exchange === 'aster') {
     if (!Array.isArray(input)) throw new Error('Binance funding history response failed');
     return input;
   }
@@ -55,12 +59,16 @@ function rows(exchange: CexFundingExchange, input: unknown): unknown[] {
 /** Rates are decimal amounts for the actual settlement, never hourly forecasts. */
 export function parseCexFundingHistory(exchange: CexFundingExchange, symbol: string, input: unknown, now = Date.now()): SettledFundingRecord[] {
   validateContract(exchange, symbol);
+  return parseFundingPage(exchange, symbol, input, now);
+}
+
+function parseFundingPage(exchange: CexFundingExchange, symbol: string, input: unknown, now: number): SettledFundingRecord[] {
   timestamp(now);
   const records = new Map<number, number>();
   for (const value of rows(exchange, input)) {
     const row = object(value), identity = exchange === 'okx' ? row.instId : row.symbol;
     if (identity !== undefined && identity !== symbol) throw new Error('CEX funding contract mismatch');
-    if (exchange === 'binance' && row.rateType !== undefined && row.rateType !== 'Regular') throw new Error('Unsupported Binance funding rate type');
+    if ((exchange === 'binance' || exchange === 'aster') && row.rateType !== undefined && row.rateType !== 'Regular') throw new Error('Unsupported funding rate type');
     if (exchange === 'okx' && row.instType !== undefined && row.instType !== 'SWAP') throw new Error('Invalid OKX funding instrument');
     const time = timestamp(exchange === 'bybit' ? row.fundingRateTimestamp : row.fundingTime);
     // OKX calls fundingRate predicted and realizedRate actual. A historical
@@ -75,20 +83,23 @@ export function parseCexFundingHistory(exchange: CexFundingExchange, symbol: str
 }
 
 /** Read the complete requested settlement interval; transport owns HTTP checks/timeouts. */
-export function createCexFundingHistoryReader({ request, clock = Date.now }: ReaderOptions) {
+export function createCexFundingHistoryReader({ request, clock = Date.now, contracts = symbols, bitgetProductType = 'USDT-FUTURES' }: ReaderOptions) {
   return async (exchange: CexFundingExchange, symbol: string, range?: FundingHistoryRange): Promise<SettledFundingRecord[]> => {
-    validateContract(exchange, symbol);
+    validateContract(exchange, symbol, contracts);
+    if (exchange === 'bitget' && !['USDT-FUTURES', 'USDC-FUTURES'].includes(bitgetProductType)) throw new Error('Invalid Bitget funding product type');
     const now = timestamp(clock());
     const from = timestamp(range?.from ?? now - HISTORY_WINDOW_MS), to = timestamp(range?.to ?? now);
     if (from > to || to > now) throw new Error('Invalid CEX funding history range');
     const pageSize = PAGE_SIZES[exchange], records = new Map<number, number>();
-    let cursor = exchange === 'binance' ? from : exchange === 'okx' ? to + 1 : to;
+    const forward = exchange === 'binance' || exchange === 'aster';
+    let cursor = forward ? from : exchange === 'okx' ? to + 1 : to;
     let previousOldest = Infinity;
     for (let page = 1; page <= MAX_PAGES; page++) {
       let url: URL;
-      if (exchange === 'binance') {
-        // Binance returns the earliest results from an inclusive startTime.
-        url = new URL('https://fapi.binance.com/fapi/v1/fundingRate');
+      if (forward) {
+        // Binance and Aster return the earliest results from an inclusive startTime.
+        // https://asterdex.github.io/aster-api-website/futures/market-data/#get-funding-rate-history
+        url = new URL(exchange === 'aster' ? 'https://fapi.asterdex.com/fapi/v1/fundingRate' : 'https://fapi.binance.com/fapi/v1/fundingRate');
         url.search = new URLSearchParams({ symbol, limit: String(pageSize), startTime: String(cursor), endTime: String(to) }).toString();
       } else if (exchange === 'bybit') {
         url = new URL('https://api.bybit.com/v5/market/funding/history');
@@ -101,12 +112,12 @@ export function createCexFundingHistoryReader({ request, clock = Date.now }: Rea
         // Bitget has no time cursor. Deduplication also handles page offsets
         // shifting when a new settlement appears during this read.
         url = new URL('https://api.bitget.com/api/v2/mix/market/history-fund-rate');
-        url.search = new URLSearchParams({ symbol, productType: 'USDT-FUTURES', pageSize: String(pageSize), pageNo: String(page) }).toString();
+        url.search = new URLSearchParams({ symbol, productType: bitgetProductType, pageSize: String(pageSize), pageNo: String(page) }).toString();
       }
       const response = await request(url.toString()), rawCount = rows(exchange, response).length;
       if (!rawCount) break;
       if (rawCount > pageSize) throw new Error('Invalid CEX funding history page size');
-      const settlements = parseCexFundingHistory(exchange, symbol, response, now);
+      const settlements = parseFundingPage(exchange, symbol, response, now);
       if (!settlements.length) throw new Error('CEX funding history pagination did not advance');
       const oldest = settlements[0].time, newest = settlements[settlements.length - 1].time;
       if (exchange !== 'bitget' && newest > to) throw new Error('Invalid CEX funding history page range');
@@ -114,7 +125,6 @@ export function createCexFundingHistoryReader({ request, clock = Date.now }: Rea
         if (records.has(time) && records.get(time) !== rate) throw new Error('Conflicting CEX funding settlements');
         records.set(time, rate);
       }
-      const forward = exchange === 'binance';
       if (forward ? newest < cursor : oldest >= previousOldest || (exchange === 'bybit' && oldest > cursor) || (exchange === 'okx' && oldest >= cursor)) {
         throw new Error('CEX funding history pagination did not advance');
       }

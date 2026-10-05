@@ -130,10 +130,16 @@
 .is-funding-mode .perp-funding>strong{display:block;color:#147d64;font-size:17px;margin-bottom:5px}
 .is-funding-mode .perp-funding>small.negative{color:#c64b55}
 .perp-view-tabs{flex-wrap:wrap}
+.perp-funding-history{margin-top:10px;padding-top:9px;border-top:1px solid #e0e7ef;color:#20334c;white-space:normal;min-width:0}
+.perp-funding-history dl{margin:0;display:grid;gap:7px}.perp-funding-history dl>div{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 7px;align-items:baseline}
+.perp-funding-history dt{font-size:10px;color:#66748a}.perp-funding-history dd{margin:0;font-size:12px;font-weight:600;white-space:nowrap}.perp-funding-history dl small{grid-column:1/-1;color:#9a6718;font-size:10px}
+.perp-funding-history-time{display:block;margin-top:8px;font-size:9px;line-height:1.6;color:#66748a}.perp-funding-history-time time{display:inline-block}
+.perp-funding-history details{margin-top:5px;font-size:10px;line-height:1.7;overflow-wrap:anywhere}.perp-funding-history summary{cursor:pointer;padding:5px 0;color:#356dc4}.perp-funding-history-evidence{display:flex;flex-direction:column;gap:3px;padding:6px 0}.perp-funding-history-evidence strong{font-size:10px;font-weight:600}.perp-funding-history-evidence small{color:#9a6718}.perp-funding-history details p{margin:6px 0 0;color:#66748a}
 @media(min-width:701px){.is-funding-mode .perp-table thead th:nth-child(5){width:12%}.is-funding-mode .perp-table thead th:nth-child(6){width:16%}.is-funding-mode .perp-funding{overflow-wrap:anywhere}}
 @media(max-width:700px){
   .perp-view-tabs{gap:8px 16px}.perp-view-tabs>button{font-size:14px}.perp-view-tabs>button>span{display:block;font-size:10px;margin:2px 0 0}
   .is-funding-mode .perp-table .perp-funding{grid-column:1/-1;grid-row:3;display:grid;grid-template-columns:1fr auto;gap:5px 10px;border-top:1px solid #e0e7ef;padding-top:12px}
   .is-funding-mode .perp-funding>strong{margin:0}.is-funding-mode .perp-funding>small{grid-column:1/-1;font-size:11px}
+  .is-funding-mode .perp-funding-history{grid-column:1/-1;margin-top:5px}.perp-funding-history dl{grid-template-columns:1fr 1fr;gap:16px}.perp-funding-history dt{font-size:11px}.perp-funding-history dd{font-size:13px}.perp-funding-history-time{font-size:10px}.perp-funding-history summary{min-height:36px;display:flex;align-items:center;font-size:11px}.perp-funding-history summary::before{content:"▸";margin-right:6px}.perp-funding-history details[open]>summary::before{content:"▾"}.perp-funding-history details{font-size:11px}
   .is-funding-mode .perp-table .perp-quality-cell{grid-row:4}.is-funding-mode .perp-table .perp-time{grid-row:5;grid-column:1/-1}
 }
