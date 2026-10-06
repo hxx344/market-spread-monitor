@@ -7,12 +7,14 @@ import { OIL_CANDLE_ACTION, validateIntradaySnapshot } from '../modules/oil/intr
 import { validateGoldOilQuote, validateGoldOilHistory } from '../lib/gold-oil.ts';
 import { validateGoldOilFunding } from '../lib/gold-oil-funding.ts';
 import { exchangeFundingAction, validateExchangeFundingHistory } from '../lib/exchange-funding-history.ts';
+import { OIL_HEDGE_PRICES_ACTION, validateOilHedgePrices } from '../lib/oil-hedge-prices.ts';
 
 const validators = { 'hynix/quote': validateHynixQuote, 'hynix/history': validateHynixHistory, 'hynix/funding': validateHynixFunding, 'oil/quote': validateOilQuote, 'oil/history': validateOilHistory, 'oil/funding': validateOilFunding };
 validators[`oil/${OIL_CANDLE_ACTION}`] = validateIntradaySnapshot;
 validators['cl-xau/quote'] = validateGoldOilQuote;
 validators['cl-xau/history'] = validateGoldOilHistory;
 validators['cl-xau/funding'] = validateGoldOilFunding;
+validators[`oil/${OIL_HEDGE_PRICES_ACTION}`] = validateOilHedgePrices;
 for (const id of ['oil', 'hynix']) for (const exchange of comparisonExchanges(id)) validators[`${id}/${exchangeAction(exchange)}`] = value => validateComparisonQuote(value, exchange, id);
 for (const exchange of comparisonExchanges('oil')) validators[`oil/${exchangeFundingAction(exchange)}`] = value => validateExchangeFundingHistory(value, exchange);
 export const datasetKeys = Object.keys(validators);
@@ -20,6 +22,16 @@ const timestamp = value => Date.parse(value.fetchedAt ?? value.metadata?.fetched
 const keyFor = (id, action) => { const key = `${id}/${action}`; if (!Object.hasOwn(validators, key)) throw new Error('Unknown market dataset'); return key; };
 // Source changes use a new namespace. Existing Hyperliquid snapshots and every old observation stay untouched.
 export const storageKey = key => ['oil/quote', 'oil/history', 'oil/funding', `oil/${OIL_CANDLE_ACTION}`].includes(key) ? key.replace('oil/', 'oil/binance/') : key;
+
+function hedgePriceObservations(value) {
+  const hours = new Map();
+  for (const leg of value.legs) for (const row of leg.rows) {
+    const hour = hours.get(row.time) ?? { time: row.time, legs: [] };
+    hour.legs.push({ exchange: leg.exchange, symbol: leg.symbol, price: row.price, fetchedAt: leg.fetchedAt });
+    hours.set(row.time, hour);
+  }
+  return [...hours.values()].sort((a, b) => a.time - b.time);
+}
 
 /** One durable source of truth. GETs never invoke a loader or write to this database. */
 export async function openMarketStore(filename, { clock = Date.now } = {}) {
@@ -55,7 +67,7 @@ export async function openMarketStore(filename, { clock = Date.now } = {}) {
           if (!Number.isFinite(sourceMs) || sourceMs > now + 60_000) throw new Error('Invalid future market timestamp');
           if (previous.payload && sourceMs < previous.source_ms) throw new Error('Refusing an older market dataset');
         } catch (cause) { throw Object.assign(new Error('Invalid collected market data', { cause }), { code: 'MARKET_DATA_INVALID' }); }
-        const rows = action === 'quote' || action.endsWith('/quote') ? [{ time: sourceMs, ...value }] : value.points ?? value.rows ?? value.data;
+        const rows = action === OIL_HEDGE_PRICES_ACTION ? hedgePriceObservations(value) : action === 'quote' || action.endsWith('/quote') ? [{ time: sourceMs, ...value }] : value.points ?? value.rows ?? value.data;
         db.exec('BEGIN IMMEDIATE');
         try {
           for (const row of rows) observation.run(persistedKey, row.time ?? Date.parse(row.date), JSON.stringify(row), sourceMs);

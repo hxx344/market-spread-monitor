@@ -1,6 +1,7 @@
 "use client";
 
 import { memo, useEffect, useId, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { ChevronDown, RefreshCw } from "lucide-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { calculateExchangeSpread, displayComparisonExchanges, exchangeContracts, exchangeDefinition, exchangeNames, externalQuoteStale, type Exchange, type ExchangeLeg, type ExchangeQuote, type ExternalQuoteSet, type SpreadMarket } from "../lib/exchange-quotes";
@@ -8,6 +9,8 @@ import { useExchangeQuotes } from "../hooks/use-exchange-quotes";
 import { summaryTimestamp } from "../lib/monitor-summary";
 import { startActivityPolling } from "../lib/polling";
 import ExchangeFundingHistoryPanel, { type FundingHistorySelection } from "./exchange-funding-history";
+
+const OilFundingHedge = dynamic(() => import("./oil-funding-hedge"), { ssr: false, loading: () => <p className="exchange-caption" role="status">正在载入四腿历史模拟…</p> });
 
 const signed = (value: number | null | undefined, digits = 2, suffix = "") => { if (value == null) return "—"; const rounded = Number(value.toFixed(digits)); return `${rounded > 0 ? "+" : rounded < 0 ? "−" : ""}${Math.abs(rounded).toFixed(digits)}${suffix}`; };
 const tone = (value: number | null | undefined) => value == null || value === 0 ? "" : value > 0 ? "positive" : "negative";
@@ -67,6 +70,7 @@ function ExchangeComparison({ monitorId, primary, initial, renderedAt, active = 
       <p>本区为当前费率预估，实际结算费率可能变化。下方历史图表及告警使用 {oil ? 'Binance' : 'Hyperliquid'}。</p>
       <div className="exchange-source-links"><a href="https://hyperliquid.gitbook.io/hyperliquid-docs/trading/funding" target="_blank" rel="noreferrer">Hyperliquid 规则 ↗</a><a href="https://www.bybit.com/en/help-center/article/Funding-fee-calculation" target="_blank" rel="noreferrer">Bybit 规则 ↗</a><a href="https://www.binance.com/en/support/faq/detail/360033525031" target="_blank" rel="noreferrer">Binance 规则 ↗</a>{oil && <><a href="https://docs.lighter.xyz/trading/funding" target="_blank" rel="noreferrer">Lighter 规则 ↗</a><a href="https://docs.variational.io/technical-documentation/api" target="_blank" rel="noreferrer">Variational 接口说明 ↗</a><a href="https://www.okx.com/docs-v5/en/#public-data-rest-api-get-funding-rate" target="_blank" rel="noreferrer">OKX 资金费接口 ↗</a><a href="https://www.bitget.com/docs/catalog/classic-contract-market/classic-contract-market" target="_blank" rel="noreferrer">Bitget 资金费接口 ↗</a></>}</div>
     </div></details>
+    {oil ? <OilFundingHedge active={active} now={now}/> : null}
   </section>;
 }
 
