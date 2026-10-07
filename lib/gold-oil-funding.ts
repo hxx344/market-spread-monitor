@@ -72,3 +72,11 @@ export function analyzeGoldOilFunding(history: GoldOilFundingHistory | null, sta
   const oilCount = events.filter(row => row.oil !== null).length;
   return { covered, points, events, shortCumulative: events.length ? sum : null, longCumulative: events.length ? -sum : null, shortAnnualized: annualized, longAnnualized: annualized === null ? null : -annualized, oilCount, ...(history?.oilType === 'cl' ? { clCount: oilCount } : {}), xauCount: events.filter(row => row.xau !== null).length };
 }
+
+/** Price candles can advance before the next funding poll. Analyze only the queried tail. */
+export function analyzeAvailableGoldOilFunding(history: GoldOilFundingHistory | null, start: number, selectedEnd: number) {
+  const end = Math.min(selectedEnd, history?.coverageEnd ?? selectedEnd);
+  // Keep the selected start: a missing prefix must not silently become a shorter return period.
+  const result = analyzeGoldOilFunding(history, start, end);
+  return { ...result, start, end, selectedCovered: result.covered && end === selectedEnd };
+}

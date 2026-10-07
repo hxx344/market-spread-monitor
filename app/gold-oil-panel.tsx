@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import Chart, { FundingChart } from './gold-oil-svg-chart';
 import { GOLD_OIL_STALE_MS, GOLD_OIL_INTERVAL_MS, GOLD_OIL_INSTRUMENTS, GOLD_OIL_EXCHANGES, goldOilVariantKey, goldOilUnits, goldOilChartPoints, type GoldOilType, type GoldOilExchange } from '../lib/gold-oil';
-import { currentGoldOilFunding, analyzeGoldOilFunding } from '../lib/gold-oil-funding';
+import { currentGoldOilFunding, analyzeAvailableGoldOilFunding } from '../lib/gold-oil-funding';
 import { goldOilStatistics, sampleGoldOilPoints, adjacentRatioChange } from '../lib/gold-oil-analysis';
 import { goldOilSummary, goldOilTrend, summaryTimestamp, type SummaryProps } from '../lib/monitor-summary';
 import type { InitialMarketData } from '../lib/initial-market';
@@ -18,6 +18,7 @@ const signed = (value: number | null | undefined) => value == null ? '—' : `${
 const time = (value: number | undefined) => value === undefined ? '—' : summaryTimestamp(new Date(value).toISOString());
 const extraStyles = `
 .gold-chart{height:340px;min-width:0}.gold-funding-chart{height:230px}
+.funding-history-period{font-size:12px;line-height:1.7;color:var(--muted)}
 .gold-svg-chart{height:100%;width:100%;position:relative}.gold-chart-svg{display:block;overflow:visible;touch-action:pan-y}.gold-chart-svg text{fill:var(--muted);font:11px Arial,sans-serif}.gold-chart-tooltip{position:absolute;top:4px;left:80px;max-width:calc(100% - 90px);padding:7px 10px;background:var(--surface,#fff);border:1px solid var(--line,#dce5e7);border-radius:6px;font-size:11px;line-height:1.7;pointer-events:none}.gold-chart-tooltip span{display:block}
 .gold-cursor{display:block;width:100%;accent-color:var(--accent);margin:12px 0}
 .gold-cursor-reading{display:block;color:var(--muted);font-size:12px;min-height:24px}
@@ -52,7 +53,7 @@ export default function GoldOilPanel({ initial, active = true, summaryActive = t
   const stats = useMemo(() => goldOilStatistics(points), [points]);
   const allStats = useMemo(() => goldOilStatistics(history?.points ?? []), [history]);
   const start = points[0]?.time ?? 0, end = (points.at(-1)?.time ?? -GOLD_OIL_INTERVAL_MS) + GOLD_OIL_INTERVAL_MS;
-  const fees = useMemo(() => analyzeGoldOilFunding(funding, start, end), [funding, start, end]);
+  const fees = useMemo(() => analyzeAvailableGoldOilFunding(funding, start, end), [funding, start, end]);
   const fundingByCandle = useMemo(() => {
     const map = new Map<number, { net: number; oil: number; xau: number }>();
     for (const row of fees.events) {
@@ -102,12 +103,13 @@ export default function GoldOilPanel({ initial, active = true, summaryActive = t
           {sampled.length < points.length && <p className="gold-range-unit">绘图保留极值与缺口，共 {sampled.length} 个点；统计、滑块和明细使用全部记录。</p>}
 
           <section className="funding-history-section" aria-labelledby="gold-history-funding"><div className="plot-heading"><div><h2 id="gold-history-funding">历史多空资金费率</h2><p>{source} 实际结算记录 · 两腿等名义 · 随所选时间范围统计</p></div><div className="chart-legend"><span><i className="legend-line wti"/>做多金油比</span><span><i className="legend-line brent"/>做空金油比</span></div></div>
-            <div className="funding-history-returns" aria-label="区间累计资金费与年化">{(['long', 'short'] as const).map(direction => <article key={direction}><p>{direction === 'long' ? '做多金油比' : '做空金油比'} <small>{direction === 'long' ? '多黄金、空原油' : '空黄金、多原油'}</small></p><span>区间累计年化</span><strong>{percent(direction === 'long' ? fees.longAnnualized : fees.shortAnnualized, 2)}</strong><p>已取得累计资金费 <b>{percent(direction === 'long' ? fees.longCumulative : fees.shortCumulative, 4)}</b></p></article>)}</div>
+            <div className="funding-history-returns" aria-label="区间累计资金费与年化">{(['long', 'short'] as const).map(direction => <article key={direction}><p>{direction === 'long' ? '做多金油比' : '做空金油比'} <small>{direction === 'long' ? '多黄金、空原油' : '空黄金、多原油'}</small></p><span>{fees.covered && !fees.selectedCovered ? '已查询区间年化' : '区间累计年化'}</span><strong>{percent(direction === 'long' ? fees.longAnnualized : fees.shortAnnualized, 2)}</strong><p>已取得累计资金费 <b>{percent(direction === 'long' ? fees.longCumulative : fees.shortCumulative, 4)}</b></p></article>)}</div>
+            {fees.covered && <p className="funding-history-period">资金费统计区间：{time(fees.start)} — {time(fees.end)} 北京时间。{!fees.selectedCovered && '所选区间尾部待更新，年化与曲线按已查询区间计算。'}</p>}
             <div className="funding-history-controls"><div className="range-buttons" role="group" aria-label="历史资金费指标"><button aria-pressed={fundingView === 'annualized'} onClick={() => setFundingView('annualized')}>累计年化</button><button aria-pressed={fundingView === 'rate'} onClick={() => setFundingView('rate')}>日均小时率</button></div><p>{fundingView === 'annualized' ? '% / 年 · 简单年化' : '% / 小时'}</p></div>
             <div className="gold-funding-chart">{fees.covered && fees.oilCount > 0 && fees.xauCount > 0 && fees.points.length && hasOpened ? <FundingChart oilType={oilType} exchange={exchange} points={fees.points} view={fundingView}/> : <div className="gold-empty">{fundingError ? '资金费历史暂不可用' : !funding ? '正在读取结算记录…' : '所选区间查询覆盖或两腿记录不足，年化暂不可用'}</div>}</div>
             <div className="chart-footer"><span>正值收款 · 负值付款</span><span>XAU {fees.xauCount} 次 · {instrument.code} {fees.oilCount} 次</span></div>
-            <p className="funding-history-method">做空净结算率＝黄金实际结算率之和 ÷ 2 − 原油实际结算率之和 ÷ 2，做多取反。两腿结算时间与周期分别保留。年化＝累计净结算率 ÷ 所选区间日历小时 × 8,760；按 UTC 日汇总的曲线使用截至当日结束（或区间结束）的日历小时。不复利，不含价格盈亏。无记录不显示零费率，API 查询覆盖不等于保证交易所记录无缺失。</p>
-            <p className={`funding-history-status ${fundingStale ? 'gold-data-stale' : ''}`}>{funding ? `${fundingStale ? '更新中断 · 保留记录。' : ''}API 查询覆盖：${time(funding.coverageStart)} — ${time(funding.coverageEnd)} 北京时间。${fees.covered ? '已覆盖所选区间。' : '所选区间未完全覆盖。'}最后更新 ${summaryTimestamp(funding.fetchedAt)}。` : '等待资金费数据。'}</p>
+            <p className="funding-history-method">做空净结算率＝黄金实际结算率之和 ÷ 2 − 原油实际结算率之和 ÷ 2，做多取反。两腿结算时间与周期分别保留。年化＝累计净结算率 ÷ 实际统计区间日历小时 × 8,760；统计从所选起点开始，截止不晚于已查询时间。按 UTC 日汇总的曲线使用截至当日结束（或统计截止）的日历小时。不复利，不含价格盈亏。无记录不显示零费率，API 查询覆盖不等于保证交易所记录无缺失。</p>
+            <p className={`funding-history-status ${fundingStale ? 'gold-data-stale' : ''}`}>{funding ? `${fundingStale ? '更新中断 · 保留记录。' : ''}API 查询覆盖：${time(funding.coverageStart)} — ${time(funding.coverageEnd)} 北京时间。${fees.selectedCovered ? '已覆盖所选区间。' : '所选区间未完全覆盖。'}最后更新 ${summaryTimestamp(funding.fetchedAt)}。` : '等待资金费数据。'}</p>
           </section>
         </div><aside className="range-summary"><div className="summary-heading"><h3>区间速览</h3><span>{rangeLabel}</span></div><div className="summary-average"><p>平均金油比</p><div>{format(stats?.average)}</div><span>{units.ratio}</span></div><div className="summary-extremes"><div><span>最高金油比</span><strong>{format(stats?.max.ratio)}</strong><small>{time(stats?.max.time)}</small></div><div><span>最低金油比</span><strong>{format(stats?.min.ratio)}</strong><small>{time(stats?.min.time)}</small></div></div><div className="range-track" aria-hidden="true"><span style={{ left: `${stats?.position ?? 50}%` }}/></div><p className="range-description">末值 {format(stats?.last.ratio)} · 区间变化 {signed(stats?.change)} {units.ratio}</p><div className="summary-note"><span className="note-symbol">↗</span><p>比值上升表示黄金相对原油走强；比值下降表示原油相对黄金走强。</p></div></aside></div>
       </section>
