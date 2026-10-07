@@ -1,3 +1,5 @@
+import { getQuoteStaleAfterMs, type QuoteFreshness } from './market-freshness.ts';
+
 export const GOLD_OIL_INTERVAL_MS = 900_000;
 export const GOLD_OIL_QUOTE_MS = 30_000;
 export const GOLD_OIL_HISTORY_MS = 60_000;
@@ -28,7 +30,7 @@ export function parseGoldOilAction(action: string): { oilType: GoldOilType; exch
 }
 type Leg = { symbol: string; price: number; updatedAt: string };
 export type GoldOilFundingLeg = { rate: number; intervalHours: number; nextFundingAt: string };
-export type GoldOilQuote = { oilType: GoldOilType; source: GoldOilSource; currency: 'USDT'; priceBasis: 'mark'; fetchedAt: string; oil: Leg; cl?: Leg; xau: Leg; ratio: number; status: 'live' | 'snapshot'; funding: { oil: GoldOilFundingLeg; cl?: GoldOilFundingLeg; xau: GoldOilFundingLeg } | null };
+export type GoldOilQuote = QuoteFreshness & { oilType: GoldOilType; source: GoldOilSource; currency: 'USDT'; priceBasis: 'mark'; fetchedAt: string; oil: Leg; cl?: Leg; xau: Leg; ratio: number; status: 'live' | 'snapshot'; funding: { oil: GoldOilFundingLeg; cl?: GoldOilFundingLeg; xau: GoldOilFundingLeg } | null };
 export type GoldOilPoint = { time: number; oil: number | null; cl?: number | null; xau: number | null; ratio: number | null };
 export type GoldOilHistory = { oilType: GoldOilType; source: GoldOilSource; currency: 'USDT'; priceBasis: 'mark'; interval: '15m'; fetchedAt: string; status: 'live' | 'snapshot'; points: GoldOilPoint[]; coverageStart?: number };
 
@@ -94,7 +96,8 @@ export function validateGoldOilQuote(input: unknown, expectedOil: GoldOilType = 
     const oil = read(goldOilLegValue(terms, expectedOil));
     funding = { oil, ...(expectedOil === 'cl' ? { cl: oil } : {}), xau: read(terms.xau) };
   }
-  return { ...base, oilType: expectedOil, oil, ...(expectedOil === 'cl' ? { cl: oil } : {}), xau, ratio, funding };
+  const maxAgeMs = getQuoteStaleAfterMs(value as QuoteFreshness, 0);
+  return { ...base, oilType: expectedOil, oil, ...(expectedOil === 'cl' ? { cl: oil } : {}), xau, ratio, funding, ...(maxAgeMs ? { collection: { maxAgeMs } } : {}) };
 }
 export function validateGoldOilHistory(input: unknown, expectedOil: GoldOilType = 'cl', expectedExchange: GoldOilExchange = 'binance'): GoldOilHistory {
   const value = object(input), base = common(value, expectedExchange);

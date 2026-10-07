@@ -87,6 +87,35 @@ test('older, future and malformed quotes cannot overwrite the last persisted suc
   } finally { store.close(); }
 });
 
+test('database reads expose the actual source-age budget without renewing the quote or clearing failures', async t => {
+  let now = NOW;
+  const { store } = await database(t, () => now);
+  try {
+    store.write('hynix', 'quote', quote());
+    assert.equal(store.read('hynix', 'quote').collection.maxAgeMs, 45_000);
+    for (const maxAgeMs of [35_000, 75_000]) {
+      now = NOW + maxAgeMs;
+      const current = store.read('hynix', 'quote', { maxAgeMs });
+      assert.equal(current.collection.maxAgeMs, maxAgeMs);
+      assert.equal(current.status, 'live');
+      assert.equal(current.fetchedAt, new Date(NOW).toISOString());
+      assert.equal(current.collection.lastSuccessAt, new Date(NOW).toISOString());
+      now++;
+      const expired = store.read('hynix', 'quote', { maxAgeMs });
+      assert.equal(expired.status, 'snapshot');
+      assert.equal(expired.collection.stale, true);
+      assert.equal(expired.collection.maxAgeMs, maxAgeMs);
+      assert.throws(() => store.read('hynix', 'quote', { maxAgeMs, fresh: true }));
+    }
+    now = NOW + 1000;
+    store.fail('hynix', 'quote', 'offline');
+    const failed = store.read('hynix', 'quote', { maxAgeMs: 75_000 });
+    assert.equal(failed.status, 'snapshot');
+    assert.equal(failed.collection.error, 'offline');
+    assert.equal(failed.fetchedAt, new Date(NOW).toISOString());
+  } finally { store.close(); }
+});
+
 test('corrupt or newer-version databases fail visibly without being overwritten', async t => {
   const filename = join(await temporary(t), 'market.sqlite');
   await writeFile(filename, 'not a database');

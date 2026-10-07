@@ -3,10 +3,11 @@ import { createTrend, type MonitorTrend, type TrendHistory } from "./monitor-tre
 import { hynixExchangeQuote, type ExchangeQuote } from "./exchange-quotes.ts";
 import { goldOilChartPoints, GOLD_OIL_INTERVAL_MS, GOLD_OIL_INSTRUMENTS, GOLD_OIL_EXCHANGES, goldOilUnits, type GoldOilExchange, type GoldOilType, type GoldOilQuote, type GoldOilHistory } from './gold-oil.ts';
 import { currentGoldOilFunding } from './gold-oil-funding.ts';
+import { getQuoteStaleAfterMs } from './market-freshness.ts';
 
 export type SummaryStatus = "loading" | "live" | "snapshot" | "stale" | "error";
 export type SummaryMetric = { label: string; value: string; tone?: "positive" | "negative" };
-export type MonitorSummary = { status: SummaryStatus; fetchedAt: string | null; metrics: SummaryMetric[]; note?: string; trend?: MonitorTrend; comparison?: ExchangeQuote };
+export type MonitorSummary = { status: SummaryStatus; fetchedAt: string | null; staleAfterMs?: number; metrics: SummaryMetric[]; note?: string; trend?: MonitorTrend; comparison?: ExchangeQuote };
 export type SummaryProps = { onSummary?: (summary: MonitorSummary) => void };
 export function goldOilTrend(history: GoldOilHistory | null = null, error = false, oilType: GoldOilType = history?.oilType ?? 'cl', exchange: GoldOilExchange = history?.source === 'Bybit' ? 'bybit' : 'binance'): MonitorTrend {
   return createTrend(history ? { fetchedAt: history.fetchedAt, status: history.status,
@@ -17,6 +18,7 @@ export function goldOilSummary(quote: GoldOilQuote | null, error = false, trend?
   const funding = currentGoldOilFunding(quote);
   return { status: quote ? error ? 'stale' : quote.status === 'snapshot' ? 'snapshot' : 'live' : error ? 'error' : 'loading',
     fetchedAt: quote?.fetchedAt ?? null,
+    staleAfterMs: getQuoteStaleAfterMs(quote, 75_000),
     metrics: [{ label: `金油比 · ${goldOilUnits(oilType, exchange).ratio}`, value: quote ? quote.ratio.toFixed(3) : '—' }, metric('净资金费 / 年化', funding ? funding.annualized * 100 : null, 2, '%')],
     note: `${GOLD_OIL_EXCHANGES[exchange].name} · 空黄金、多${GOLD_OIL_INSTRUMENTS[oilType].name} · 等 USDT 名义`, trend: trend ?? goldOilTrend(null, false, oilType, exchange) };
 }
@@ -27,6 +29,7 @@ export type OilSummaryUpdate = {
   fundingHourlyRate: number | null;
   fundingBasis: "quantity" | "notional";
   fetchedAt: string | null;
+  staleAfterMs?: number;
   history?: TrendHistory;
   comparison?: ExchangeQuote;
 };
@@ -41,8 +44,9 @@ function metric(label: string, value: number | null | undefined, digits: number,
 export function hynixSummary(quote: LiveQuote | null, error = "", trend?: MonitorTrend): MonitorSummary {
   const funding = quote?.funding;
   return {
-    status: quote ? error ? "stale" : "live" : error ? "error" : "loading",
+    status: quote ? error ? "stale" : quote.status === "snapshot" ? "snapshot" : "live" : error ? "error" : "loading",
     fetchedAt: funding && quote && Date.parse(funding.fetchedAt) < Date.parse(quote.fetchedAt) ? funding.fetchedAt : quote?.fetchedAt ?? null,
+    staleAfterMs: getQuoteStaleAfterMs(quote, 35_000),
     metrics: [metric("ADR 溢价率", quote?.premium, 2, "%"), metric("净资金费 / 年化", funding?.annualizedRate == null ? null : funding.annualizedRate * 100, 2, "%")],
     note: `空 10 份 ADR、多 1 股正股${quote && !funding ? " · 资金费暂不可用" : ""}`,
     trend: trend ?? createTrend(undefined, { days: 7, intervalMs: 3_600_000, label: "7 天小时线", shortLabel: "7天", unit: "%" }),
@@ -56,6 +60,7 @@ export function oilSummary(update?: OilSummaryUpdate, trend?: MonitorTrend): Mon
   return {
     status: update?.status ?? "loading",
     fetchedAt: update?.fetchedAt ?? null,
+    staleAfterMs: getQuoteStaleAfterMs({ collection: { maxAgeMs: update?.staleAfterMs } }, 75_000),
     metrics: [
       metric("价差 · 相对 WTI", update?.spread, 3, "%"),
       metric("净资金费 / 年化", update?.fundingHourlyRate == null ? null : update.fundingHourlyRate * 24 * 365 * 100, 2, "%"),
@@ -93,5 +98,6 @@ export const summaryStatusLabels: Record<SummaryStatus, string> = {
 };
 
 export function summaryExpired(summary: MonitorSummary, intervalMs: number, now: number) {
-  return summary.status === "live" && summary.fetchedAt !== null && now - Date.parse(summary.fetchedAt) > intervalMs + 15_000;
+  const maxAgeMs = getQuoteStaleAfterMs({ collection: { maxAgeMs: summary.staleAfterMs } }, intervalMs + 15_000);
+  return summary.status === "live" && summary.fetchedAt !== null && now - Date.parse(summary.fetchedAt) > maxAgeMs;
 }

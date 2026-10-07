@@ -8,12 +8,12 @@ import { createLifecycle } from './lifecycle.mjs';
 import { binanceOilExchangeQuote } from '../../lib/exchange-quotes.ts';
 import { nearestTimeIndex, tablePage, samePriceRows } from './chart-performance.mjs';
 import { startOilAutoRefresh } from './auto-refresh.mjs';
-/** @param {ShadowRoot} root @param {{ initial?: import('../../lib/initial-market').InitialMarketData['oil'], initialReadAt?: number, active?: boolean, onSummary?: (summary: import('../../lib/monitor-summary').OilSummaryUpdate) => void }} options */
-export function mount(root, { onSummary, initial, initialReadAt = 0, active = true } = {}) {
+import { getQuoteStaleAfterMs } from '../../lib/market-freshness.ts';
+/** @param {ShadowRoot} root @param {{ initial?: import('../../lib/initial-market').InitialMarketData['oil'], initialReadAt?: number, active?: boolean, summaryActive?: boolean, onSummary?: (summary: import('../../lib/monitor-summary').OilSummaryUpdate) => void }} options */
+export function mount(root, { onSummary, initial, initialReadAt = 0, active = true, summaryActive = active } = {}) {
 const life = createLifecycle();
 let activityActive = active;
-let activityController = new AbortController();
-if (!active) activityController.abort();
+let overviewActive = summaryActive;
 const $ = id => root.getElementById(id);
 const state = { rows: [], range: '1w', view: 'spread', visible: [], chart: null, selectedDate: null, market: null, metadata: null, basis: 'quantity', marketMode: 'snapshot', historyMode: 'snapshot', refreshing: false, fundingSnapshot: null, fundingByTime: new Map(), fundingChart: null, fundingHistoryMode: 'loading', fundingRefreshing: false, tablePage: 0 };
 const labels = { '1d': '近 1 天', '1w': '近 1 周', '1m': '近 1 月', all: '全部历史' };
@@ -30,7 +30,7 @@ const beijingTime = iso => timeFormatter.format(new Date(iso));
 let tableDirty = true;
 let summaryRows, summaryHistory, tablePreviousSource, tablePreviousRows;
 let pointerFrame = 0, queuedPointer = null, chartDirty = true;
-let refreshGeneration = 0;
+let refreshGeneration = 0, quoteGeneration = 0, fundingGeneration = 0;
 const tableDetails = $('data-table').closest('details');
 
 function publishSummary(status = state.marketMode) {
@@ -46,6 +46,7 @@ function publishSummary(status = state.marketMode) {
     fundingHourlyRate: state.market ? calculateShortSpreadFunding(state.market, state.basis).hourlyRate : null,
     fundingBasis: state.basis,
     fetchedAt: state.market?.fetchedAt ?? null,
+    staleAfterMs: getQuoteStaleAfterMs(state.market, 75_000),
     comparison: state.market ? binanceOilExchangeQuote(state.market, status !== 'live') : undefined,
     history: summaryHistory,
   });
@@ -454,41 +455,47 @@ function applyLiveMarket(market) {
 async function readMarketData(action, signal) {
   const response = await life.fetch(`/api/monitors/oil/${action}`, { cache: 'no-store', signal: AbortSignal.any([AbortSignal.timeout(15_000), ...(signal ? [signal] : [])]) });
   if (!response.ok) throw new Error(`Market data HTTP ${response.status}`);
-  return response.json();
+  const data = await response.json();
+  signal?.throwIfAborted();
+  return data;
 }
 
-async function refreshData(full = true, signal) {
-  if (life.signal.aborted || !activityActive || state.refreshing) return;
-  signal ??= stopAutoRefresh.signal();
+async function refreshQuote(signal) {
+  if (life.signal.aborted || !overviewActive) return;
+  const generation = ++quoteGeneration;
+  const market = await readMarketData('quote', signal);
+  if (generation === quoteGeneration) applyLiveMarket(market);
+}
+
+function quoteFailed(error) {
+  console.warn('Unable to refresh Binance quote:', error);
+  state.marketMode = state.market ? 'stale' : 'error';
+  if (!state.market) {
+    $('connection-status').textContent = '连接失败';
+    $('data-through').textContent = '数据暂不可用';
+  }
+  renderFunding(); renderStatus(); publishSummary();
+}
+
+async function refreshHistory(signal) {
+  if (life.signal.aborted || !activityActive) return;
   const generation = ++refreshGeneration;
-  let receivedLiveMarket = false;
   state.refreshing = true; $('refresh-data').disabled = true;
-  $('connection-status').textContent = '正在更新';
   if (!state.rows.length) { $('loading').hidden = false; $('error').hidden = true; }
   try {
-    const reads = [readMarketData('quote', signal).then(market => {
-      if (generation === refreshGeneration) { applyLiveMarket(market); receivedLiveMarket = market.status !== 'snapshot'; }
-    })];
-    if (full || !state.rows.length) reads.push(readMarketData(OIL_CANDLE_ACTION, signal).then(snapshot => applySnapshot(snapshot, snapshot.status === 'snapshot' ? 'snapshot' : 'live')));
-    const results = await Promise.allSettled(reads);
-    const failed = results.find(result => result.status === 'rejected');
-    if (failed) throw failed.reason;
-  } catch (error) { if (life.signal.aborted || signal?.aborted) return;
-    console.warn('Unable to refresh Binance observations:', error);
-    if (full && state.rows.length) state.historyMode = 'stale';
-    if (state.market) {
-      if (!receivedLiveMarket) state.marketMode = 'stale';
-      renderFunding(); renderStatus();
-    }
-    if (!state.rows.length) {
-      $('loading').hidden = true; $('error').hidden = false; $('dashboard').hidden = true;
-      if (!state.market) { $('data-through').textContent = '数据暂不可用'; $('connection-status').textContent = '连接失败'; publishSummary('error'); }
-    }
-  } finally { if (life.signal.aborted) return; state.refreshing = false; $('refresh-data').disabled = false; }
+    const snapshot = await readMarketData(OIL_CANDLE_ACTION, signal);
+    if (generation === refreshGeneration) applySnapshot(snapshot, snapshot.status === 'snapshot' ? 'snapshot' : 'live');
+  } finally { if (life.signal.aborted || generation !== refreshGeneration) return; state.refreshing = false; $('refresh-data').disabled = false; }
 }
 
-async function loadData() {
-  await refreshData(!initial?.candles || Date.now() - initialReadAt >= 60_000);
+function historyFailed(error) {
+  console.warn('Unable to refresh Binance observations:', error);
+  state.refreshing = false; $('refresh-data').disabled = false;
+  state.historyMode = state.rows.length ? 'stale' : 'error';
+  renderStatus(); publishSummary();
+  if (!state.rows.length) {
+    $('loading').hidden = true; $('error').hidden = false; $('dashboard').hidden = true;
+  }
 }
 
 function applyFundingSnapshot(snapshot, mode) {
@@ -503,19 +510,18 @@ function applyFundingSnapshot(snapshot, mode) {
 }
 
 async function refreshHistoricalFunding(signal) {
-  if (life.signal.aborted || !activityActive || state.fundingRefreshing) return;
-  signal ??= stopAutoRefresh.signal();
+  if (life.signal.aborted || !activityActive) return;
+  const generation = ++fundingGeneration;
   state.fundingRefreshing = true;
-  try { const snapshot = await readMarketData('funding', signal); applyFundingSnapshot(snapshot, snapshot.status === 'snapshot' ? 'snapshot' : 'live'); }
-  catch (error) { if (life.signal.aborted || signal?.aborted) return;
-    console.warn('Unable to update settled funding history:', error);
-    state.fundingHistoryMode = state.fundingSnapshot ? 'stale' : 'error';
-    if (state.fundingSnapshot) renderFundingHistoryStatus(); else renderFundingHistoryChart();
-  } finally { if (life.signal.aborted) return; state.fundingRefreshing = false; }
+  try { const snapshot = await readMarketData('funding', signal); if (generation === fundingGeneration) applyFundingSnapshot(snapshot, snapshot.status === 'snapshot' ? 'snapshot' : 'live'); }
+  finally { if (life.signal.aborted || generation !== fundingGeneration) return; state.fundingRefreshing = false; }
 }
 
-async function loadHistoricalFunding() {
-  await refreshHistoricalFunding();
+function fundingFailed(error) {
+  console.warn('Unable to update settled funding history:', error);
+  state.fundingRefreshing = false;
+  state.fundingHistoryMode = state.fundingSnapshot ? 'stale' : 'error';
+  if (state.fundingSnapshot) renderFundingHistoryStatus(); else renderFundingHistoryChart();
 }
 
 root.querySelectorAll('[data-range]').forEach(button => button.addEventListener('click', () => { if (state.range === button.dataset.range) return; state.range = button.dataset.range; state.tablePage = 0; render(); }));
@@ -568,10 +574,10 @@ $('chart-cursor').addEventListener('input', event => showTooltip(Number(event.ta
 $('chart-cursor').addEventListener('focus', event => showTooltip(Number(event.target.value)));
 $('chart-cursor').addEventListener('blur', hideTooltip);
 $('chart-cursor').addEventListener('keydown', event => { if (event.key === 'Escape') hideTooltip(); });
-$('retry').addEventListener('click', () => refreshData(true));
-$('refresh-data').addEventListener('click', () => { refreshData(true); refreshHistoricalFunding(); });
+$('retry').addEventListener('click', () => { void stopAutoRefresh.refresh(); });
+$('refresh-data').addEventListener('click', () => { void stopAutoRefresh.refresh(); });
 root.querySelectorAll('[data-basis]').forEach(button => button.addEventListener('click', () => { state.basis = button.dataset.basis; renderFunding(); }));
-const stopAutoRefresh = startOilAutoRefresh({ prices: signal => refreshData(true, signal), funding: refreshHistoricalFunding, active });
+const stopAutoRefresh = startOilAutoRefresh({ quote: refreshQuote, prices: refreshHistory, funding: refreshHistoricalFunding, active, summaryActive, onQuoteError: quoteFailed, onHistoryError: historyFailed, onFundingError: fundingFailed });
 let resizeFrame;
 const resizeObserver = new ResizeObserver(() => { if (life.signal.aborted) return; cancelAnimationFrame(resizeFrame); resizeFrame = requestAnimationFrame(() => {
   const svg = $('main-chart');
@@ -583,8 +589,9 @@ const resizeObserver = new ResizeObserver(() => { if (life.signal.aborted) retur
 if (initial?.quote) applyLiveMarket(initial.quote);
 if (initial?.candles) applySnapshot(initial.candles, initial.candles.status === 'snapshot' ? 'snapshot' : 'live');
 if (!state.market) publishSummary('loading');
-loadData();
-loadHistoricalFunding();
-return { setActive(value) { activityActive = value; if (!value) activityController.abort(); else if (activityController.signal.aborted) activityController = new AbortController(); stopAutoRefresh.setActive(value); }, setView(input) { if (!['1d','1w','1m','all'].includes(input.range) || !['spread','prices'].includes(input.view)) throw new Error('Invalid chart view'); if (!state.rows.length) throw new Error('行情尚未加载'); if (state.range !== input.range) state.tablePage=0; state.range=input.range; state.view=input.view; render(); return summarize(state.visible); }, dispose() { life.dispose(); activityController.abort(); stopAutoRefresh(); resizeObserver.disconnect(); cancelAnimationFrame(resizeFrame); cancelAnimationFrame(pointerFrame); } };
+void stopAutoRefresh.refreshQuote();
+if (!initial?.candles || Date.now() - initialReadAt >= 60_000) void stopAutoRefresh.refreshHistory();
+void stopAutoRefresh.refreshFunding();
+return { setActive(value) { activityActive = value; stopAutoRefresh.setActive(value); }, setSummaryActive(value) { overviewActive = value; stopAutoRefresh.setSummaryActive(value); }, setView(input) { if (!['1d','1w','1m','all'].includes(input.range) || !['spread','prices'].includes(input.view)) throw new Error('Invalid chart view'); if (!state.rows.length) throw new Error('行情尚未加载'); if (state.range !== input.range) state.tablePage=0; state.range=input.range; state.view=input.view; render(); return summarize(state.visible); }, dispose() { life.dispose(); stopAutoRefresh(); resizeObserver.disconnect(); cancelAnimationFrame(resizeFrame); cancelAnimationFrame(pointerFrame); } };
 
 }

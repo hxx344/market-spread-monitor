@@ -1,3 +1,5 @@
+import type { QuoteFreshness } from './market-freshness';
+
 export const LISTING_DATE = "2026-07-10";
 export const FIRST_FULL_HOUR = Date.parse("2026-07-10T14:00:00Z");
 export const ADR_PER_SHARE = 10;
@@ -13,7 +15,7 @@ export type HynixFunding = {
   annualizedRate: number;
   fetchedAt: string;
 };
-export type LiveQuote = Omit<Point, "time"> & { fetchedAt: string; funding?: HynixFunding | null; fundingError?: string; status?: "live" | "snapshot" };
+export type LiveQuote = Omit<Point, "time"> & QuoteFreshness & { fetchedAt: string; funding?: HynixFunding | null; fundingError?: string; status?: "live" | "snapshot" };
 export type MarketData = {
   points: Point[];
   fetchedAt: string;

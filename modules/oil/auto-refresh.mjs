@@ -1,42 +1,35 @@
+import { startActivityPolling } from '../../lib/polling.ts';
+
+export const OIL_QUOTE_REFRESH_MS = 10_000;
 export const OIL_REFRESH_MS = 60_000;
 export const OIL_FUNDING_REFRESH_MS = 300_000;
 
-/** Schedule by elapsed browser time, never by the server's data timestamps. */
-export function startOilAutoRefresh({ prices, funding, page = document, view = window, active = true, onError = console.warn }) {
+/** Quote reads serve the visible overview; history belongs to the active detail. */
+export function startOilAutoRefresh({ quote, prices, funding, page = document, view = window, active = true, summaryActive = active, onError = console.warn, onQuoteError = onError, onHistoryError = onError, onFundingError = onError }) {
   const controller = new AbortController();
-  let enabled = active, session = new AbortController(), priceTimer, fundingTimer;
-  const running = new Map();
-  const run = task => {
-    if (controller.signal.aborted || !enabled || page.hidden || running.has(task)) return;
-    const signal = session.signal;
-    const request = Promise.resolve().then(() => {
-      if (!controller.signal.aborted && !signal.aborted && enabled && !page.hidden) return task(signal);
-    }).catch(error => { if (!controller.signal.aborted && !signal.aborted) onError(error); }).finally(() => running.delete(task));
-    running.set(task, request);
+  const network = {
+    get onLine() { return view.navigator?.onLine !== false; },
+    addEventListener: (type, listener) => view.addEventListener(type, listener),
+    removeEventListener: (type, listener) => view.removeEventListener(type, listener),
   };
-  const synchronize = () => {
-    clearInterval(priceTimer); clearInterval(fundingTimer);
-    if (controller.signal.aborted || !enabled || page.hidden) { session.abort(); return; }
-    if (session.signal.aborted) session = new AbortController();
-    priceTimer = setInterval(() => run(prices), OIL_REFRESH_MS);
-    fundingTimer = setInterval(() => run(funding), OIL_FUNDING_REFRESH_MS);
-  };
-  const resume = () => { synchronize(); run(prices); run(funding); };
-  synchronize();
-  const options = { signal: controller.signal };
-  page.addEventListener('visibilitychange', resume, options);
-  view.addEventListener('online', resume, options);
-  view.addEventListener('pageshow', event => { if (event.persisted) resume(); }, options);
-  const stop = () => { controller.abort(); session.abort(); clearInterval(priceTimer); clearInterval(fundingTimer); };
-  stop.signal = () => session.signal;
-  stop.setActive = value => {
-    if (enabled === value || controller.signal.aborted) return;
-    enabled = value; synchronize();
-    if (enabled) {
-      const pending = [...running.values()];
-      if (pending.length) void Promise.allSettled(pending).then(() => { run(prices); run(funding); });
-      else { run(prices); run(funding); }
-    }
-  };
+  const poll = (load, intervalMs, enabled, failure) => startActivityPolling({
+    load, intervalMs, active: enabled, immediate: false, page, network,
+    onData: () => {}, onError: failure,
+  });
+  const quotes = quote ? poll(quote, OIL_QUOTE_REFRESH_MS, summaryActive, onQuoteError) : null;
+  const history = poll(prices, OIL_REFRESH_MS, active, onHistoryError);
+  const fees = poll(funding, OIL_FUNDING_REFRESH_MS, active, onFundingError);
+  const refresh = () => Promise.all([quotes?.refresh(), history.refresh(), fees.refresh()]);
+  // Activity polling handles visibility/offline cancellation; these restore events
+  // also cover an existing online connection and a back-forward cached document.
+  view.addEventListener('online', () => { void refresh(); }, { signal: controller.signal });
+  view.addEventListener('pageshow', event => { if (event.persisted) void refresh(); }, { signal: controller.signal });
+  const stop = () => { controller.abort(); quotes?.stop(); history.stop(); fees.stop(); };
+  stop.refresh = refresh;
+  stop.refreshQuote = () => quotes?.refresh() ?? Promise.resolve();
+  stop.refreshHistory = () => history.refresh();
+  stop.refreshFunding = () => fees.refresh();
+  stop.setActive = value => { history.setActive(value); fees.setActive(value); };
+  stop.setSummaryActive = value => quotes?.setActive(value);
   return stop;
 }

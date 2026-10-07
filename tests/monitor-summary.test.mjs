@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { hynixSummary, oilSummary, summaryExpired, summaryTimestamp } from "../lib/monitor-summary.ts";
+import { goldOilSummary, hynixSummary, oilSummary, summaryExpired, summaryTimestamp } from "../lib/monitor-summary.ts";
+import { initialSummaries } from "../lib/initial-market.ts";
 
 const fetchedAt = "2026-09-11T07:00:00.000Z";
 const quote = { ordinary: 1500, adr: 180, equivalent: 150, spread: 30, premium: 20, fetchedAt, funding: { annualizedRate: 0.1752, fetchedAt } };
@@ -75,11 +76,70 @@ test("summary timestamps include the date and use Beijing time for old retained 
   assert.equal(summaryTimestamp("invalid"), null);
 });
 
-test("a paused or delayed poll cannot keep an old quote marked live", () => {
+test("Hynix tolerates normal collection and polling phase differences but expires after its 35-second source budget", () => {
   const live = hynixSummary(quote);
   const now = Date.parse(fetchedAt);
-  assert.equal(summaryExpired(live, 10_000, now + 25_000), false);
-  assert.equal(summaryExpired(live, 10_000, now + 25_001), true);
+  assert.equal(live.staleAfterMs, 35_000);
+  assert.equal(summaryExpired(live, 10_000, now + 29_000), false);
+  assert.equal(summaryExpired(live, 10_000, now + 35_000), false);
+  assert.equal(summaryExpired(live, 10_000, now + 35_001), true);
   assert.equal(summaryExpired({ ...live, status: "snapshot" }, 10_000, now + 60_000), false);
   assert.equal(summaryExpired(hynixSummary(null), 10_000, now), false);
+});
+
+test("gold/oil stays live at a normal 49-second source age and expires only beyond the 75-second collection budget", () => {
+  const summary = goldOilSummary({ oilType: 'cl', source: 'Binance', status: 'live', fetchedAt, ratio: 50, funding: null });
+  const now = Date.parse(fetchedAt);
+  assert.equal(summary.staleAfterMs, 75_000);
+  assert.equal(summaryExpired(summary, 30_000, now + 49_000), false);
+  assert.equal(summaryExpired(summary, 30_000, now + 75_000), false);
+  assert.equal(summaryExpired(summary, 30_000, now + 75_001), true);
+});
+
+test("server source-age metadata wins over page intervals without refreshing the source timestamp", () => {
+  const gold = goldOilSummary({ oilType: 'cl', source: 'Binance', status: 'live', fetchedAt, ratio: 50, funding: null, collection: { maxAgeMs: 55_000 } });
+  const hynix = hynixSummary({ ...quote, collection: { maxAgeMs: 55_000 } });
+  const oil = oilSummary({ status: 'live', fetchedAt, staleAfterMs: 35_000 });
+  const now = Date.parse(fetchedAt);
+  for (const summary of [gold, hynix, oil]) {
+    assert.equal(summary.fetchedAt, fetchedAt);
+    assert.equal(summaryExpired(summary, 1000, now + summary.staleAfterMs), false);
+    assert.equal(summaryExpired(summary, 300_000, now + summary.staleAfterMs + 1), true);
+  }
+  assert.equal(oilSummary({ status: 'live', fetchedAt }).staleAfterMs, 75_000);
+  const oldFunding = hynixSummary({ ...quote, collection: { maxAgeMs: 55_000 }, funding: { ...quote.funding, fetchedAt: new Date(now - 56_000).toISOString() } });
+  assert.equal(summaryExpired(oldFunding, 10_000, now), true, 'A newer price cannot refresh retained funding');
+});
+
+test("real snapshot and failed summaries retain their status regardless of age budget", () => {
+  const retained = { ...quote, status: 'snapshot', collection: { maxAgeMs: 75_000 } };
+  assert.equal(hynixSummary(retained).status, 'snapshot');
+  assert.equal(hynixSummary(retained, 'offline').status, 'stale');
+  const gold = { oilType: 'cl', source: 'Binance', status: 'snapshot', fetchedAt, ratio: 50, funding: null, collection: { maxAgeMs: 75_000 } };
+  assert.equal(goldOilSummary(gold).status, 'snapshot');
+  assert.equal(goldOilSummary(gold, true).status, 'stale');
+  assert.equal(goldOilSummary(null, true).status, 'error');
+  for (const status of ['snapshot', 'stale', 'error']) {
+    const summary = oilSummary({ status, fetchedAt, staleAfterMs: 75_000 });
+    assert.equal(summary.status, status);
+    assert.equal(summaryExpired(summary, 10_000, Date.parse(fetchedAt) + 100_000), false);
+  }
+});
+
+test("summaries without freshness metadata retain the generic interval fallback", () => {
+  const summary = { status: 'live', fetchedAt, metrics: [] }, now = Date.parse(fetchedAt);
+  assert.equal(summaryExpired(summary, 10_000, now + 25_000), false);
+  assert.equal(summaryExpired(summary, 10_000, now + 25_001), true);
+  for (const staleAfterMs of [0, -1, NaN, Infinity, '75000', 7_215_001]) {
+    assert.equal(summaryExpired({ ...summary, staleAfterMs }, 10_000, now + 25_001), true);
+  }
+});
+
+test("first-render oil summary uses the persisted quote source-age budget", () => {
+  const leg = { markPx: 100, fundingRate: 0, fundingIntervalHours: 4, nextFundingAt: '2026-09-11T08:00:00Z' };
+  const oil = { source: 'Binance', currency: 'USDT', fetchedAt, status: 'live', brent: { ...leg, coin: 'BZUSDT' }, wti: { ...leg, coin: 'CLUSDT' }, collection: { maxAgeMs: 35_000 } };
+  const summary = initialSummaries({ renderedAt: Date.parse(fetchedAt) + 29_000, hynix: { quote: null, history: null }, oil: { quote: oil } }).oil;
+  assert.equal(summary.staleAfterMs, 35_000);
+  assert.equal(summary.fetchedAt, fetchedAt);
+  assert.equal(summaryExpired(summary, 30_000, Date.parse(fetchedAt) + 35_001), true);
 });

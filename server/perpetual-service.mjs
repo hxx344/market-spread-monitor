@@ -431,21 +431,34 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
     },
     summary() {
       const now = clock(), connected = new Set([...connections].filter(x => x.socket?.readyState === 1).map(x => x.exchange));
-      const freshVenues = new Set(); let fresh = 0;
+      const freshVenues = new Set(), onlineVenues = new Set(), bases = new Set();
+      const blocked = new Set(crossex.filter().blockedBases);
+      let fresh = 0, quoteUpdatedAt = null;
       for (const quote of quotes.values()) {
         const at = quote.bidAskAt;
-        if (quote.bid > 0 && quote.ask >= quote.bid && Number.isFinite(at) && at <= now + MAX_FUTURE_MS && now - at <= staleAfterMs && connected.has(quote.exchange)) { fresh++; freshVenues.add(quote.exchange); }
+        if (!blocked.has(quote.base)) bases.add(quote.base);
+        const book = quote.bid > 0 && quote.ask >= quote.bid && Number.isFinite(at) && at <= now + MAX_FUTURE_MS;
+        const mark = quote.mark > 0 && Number.isFinite(quote.markAt) && quote.markAt <= now + MAX_FUTURE_MS;
+        // Funding and receipt timestamps must never renew retained price observations.
+        if (book && at > 0) quoteUpdatedAt = Math.max(quoteUpdatedAt ?? 0, at);
+        if (mark && quote.markAt > 0) quoteUpdatedAt = Math.max(quoteUpdatedAt ?? 0, quote.markAt);
+        if (!connected.has(quote.exchange)) continue;
+        if (book && now - at <= staleAfterMs) { fresh++; freshVenues.add(quote.exchange); }
+        if (book && now - at <= staleAfterMs || mark && now - quote.markAt <= staleAfterMs) onlineVenues.add(quote.exchange);
       }
       const missing = [...states.keys()].filter(id => !freshVenues.has(id));
       const times = [...states.values()].map(state => state.lastMessageAt);
       const updatedAt = times.length && times.every(at => Number.isFinite(at) && at > 0 && at <= now + MAX_FUTURE_MS) ? Math.min(...times) : null;
-      return { state: !quotes.size ? 'offline' : !fresh ? 'stale' : storageError || missing.length || fresh < quotes.size ? 'partial' : 'online', updatedAt, quoteCount: quotes.size, exchangeCount: states.size, liveExchangeCount: freshVenues.size,
+      return { schemaVersion: 1, monitorId: 'perpetual', available: true, staleAfterMs,
+        status: onlineVenues.size === states.size && onlineVenues.size > 0 ? 'live' : onlineVenues.size ? 'partial' : quotes.size ? 'snapshot' : 'connecting',
+        baseCount: bases.size, onlineExchangeCount: onlineVenues.size, quoteUpdatedAt,
+        state: !quotes.size ? 'offline' : !fresh ? 'stale' : storageError || missing.length || fresh < quotes.size ? 'partial' : 'online', updatedAt, quoteCount: quotes.size, exchangeCount: states.size, liveExchangeCount: freshVenues.size,
         message: [storageError, missing.length ? '行情待更新：' + missing.join('、') : '', fresh < quotes.size ? (quotes.size - fresh) + ' 条盘口过期或缺失' : ''].filter(Boolean).join('；') };
     },
     closeStreams, snapshot, healthy: () => !storageError && alerts.healthy(),
     metrics: () => ({ ...metrics, generatedAt: clock(), quotes: quotes.size, pendingWrites: dirty.size, connections: connections.size, clients: clients.size, rssMb: Number((process.memoryUsage.rss() / 1048576).toFixed(1)), storageError, events: healthEvents.filter(item => clock() - item.at <= 3_600_000), auxiliary: [...pollBudgets].map(([host, budget]) => ({ host, sentInWindow: budget.sent, retryAt: budget.blockedUntil })), venues: snapshot().exchanges.map(exchange => ({ ...exchange, sourceLagMs: states.get(exchange.id).lastSourceLagMs, sourceLagObservedAt: states.get(exchange.id).sourceLagObservedAt ?? null, rejectedFuture: states.get(exchange.id).rejectedFuture, reconnects: states.get(exchange.id).reconnects ?? 0, lastConnectedAt: states.get(exchange.id).lastConnectedAt ?? null, lastProtocolError: states.get(exchange.id).lastProtocolError ?? null })) }),
-    actions: { 'crossex-settings': ['GET', 'PUT'], quote: ['GET'], opportunities: ['GET'], 'opportunities-v2': ['GET'], stream: ['GET'], diagnostics: ['GET'], quality: ['POST'], 'funding-history': ['POST'], alerts: ['GET', 'PUT'], depth: ['POST'], exit: ['POST'], paper: ['GET', 'POST'], fx: ['GET'] },
-    handle(action, method, input) { if (action === 'funding-history') return fundingHistory.read(input); if (action === 'crossex-settings') return method === 'PUT' ? crossex.update(input) : crossex.view(); if (action === 'opportunities-v2') return readOpportunitiesV2(snapshot(), clock(), (exchange, symbol) => states.get(exchange)?.markets?.get(symbol), execution.peekFx(), `${streamId}:${sourceRevision}`, crossex.filter()); if (action === 'opportunities') return createPerpetualOpportunities(snapshot(), clock(), (exchange, symbol) => states.get(exchange)?.markets?.get(symbol), crossex.filter()); if (action === 'quote') return snapshot(); if (action === 'diagnostics') return { ...this.metrics(), quality: quality?.metrics() ?? null, alerts: alerts.metrics(), execution: execution.metrics(), paper: paper.metrics() }; if (action === 'quality') { if (!quality) throw new Error('质量采集服务未就绪'); return quality.read(input); } if (action === 'alerts') return method === 'PUT' ? alerts.update(input) : alerts.view(); if (action === 'depth') return execution.depth(input); if (action === 'exit') return execution.exit(input); if (action === 'paper') return method === 'POST' ? paper.update(input) : paper.view(); if (action === 'fx') return execution.fx(); },
+    actions: { 'crossex-settings': ['GET', 'PUT'], quote: ['GET'], summary: ['GET'], opportunities: ['GET'], 'opportunities-v2': ['GET'], stream: ['GET'], diagnostics: ['GET'], quality: ['POST'], 'funding-history': ['POST'], alerts: ['GET', 'PUT'], depth: ['POST'], exit: ['POST'], paper: ['GET', 'POST'], fx: ['GET'] },
+    handle(action, method, input) { if (action === 'summary') return this.summary(); if (action === 'funding-history') return fundingHistory.read(input); if (action === 'crossex-settings') return method === 'PUT' ? crossex.update(input) : crossex.view(); if (action === 'opportunities-v2') return readOpportunitiesV2(snapshot(), clock(), (exchange, symbol) => states.get(exchange)?.markets?.get(symbol), execution.peekFx(), `${streamId}:${sourceRevision}`, crossex.filter()); if (action === 'opportunities') return createPerpetualOpportunities(snapshot(), clock(), (exchange, symbol) => states.get(exchange)?.markets?.get(symbol), crossex.filter()); if (action === 'quote') return snapshot(); if (action === 'diagnostics') return { ...this.metrics(), quality: quality?.metrics() ?? null, alerts: alerts.metrics(), execution: execution.metrics(), paper: paper.metrics() }; if (action === 'quality') { if (!quality) throw new Error('质量采集服务未就绪'); return quality.read(input); } if (action === 'alerts') return method === 'PUT' ? alerts.update(input) : alerts.view(); if (action === 'depth') return execution.depth(input); if (action === 'exit') return execution.exit(input); if (action === 'paper') return method === 'POST' ? paper.update(input) : paper.view(); if (action === 'fx') return execution.fx(); },
     stream(request, response) {
       const gzip = /(?:^|,)\s*gzip\s*(?:,|$)/i.test(request.headers['accept-encoding'] ?? '');
       response.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no', Vary: 'Accept-Encoding', ...(gzip ? { 'Content-Encoding': 'gzip' } : {}) });

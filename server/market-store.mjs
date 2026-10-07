@@ -86,7 +86,7 @@ export async function openMarketStore(filename, { clock = Date.now } = {}) {
         if (!row.payload) throw new Error('数据库尚未收到行情，后台正在采集。');
         const stale = row.success_ms === null || Boolean(row.error) || clock() - row.source_ms > maxAgeMs;
         if (fresh && stale) throw new Error('后台行情采集失败或已过期。');
-        return { ...decode(key, row.payload), status: stale ? 'snapshot' : 'live', collection: { source: 'database', stale, lastAttemptAt: row.attempt_ms === null ? null : new Date(row.attempt_ms).toISOString(), lastSuccessAt: row.success_ms === null ? null : new Date(row.success_ms).toISOString(), error: row.error } };
+        return { ...decode(key, row.payload), status: stale ? 'snapshot' : 'live', collection: { source: 'database', stale, maxAgeMs, lastAttemptAt: row.attempt_ms === null ? null : new Date(row.attempt_ms).toISOString(), lastSuccessAt: row.success_ms === null ? null : new Date(row.success_ms).toISOString(), error: row.error } };
       },
       status() { return datasetKeys.map(key => { const { payload: _payload, ...row } = get.get(storageKey(key)); return { ...row, key }; }).sort((a, b) => a.key.localeCompare(b.key)); },
       count(id, action) { return db.prepare('SELECT count(*) AS count FROM market_observations WHERE dataset=?').get(storageKey(keyFor(id, action))).count; },

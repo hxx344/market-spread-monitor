@@ -9,6 +9,7 @@ import { intradayChartRows, type createIntradaySnapshot } from "../modules/oil/i
 import { oilSpreadPercent } from "../modules/oil/spread.mjs";
 import type { GoldOilQuote, GoldOilHistory, GoldOilType, GoldOilExchange } from './gold-oil';
 import type { GoldOilFundingHistory } from './gold-oil-funding';
+import { getQuoteStaleAfterMs, type QuoteFreshness } from './market-freshness.ts';
 
 export type InitialGoldOilMarket = { quote: GoldOilQuote | null; history: GoldOilHistory | null; funding?: GoldOilFundingHistory | null };
 export type InitialMarketData = {
@@ -16,7 +17,7 @@ export type InitialMarketData = {
   runtime?: MonitorRuntimeMap;
   'cl-xau'?: InitialGoldOilMarket & { bz?: InitialGoldOilMarket; bybit?: InitialGoldOilMarket & { bz?: InitialGoldOilMarket } };
   hynix: { quote: LiveQuote | null; history: MarketData | null; exchanges?: ExternalQuoteSet };
-  oil: { quote: (ReturnType<typeof validateOilQuote> & { status: "live" | "snapshot" }) | null; history?: ReturnType<typeof validateOilHistory> | null; candles?: ReturnType<typeof createIntradaySnapshot> | null; exchanges?: ExternalQuoteSet };
+  oil: { quote: (ReturnType<typeof validateOilQuote> & QuoteFreshness & { status: "live" | "snapshot" }) | null; history?: ReturnType<typeof validateOilHistory> | null; candles?: ReturnType<typeof createIntradaySnapshot> | null; exchanges?: ExternalQuoteSet };
 };
 
 export function initialGoldOilMarket(initial: InitialMarketData | null | undefined, oilType: GoldOilType = 'cl', exchange: GoldOilExchange = 'binance') {
@@ -35,6 +36,7 @@ export function initialSummaries(initial: InitialMarketData | null) {
       spread: oil.quote ? oilSpreadPercent(oil.quote.brent.markPx, oil.quote.wti.markPx) : null,
       fundingHourlyRate: oil.quote ? calculateShortSpreadFunding(oil.quote).hourlyRate : null,
       fundingBasis: "quantity", fetchedAt: oil.quote?.fetchedAt ?? null,
+      staleAfterMs: getQuoteStaleAfterMs(oil.quote, 75_000),
       comparison: oil.quote ? binanceOilExchangeQuote(oil.quote, oil.quote.status === "snapshot") : undefined,
       history: oil.candles ? { points: intradayChartRows(oil.candles).map(row => ({ time: row.time, value: row.spread })), status: oil.candles.status, fetchedAt: oil.candles.metadata.fetchedAt } : undefined,
     } : undefined),

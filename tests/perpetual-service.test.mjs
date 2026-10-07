@@ -200,6 +200,57 @@ function setup(overrides = {}) {
 }
 async function until(check) { for (let i = 0; i < 100; i++) { if (check()) return; await delay(5); } assert.fail('Condition did not become true'); }
 
+test('lightweight overview counts unblocked bases and live price venues without renewing source times', async t => {
+  let now = 1000, discoveries = 0;
+  const markets = exchange => [
+    update({ exchange }), update({ exchange, symbol: 'BTCUSD', quoteCurrency: 'USD' }),
+    update({ exchange, symbol: 'ETHUSDT', base: 'ETH' }), update({ exchange, symbol: 'HIDDENUSDT', base: 'HIDDEN' }),
+  ];
+  const { service, sockets } = setup({ clock: () => now,
+    exchanges: [{ id: 'test', name: 'Test', kind: 'cex' }, { id: 'second', name: 'Second', kind: 'dex' }],
+    discover: async exchange => { discoveries++; return markets(exchange); },
+    subscriptions: exchange => [{ url: `wss://example.invalid/${exchange}`, subscribe: [] }],
+    crossexOptions: { store: { get: () => ({ revision: 0, config: { requireSpotTransfer: false, blockedBases: ['HIDDEN'] } }) } },
+  });
+  t.after(() => service.stop());
+  const empty = service.handle('summary', 'GET');
+  assert.equal(discoveries, 0, 'Overview reads must not start market discovery');
+  assert.equal(empty.status, 'connecting'); assert.equal(empty.quoteUpdatedAt, null);
+  assert.equal(Object.hasOwn(empty, 'quotes'), false); assert.equal(Object.hasOwn(empty, 'exchanges'), false);
+  service.start(); await until(() => sockets.length === 2);
+  for (const socket of sockets) socket.open();
+  const first = sockets.find(socket => socket.url.endsWith('/test'));
+  const second = sockets.find(socket => socket.url.endsWith('/second'));
+  first.message(markets('test'));
+  second.message([update({ exchange: 'second', bid: undefined, ask: undefined, mark: 102 })]);
+  const summary = service.handle('summary', 'GET'), snapshot = service.snapshot();
+  assert.equal(summary.schemaVersion, 1); assert.equal(summary.monitorId, 'perpetual');
+  assert.equal(summary.staleAfterMs, snapshot.staleAfterMs); assert.equal(summary.status, snapshot.status);
+  assert.equal(summary.baseCount, 2, 'Coverage deduplicates bases and removes saved blocked bases');
+  assert.equal(summary.quoteCount, 5, 'The existing all-contract count keeps its meaning');
+  assert.equal(summary.onlineExchangeCount, snapshot.exchanges.filter(exchange => exchange.status === 'live').length);
+  assert.equal(summary.onlineExchangeCount, 2, 'A fresh mark-only venue remains online, like the detail');
+  assert.equal(summary.liveExchangeCount, 1, 'The host summary keeps its book-only live count');
+  assert.equal(summary.state, 'partial'); assert.match(summary.message, /second/);
+  assert.equal(summary.quoteUpdatedAt, 1000); assert.equal(summary.updatedAt, 1000);
+  const reads = discoveries;
+  for (let i = 0; i < 3; i++) assert.deepEqual(service.handle('summary', 'GET'), summary);
+  assert.equal(discoveries, reads, 'Repeated overviews read resident caches only');
+  assert.equal(service.metrics().clients, 0, 'Overview reads never subscribe to the full stream');
+
+  now = 32_000;
+  for (const [exchange, socket] of [['test', first], ['second', second]]) socket.message([update({ exchange, bid: undefined, ask: undefined, fundingRate: 0.001, sourceTime: now })]);
+  const retained = service.handle('summary', 'GET');
+  assert.equal(retained.updatedAt, now, 'The pre-existing host timestamp remains the oldest venue message time');
+  assert.equal(retained.quoteUpdatedAt, 1000, 'Funding-only updates must not renew the card price timestamp');
+  assert.equal(retained.status, 'snapshot'); assert.equal(retained.onlineExchangeCount, 0);
+  assert.equal(retained.baseCount, 2, 'Stale prices retain their coverage counts');
+  now = 33_000; first.message([update({ sourceTime: now })]);
+  const recovered = service.handle('summary', 'GET');
+  assert.equal(recovered.status, 'partial'); assert.equal(recovered.quoteUpdatedAt, now);
+  assert.equal(recovered.onlineExchangeCount, 1); assert.match(recovered.message, /second/);
+});
+
 test('CrossEx evidence enriches only its response and preserves existing restored quote identities', async t => {
   let now = 1100;
   let metadata = { assetClass: 'crypto', identitySource: 'symbolType=', identityVerified: true, collateralCurrency: 'USDT' };
@@ -544,6 +595,14 @@ test('SSE uses existing authentication, validates methods and closes before HTTP
   t.after(async () => { service.closeStreams(); await service.stop(); server.closeAllConnections(); await new Promise(accept => server.close(accept)); });
   const url = `http://127.0.0.1:${server.address().port}/api/monitors/perpetual/stream`;
   const headers = { Authorization: `Basic ${Buffer.from('test:test-password').toString('base64')}` };
+  const summaryUrl = url.replace(/stream$/, 'summary');
+  assert.equal((await fetch(summaryUrl)).status, 401);
+  assert.equal((await fetch(summaryUrl, { headers, method: 'POST' })).status, 405);
+  const overview = await fetch(summaryUrl, { headers });
+  assert.equal(overview.status, 200);
+  const summary = await overview.json();
+  assert.equal(summary.monitorId, 'perpetual'); assert.equal(summary.status, 'connecting');
+  assert.equal(Object.hasOwn(summary, 'quotes'), false); assert.equal(service.metrics().clients, 0);
   assert.equal((await fetch(url)).status, 401);
   assert.equal((await fetch(url, { headers, method: 'POST' })).status, 405);
   const response = await fetch(url, { headers });
