@@ -251,7 +251,7 @@ test('lightweight overview counts unblocked bases and live price venues without 
   assert.equal(recovered.onlineExchangeCount, 1); assert.match(recovered.message, /second/);
 });
 
-test('CrossEx evidence enriches only its response and preserves existing restored quote identities', async t => {
+test('official categories reach restored snapshots while CrossEx-specific enrichment stays isolated', async t => {
   let now = 1100;
   let metadata = { assetClass: 'crypto', identitySource: 'symbolType=', identityVerified: true, collateralCurrency: 'USDT' };
   const previous = mergePerpetualQuote(null, update({ exchange: 'binance' }), 1000);
@@ -267,10 +267,42 @@ test('CrossEx evidence enriches only its response and preserves existing restore
   assert.equal(current.identityVerified, true); assert.equal(current.assetClass, 'crypto');
   assert.equal(current.collateralCurrency, 'USDT'); assert.equal(current.bidAskAt, 1000); assert.equal(current.receivedAt, 1000);
   const retained = service.snapshot().quotes[0];
-  assert.equal(retained.collateralCurrency, undefined); assert.equal(retained.identityVerified, undefined);
+  assert.equal(retained.collateralCurrency, undefined); assert.equal(retained.identityVerified, true);
+  assert.equal(retained.assetClass, 'crypto'); assert.equal(retained.identitySource, 'symbolType=');
   now = 3000; metadata = { ...metadata, identityVerified: false };
   await until(() => service.handle('opportunities', 'GET').quotes.length === 0);
-  assert.equal(service.snapshot().quotes[0], retained); assert.equal(sockets.length, 1);
+  assert.deepEqual(service.snapshot().quotes[0], { ...retained, identityVerified: false }); assert.equal(sockets.length, 1);
+});
+
+test('official classification refreshes and clears without refreshing prices or changing comparison eligibility', async t => {
+  let now = 1000, catalog = { assetClass: 'crypto', identitySource: 'official category=crypto', identityVerified: true };
+  const { service, sockets, saved } = setup({ clock: () => now, discoveryIntervalMs: 20,
+    discover: async () => [{ ...update(), ...catalog }],
+  });
+  t.after(() => service.stop()); service.start(); await until(() => sockets.length === 1);
+  sockets[0].open(); sockets[0].message([update({ comparable: false })]);
+  const original = service.snapshot().quotes[0], baseline = new Map([['test:BTCUSDT', original]]);
+  assert.equal(original.assetClass, 'crypto'); assert.equal(original.identityVerified, true);
+
+  now = 32000; catalog = { assetClass: 'stock', identitySource: 'official category=stock', identityVerified: false };
+  await until(() => service.snapshot().quotes[0].assetClass === 'stock');
+  const reclassified = service.snapshot().quotes[0];
+  assert.equal(reclassified.identitySource, catalog.identitySource); assert.equal(reclassified.identityVerified, false);
+  for (const field of ['base', 'comparable', 'bid', 'ask', 'bidAskAt', 'receivedAt', 'sourceTime']) assert.equal(reclassified[field], original[field]);
+  assert.equal(service.snapshot().exchanges[0].status, 'stale'); assert.equal(sockets.length, 1);
+  assert.deepEqual(createPerpetualPatch(service.snapshot(), baseline).patches[0][1], { ...catalog, receivedAt: 1000 });
+  await until(() => saved.some(quote => quote.assetClass === 'stock'));
+
+  // Subscription parsers may retain old directory objects; the current directory wins.
+  sockets[0].message([update({ sourceTime: now, assetClass: 'crypto', identitySource: 'old subscription', identityVerified: true })]);
+  assert.equal(service.snapshot().quotes[0].assetClass, 'stock');
+  assert.equal(service.snapshot().quotes[0].identitySource, catalog.identitySource);
+  const latest = service.snapshot().quotes[0];
+  catalog = {};
+  await until(() => service.snapshot().quotes[0].assetClass === null);
+  assert.equal(service.snapshot().quotes[0].identitySource, null); assert.equal(service.snapshot().quotes[0].identityVerified, null);
+  assert.equal(service.snapshot().quotes[0].receivedAt, latest.receivedAt);
+  assert.equal(service.snapshot().quotes[0].bidAskAt, latest.bidAskAt); assert.equal(sockets.length, 1);
 });
 
 test('discovered identity changes invalidate restored prices before the first new WS message', async t => {

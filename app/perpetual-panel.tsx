@@ -1,7 +1,7 @@
 "use client";
 
 import { hubNavigate, cleanHubQuery } from "../lib/hub-bridge";
-import { Fragment, memo, useDeferredValue, useEffect, useMemo, useState } from "react";
+import { Fragment, Suspense, memo, useDeferredValue, useEffect, useMemo, useState, type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import { Activity, ArrowDown, Bell, ChevronDown, ChevronLeft, ChevronRight, RefreshCw, Search, SlidersHorizontal, Star, X } from "lucide-react";
 import { usePerpetualFeed } from "../hooks/use-perpetual-feed";
@@ -19,7 +19,10 @@ import { estimatePerpetualHoldingScenario } from "../lib/perpetual-opportunity";
 import { classifyPerpetualQuote, createPerpetualQuoteSelector, createPerpetualRankingSelector, defaultPerpetualFilters, normalizedFunding8h, parsePerpetualPreferences, perpetualSpreadKey, quotePriceTime, visiblePerpetualSnapshot, type PerpetualFilters, type PerpetualSpread } from "../lib/perpetual-spreads";
 import type { PerpetualExchange, PerpetualPairMode, PerpetualPriceMode, PerpetualQuote, PerpetualSnapshot } from "../lib/perpetual-types";
 import type { SummaryProps } from "../lib/monitor-summary";
+import { SCANNER_COLUMNS, SCANNER_CATEGORIES, defaultScannerPreferences, parseScannerPreferences, scannerPairCategory, scannerQuoteCategory, annualizedFundingPercent, type ScannerPreferences, type ScannerCategoryId, type ScannerColumnId } from "../lib/perpetual-scanner";
+import { ScannerMenu, ScannerLeg, ScannerFundingRate, ScannerHistory, scannerPercent, scannerPolarity } from "./perpetual-scanner-parts";
 import "./perpetual.css";
+import "./perpetual-scanner.css";
 
 const PerpetualHealth = dynamic(() => import("./perpetual-health"));
 const PerpetualManualPairs = dynamic(() => import("./perpetual-manual-pairs"));
@@ -31,6 +34,7 @@ const PerpetualExit = dynamic(() => import("./perpetual-exit"));
 const PerpetualPaper = dynamic(() => import("./perpetual-paper"));
 type DetailTab = "execution" | "quality" | "exit" | "quotes";
 
+const scannerPreferencesKey = "market-monitor:perpetual-scanner:v1";
 const preferencesKey = "market-monitor:perpetual:v1";
 const qualityBudgetKey = "market-monitor:perpetual-quality-budget:v1";
 const pageSize = 30;
@@ -96,12 +100,6 @@ function DelistingNotice({ quote, now }: { quote: PerpetualQuote; now: number })
     <span className="perp-delisting-label">{due ? "已到下架时间" : "即将下架"}</span>
     <span className="perp-delisting-time">{at === null ? "下架时间待公布" : <><time dateTime={new Date(at).toISOString()}>{delistingFormat.format(at)}</time> <span className="perp-delisting-zone">北京时间</span></>}</span>
   </div>;
-}
-
-function FundingSchedule({ quote, now }: { quote: PerpetualQuote; now: number }) {
-  const valid = normalizedFunding8h(quote, now) !== null;
-  const next = quote.nextFundingAt;
-  return <div className="perp-funding-schedule"><small>资金费 {valid ? `${percent(quote.fundingRate === null ? null : quote.fundingRate * 100, 4)} / ${quote.fundingIntervalHours}h` : "已过期 / 暂缺"}</small><small>下次结算 {finite(next) && next > now ? `${delistingFormat.format(next)} 北京时间` : "待更新"}</small></div>;
 }
 
 function QualityCell({ quality, pairLabel, onInspect }: { quality: OpportunityQuality; pairLabel: string; onInspect: () => void }) {
@@ -201,6 +199,12 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
   const visibleData = useMemo(() => visiblePerpetualSnapshot(data, savedBlockedBases), [data, savedBlockedBases]);
   const [filters, setFilters] = useState<PerpetualFilters>(defaultPerpetualFilters);
   const [preferencesReady, setPreferencesReady] = useState(false);
+  const [scanner, setScanner] = useState<ScannerPreferences>(defaultScannerPreferences);
+  const [scannerReady, setScannerReady] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const visibleColumns = useMemo(() => SCANNER_COLUMNS.filter(column => scanner.columns.includes(column.id)), [scanner.columns]);
+  const categorySet = useMemo(() => new Set(scanner.categories), [scanner.categories]);
+  const hasColumn = (id: ScannerColumnId) => scanner.columns.includes(id);
   const [qualityBudget, setQualityBudget] = useState(defaultQualityBudget);
   const [qualityBudgetReady, setQualityBudgetReady] = useState(false);
   const [hubPair, setHubPair] = useState<{ longExchange?: string; shortExchange?: string }>({});
@@ -243,9 +247,10 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
   const rankingFilters = useMemo(() => ({ ...filters, search }), [filters, search]);
   const fullRanking = useMemo(() => paused ? inspection.ranking : opportunitiesActive && view === "rank" && visibleData && now ? selectRanking(visibleData, rankingFilters, now, qualityBudget, fx) : emptySpreads, [paused, inspection, opportunitiesActive, view, visibleData, rankingFilters, now, selectRanking, qualityBudget, fx]);
   const qualifiedRanking = useMemo(() => filterCrossExRanking(fullRanking, crossex.error ? null : crossex.data, crossex.spotTransferPairs, now), [fullRanking, crossex.data, crossex.error, crossex.spotTransferPairs, now]);
-  const ranking = useMemo(() => qualifiedRanking.filter(row => (!hubPair.longExchange || row.long.exchange === hubPair.longExchange) && (!hubPair.shortExchange || row.short.exchange === hubPair.shortExchange)), [qualifiedRanking, hubPair]);
+  const ranking = useMemo(() => qualifiedRanking.filter(row => categorySet.has(scannerPairCategory(row)) && (!hubPair.longExchange || row.long.exchange === hubPair.longExchange) && (!hubPair.shortExchange || row.short.exchange === hubPair.shortExchange)), [qualifiedRanking, hubPair, categorySet]);
   if (paused && !ranking.some(row => perpetualSpreadKey(row) === inspection.key)) setInspection(null);
-  const quoteSelection = useMemo(() => selectQuotes(quotes, rankingFilters), [quotes, rankingFilters, selectQuotes]);
+  const categoryQuotes = useMemo(() => quotes.filter(quote => categorySet.has(scannerQuoteCategory(quote))), [quotes, categorySet]);
+  const quoteSelection = useMemo(() => selectQuotes(categoryQuotes, rankingFilters), [categoryQuotes, rankingFilters, selectQuotes]);
   const availableBases = quoteSelection.baseCount;
   const liveExchanges = exchanges.filter(exchange => exchange.status === "live").length;
   const quoteQuality = useMemo(() => {
@@ -262,21 +267,25 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
   const visiblePage = Math.max(1, Math.min(paused ? inspection.page : page, totalPages));
   const rows = useMemo(() => ranking.slice((visiblePage - 1) * pageSize, visiblePage * pageSize), [ranking, visiblePage]);
   const qualityPairs = useMemo(() => rows.map(row => ({ base: row.base, longKey: `${row.long.exchange}:${row.long.symbol}`, shortKey: `${row.short.exchange}:${row.short.symbol}`, ...(perpetualSpreadKey(row) === expanded ? { includeSeries: true } : {}) })), [rows, expanded]);
-  const { report: qualityReport, loading: qualityLoading, error: qualityError } = usePerpetualQuality(qualityPairs, opportunitiesActive && view === "rank");
-  const { report: fundingHistoryReport, error: fundingHistoryError } = usePerpetualFundingHistory(qualityPairs, opportunitiesActive && view === "rank" && fundingSort);
+  const { report: qualityReport, loading: qualityLoading, error: qualityError } = usePerpetualQuality(qualityPairs, opportunitiesActive && view === "rank" && (scanner.columns.includes("quality") || paused || toolsOpen));
+  const { report: fundingHistoryReport, error: fundingHistoryError } = usePerpetualFundingHistory(qualityPairs, opportunitiesActive && view === "rank" && (scanner.columns.includes("history24h") || paused));
   const qualities = useMemo(() => new Map(rows.map(row => [qualityPairKey(row), evaluateOpportunityQuality(row, qualityReport, now, qualityBudget, filters.priceMode)])), [rows, qualityReport, now, qualityBudget, filters.priceMode]);
   const fundingScenarios = useMemo(() => fundingSort ? new Map(rows.map(row => [perpetualSpreadKey(row), estimatePerpetualHoldingScenario(row, qualityBudget, { holdingHours: 24, exitSpreadPercent: row.spreadPercent, priceMode: filters.priceMode, staleAfterMs: data?.staleAfterMs }, now)])) : null, [fundingSort, rows, qualityBudget, filters.priceMode, data?.staleAfterMs, now]);
   const quoteRows = view === "quotes" ? quoteSelection.keys.slice((visiblePage - 1) * pageSize, visiblePage * pageSize).map(key => quoteSelection.byKey.get(key)!) : emptyQuotes;
   const detailQuotes = useMemo(() => expandedBase ? quotes.filter(quote => quote.base === expandedBase && (!selected || selected.has(quote.exchange))) : [], [quotes, expandedBase, selected]);
-  const overview = useMemo(() => {
-    let positive = 0, max: number | null = null, maxFunding: number | null = null;
-    for (const row of ranking) {
-      if (finite(row.netSpreadPercent)) { if (row.netSpreadPercent > 0) positive++; if (max === null || row.netSpreadPercent > max) max = row.netSpreadPercent; }
-      const long = normalizedFunding8h(row.long, now), short = normalizedFunding8h(row.short, now);
-      if (long !== null && short !== null && (maxFunding === null || short - long > maxFunding)) maxFunding = short - long;
-    }
-    return { positive, max, maxFunding };
-  }, [ranking, now]);
+  useEffect(() => {
+    const restore = (event?: StorageEvent) => {
+      if (event && event.key !== scannerPreferencesKey) return;
+      setInspection(null);
+      try { setScanner(parseScannerPreferences(localStorage.getItem(scannerPreferencesKey))); } catch { /* Storage is optional. */ }
+      setScannerReady(true);
+    };
+    restore(); window.addEventListener("storage", restore);
+    return () => window.removeEventListener("storage", restore);
+  }, []);
+  useEffect(() => {
+    if (scannerReady) { try { localStorage.setItem(scannerPreferencesKey, JSON.stringify(scanner)); } catch { /* Storage is optional. */ } }
+  }, [scanner, scannerReady]);
 
   useEffect(() => {
     function restorePreferences(event?: StorageEvent) {
@@ -324,6 +333,7 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
     if (toggle && expanded === key) { setInspection(null); return; }
     setDetailTab(tab);
     if (data) setInspection(previous => previous ? { ...previous, key, base } : { key, base, snapshot: data, ranking, page: visiblePage, blockedKey });
+    requestAnimationFrame(() => { const table = document.querySelector(".scanner-table-wrap"); if (table) table.scrollLeft = 0; });
   }
   function updateFilters(update: Partial<PerpetualFilters>) { setInspection(null); setFilters(previous => ({ ...previous, ...update })); setPage(1); }
   function changeView(next: "rank" | "quotes") { setInspection(null); setView(next); setPage(1); }
@@ -339,62 +349,87 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
     const key = perpetualSpreadKey(row);
     setFilters(previous => ({ ...previous, favoritePairs: (previous.favoritePairs ?? []).includes(key) ? previous.favoritePairs!.filter(item => item !== key) : [...(previous.favoritePairs ?? []), key].slice(-1000) }));
   }
-  function resetFilters() { setHubPair({}); updateFilters({ ...defaultPerpetualFilters, favorites: filters.favorites, favoritePairs: filters.favoritePairs, blockedPairs: filters.blockedPairs }); }
+  function resetFilters() { setHubPair({}); setScanner(previous => ({ ...previous, categories: defaultScannerPreferences.categories })); updateFilters({ ...defaultPerpetualFilters, favorites: filters.favorites, favoritePairs: filters.favoritePairs, blockedPairs: filters.blockedPairs }); }
   function blockPair(row: PerpetualSpread) { updateFilters({ blockedPairs: [...new Set([...(filters.blockedPairs ?? []), perpetualSpreadKey(row)])].slice(-1000) }); }
+  function openTool(tool: "health" | "alerts") {
+    setToolsOpen(true);
+    if (tool === "health") setHealthOpen(true);
+    else { setAlertsVisited(true); setAlertsOpen(true); }
+    requestAnimationFrame(() => document.getElementById(tool === "health" ? "perpetual-health-region" : "perpetual-alert-region")?.scrollIntoView({ behavior: "auto", block: "start" }));
+  }
   function configureAlert(row: PerpetualSpread) {
-    setAlertPair(row); setAlertsVisited(true); setAlertsOpen(true);
+    setToolsOpen(true); setAlertPair(row); setAlertsVisited(true); setAlertsOpen(true);
     requestAnimationFrame(() => document.getElementById("perpetual-alert-region")?.scrollIntoView({ behavior: "auto", block: "start" }));
   }
 
+  function toggleCategory(id: ScannerCategoryId) {
+    setInspection(null); setPage(1);
+    setScanner(previous => ({ ...previous, categories: previous.categories.includes(id) ? previous.categories.filter(value => value !== id) : [...previous.categories, id] }));
+  }
+  function toggleRwa(checked: boolean) {
+    setInspection(null); setPage(1);
+    const rwa: ScannerCategoryId[] = ["equity", "commodity", "forex", "index"];
+    setScanner(previous => ({ ...previous, categories: checked ? [...new Set([...previous.categories, ...rwa])] : previous.categories.filter(id => !rwa.includes(id)) }));
+  }
+  function toggleColumn(id: ScannerColumnId) {
+    setScanner(previous => ({ ...previous, columns: previous.columns.includes(id) ? previous.columns.filter(value => value !== id) : [...previous.columns, id] }));
+  }
   const statusText = paused ? "查看详情 · 行情刷新已暂停" : connection === "paused" ? "已暂停更新" : !data ? error ? "行情连接异常" : "正在连接行情" : data.status === "unavailable" ? "采集服务未就绪" : expired ? "快照已过期" : connection === "error" ? "更新中断" : data.status === "snapshot" ? "保留快照" : data.status === "connecting" ? "等待首批报价" : data.status === "partial" ? "部分平台在线" : "行情实时更新";
   const transportText = paused ? "收起后恢复" : connection === "stream" ? "推送 / 1 秒" : connection === "polling" || connection === "error" ? "快照 / 5 秒" : connection === "paused" ? "切回后恢复" : "优先实时推送";
   const problem = error || data?.error || (data?.status === "unavailable" ? data.note || "请启动完整监控后台，连接交易所实时行情。" : "");
-  const emptyMessage = !crossex.data ? crossex.error ? "屏蔽名单读取失败，暂不展示行情；恢复连接后自动重试。" : "正在读取已保存的屏蔽名单…" : !data ? "正在获取交易所与合约报价…" : data.status === "unavailable" ? "采集服务启动后，这里会显示实时合约价差。" : quotes.length === 0 ? data.quotes.length > 0 ? "当前币种均已屏蔽，可在上方“屏蔽币种”名单中解除屏蔽。" : "交易所正在连接，收到首批有效报价后自动更新。" : selected && selected.size < 2 ? "请至少选择两家交易所。" : filters.favoritesOnly && favorites.size + favoritePairs.size === 0 ? "点击组合旁的星标加入自选，再回来查看。" : crossex.error ? "资格设置读取失败，暂不展示排名；恢复连接后自动重试。" : crossex.data.config.requireSpotTransfer && fullRanking.length > 0 && qualifiedRanking.length === 0 ? "没有双边现货及共同网络双向充提均已核验的组合。未知、过期或不符合条件的组合已排除；可展开公开数据覆盖查看原因。" : fundingSort ? "当前筛选下没有正资金费差机会；缺失或超过 5 分钟未更新的资金费不会参与排名，可调整费差阈值或交易所。" : netSort && filters.priceMode === "mark" ? "标记价仅供参考。切换买卖盘口可查看净价差排名。" : netSort ? "没有达到净价差阈值的组合；费用或汇率缺失的组合不计入。可降低阈值或切换毛价差核对。" : "当前筛选下没有有效价差。可以降低阈值、增加平台或切换报价口径。";
+  const emptyMessage = !scanner.categories.length ? "请选择至少一种资产类别。" : qualifiedRanking.length > 0 && !ranking.length ? "当前类别或指定方向下没有可比较组合；未核验类别可在“类别”中启用“未分类”。" : !crossex.data ? crossex.error ? "屏蔽名单读取失败，暂不展示行情；恢复连接后自动重试。" : "正在读取已保存的屏蔽名单…" : !data ? "正在获取交易所与合约报价…" : data.status === "unavailable" ? "采集服务启动后，这里会显示实时合约价差。" : quotes.length === 0 ? data.quotes.length > 0 ? "当前币种均已屏蔽，可在上方“屏蔽币种”名单中解除屏蔽。" : "交易所正在连接，收到首批有效报价后自动更新。" : selected && selected.size < 2 ? "请至少选择两家交易所。" : filters.favoritesOnly && favorites.size + favoritePairs.size === 0 ? "点击组合旁的星标加入自选，再回来查看。" : crossex.error ? "资格设置读取失败，暂不展示排名；恢复连接后自动重试。" : crossex.data.config.requireSpotTransfer && fullRanking.length > 0 && qualifiedRanking.length === 0 ? "没有双边现货及共同网络双向充提均已核验的组合。未知、过期或不符合条件的组合已排除；可展开公开数据覆盖查看原因。" : fundingSort ? "当前筛选下没有正资金费差机会；缺失或超过 5 分钟未更新的资金费不会参与排名，可调整费差阈值或交易所。" : netSort && filters.priceMode === "mark" ? "标记价仅供参考。切换买卖盘口可查看净价差排名。" : netSort ? "没有达到净价差阈值的组合；费用或汇率缺失的组合不计入。可降低阈值或切换毛价差核对。" : "当前筛选下没有有效价差。可以降低阈值、增加平台或切换报价口径。";
 
-  return <section className={`perpetual-panel${fundingSort && view === "rank" ? " is-funding-mode" : ""}`} aria-label="CEX 与 DEX 合约价差监控">
-    <header className="perp-heading"><div><h2>合约价差</h2><p>发现价差与资金费机会，核对成本与结算时间</p></div><div className="perp-heading-actions" hidden={workspace === "positions"}><button className="perp-refresh" type="button" aria-expanded={healthOpen} onClick={() => setHealthOpen(value => !value)}><Activity size={15}/>报价健康</button><button className="perp-refresh" type="button" aria-expanded={alertsOpen} onClick={() => { setAlertsVisited(true); setAlertsOpen(value => !value); }}><Bell size={15}/>机会提醒</button><button className="perp-refresh" type="button" onClick={() => paused ? setInspection(null) : refresh()} disabled={!paused && connection === "paused"}><RefreshCw size={15}/>{paused ? "收起并恢复" : "刷新"}</button></div></header>
+  return <section className={`perpetual-panel${workspace === "opportunities" ? " perp-scanner" : ""}${fundingSort && view === "rank" ? " is-funding-mode" : ""}`} aria-label="CEX 与 DEX 合约价差监控">
+    <header className="perp-heading"><div><h2>合约价差套利</h2></div><div className="perp-heading-actions" hidden={workspace === "positions"}><button className="perp-refresh" type="button" aria-expanded={toolsOpen && healthOpen} aria-controls="perpetual-health-region" onClick={() => openTool("health")}><Activity size={15}/>报价健康</button><button className="perp-refresh" type="button" aria-expanded={toolsOpen && alertsOpen} aria-controls="perpetual-alert-region" onClick={() => openTool("alerts")}><Bell size={15}/>机会提醒</button><button className="perp-refresh" type="button" onClick={() => paused ? setInspection(null) : refresh()} disabled={!paused && connection === "paused"}><RefreshCw size={15}/>{paused ? "收起并恢复" : "刷新"}</button></div></header>
     <nav className="perp-workspace-nav" aria-label="合约价差工作区"><button type="button" aria-current={workspace === "opportunities" ? "page" : undefined} onClick={() => setWorkspace("opportunities")}>发现机会</button><button id="perp-positions-tab" type="button" aria-current={workspace === "positions" ? "page" : undefined} onClick={() => { setInspection(null); setWorkspace("positions"); }}>持仓跟踪</button></nav>
-    {workspace === "positions" ? <PerpetualPaper active={active}/> : <>
-    <div className="perp-health"><div className={`perp-connection ${expired || error || data?.status === "unavailable" ? "is-warning" : ""}`} role="status"><i aria-hidden="true"/>{statusText}<span>{transportText}</span></div><span>覆盖 <b>{data ? availableBases : "—"}</b> 币种 <span className="perp-health-divider">/</span> {expired ? "上次状态：" : ""}<b>{liveExchanges}</b> / {exchanges.length || "—"} 平台在线</span></div>
+    {workspace === "positions" ? <Suspense fallback={<p role="status">正在加载持仓跟踪…</p>}><PerpetualPaper active={active}/></Suspense> : <>
+    <div className="scanner-toolbar">
+      <div className="perp-view-tabs" role="group" aria-label="行情视图">
+        <button type="button" aria-pressed={view === "rank" && !fundingSort} onClick={() => changeOpportunityMode(false)}>价格套利</button>
+        <button type="button" aria-pressed={view === "rank" && fundingSort} onClick={() => changeOpportunityMode(true)}>资金费套利</button>
+        <button type="button" aria-pressed={view === "quotes"} onClick={() => changeView("quotes")}>全部报价</button>
+      </div>
+      <ScannerMenu label={`交易所（${exchanges.filter(exchange => !selected || selected.has(exchange.id)).length} / ${exchanges.length}）`} className="scanner-exchange-menu">
+        <div className="scanner-menu-actions"><button type="button" onClick={() => updateFilters({ exchanges: null })}>全选</button><button type="button" onClick={() => updateFilters({ exchanges: [] })}>清空</button></div>
+        {exchanges.map(exchange => <label key={exchange.id}><input type="checkbox" checked={!selected || selected.has(exchange.id)} onChange={() => toggleExchange(exchange.id)}/><span>{exchange.name}</span><small className={exchange.status === "live" && !expired ? "positive" : ""}>{expired ? "快照过期" : exchangeLabels[exchange.status]}</small></label>)}
+        {!exchanges.length ? <p>正在读取交易所…</p> : null}
+      </ScannerMenu>
+      <label className="perp-search"><Search size={14} aria-hidden="true"/><input aria-label="搜索币种" placeholder="筛选币种…" value={filters.search} maxLength={40} onChange={event => updateFilters({ search: event.target.value.toUpperCase() })}/>{filters.search ? <button type="button" aria-label="清空搜索" onClick={() => updateFilters({ search: "" })}><X size={13}/></button> : null}</label>
+      <button type="button" className={`perp-tool-button ${filtersOpen ? "is-selected" : ""}`} aria-expanded={filtersOpen} aria-controls="perpetual-filters" onClick={() => setFiltersOpen(value => !value)}><SlidersHorizontal size={14}/>筛选<ChevronDown size={12}/></button>
+      {view === "rank" ? <ScannerMenu label={`显示列（${visibleColumns.length} / ${SCANNER_COLUMNS.length}）`}>
+        <div className="scanner-menu-actions"><button type="button" onClick={() => setScanner(previous => ({ ...previous, columns: defaultScannerPreferences.columns }))}>恢复默认列</button></div>
+        {SCANNER_COLUMNS.map(column => <label key={column.id}><input type="checkbox" checked={hasColumn(column.id)} onChange={() => toggleColumn(column.id)}/>{column.label}</label>)}
+      </ScannerMenu> : null}
+      <label className="scanner-asset-toggle"><input type="checkbox" checked={["equity", "commodity", "forex", "index"].every(id => scanner.categories.includes(id as ScannerCategoryId))} onChange={event => toggleRwa(event.target.checked)}/>RWA</label>
+      <label className="scanner-asset-toggle"><input type="checkbox" checked={categorySet.has("crypto")} onChange={() => toggleCategory("crypto")}/>加密</label>
+      <ScannerMenu label={`类别（${scanner.categories.length} / ${SCANNER_CATEGORIES.length}）`}>
+        <div className="scanner-menu-actions"><button type="button" onClick={() => { setInspection(null); setPage(1); setScanner(previous => ({ ...previous, categories: defaultScannerPreferences.categories })); }}>全部类别</button></div>
+        {SCANNER_CATEGORIES.map(category => <label key={category.id}><input type="checkbox" checked={categorySet.has(category.id)} onChange={() => toggleCategory(category.id)}/>{category.label}</label>)}
+        <p>按交易所已核验分类；未知或两腿分类不一致归入未分类。</p>
+      </ScannerMenu>
+      <button type="button" className={`perp-tool-button ${filters.favoritesOnly ? "is-selected" : ""}`} aria-pressed={filters.favoritesOnly} onClick={() => updateFilters({ favoritesOnly: !filters.favoritesOnly })}><Star size={14}/>自选<span>{favoritePairs.size}{favorites.size ? ` + ${favorites.size} 币` : ""}</span></button>
+    </div>
+    <div className="scanner-status"><div className={`perp-connection ${expired || error || data?.status === "unavailable" ? "is-warning" : ""}`} role="status"><i aria-hidden="true"/>{statusText}<span>{transportText}</span></div><span>{totalItems} {view === "rank" ? "组合" : "报价"} · {liveExchanges} / {exchanges.length} 平台在线 · 更新 {stamp(data?.generatedAt)} 北京时间</span><span className="scanner-direction-key"><i className="positive">多</i> 做多腿在上 <i className="negative">空</i> 做空腿在下</span></div>
     {problem ? <div className="perp-notice" role="status">{problem}</div> : null}
     {data?.storageError ? <div className="perp-notice" role="status">快照保存异常：{data.storageError}</div> : null}
-    {view === "rank" ? <div className="perp-overview" aria-label="当前筛选机会概览">
-      <div><span>有效组合</span><strong>{data ? ranking.length.toLocaleString() : "—"}</strong><small>{fundingSort ? "按正资金费差筛选" : netSort ? "按净价差筛选" : "按毛价差筛选"} · {paused ? "查看时快照" : "当前列表"}</small></div>
-      <button type="button" onClick={() => updateFilters({ sortBy: "net", priceMode: "book", minSpreadPercent: 0 })}><span>{fundingSort ? "净价差为正" : "扣费后为正"}</span><strong>{data && filters.priceMode === "book" ? overview.positive.toLocaleString() : "—"}</strong><small>当前筛选内 · 查看净价差</small></button>
-      <div><span>{fundingSort ? "最高资金费差 / 8h" : "最大净价差"}</span><strong className={(fundingSort ? overview.maxFunding : overview.max) !== null && (fundingSort ? overview.maxFunding! : overview.max!) > 0 ? "is-positive" : ""}>{fundingSort ? percent(overview.maxFunding === null ? null : overview.maxFunding * 100, 4) : percent(overview.max)}</strong><small>{fundingSort ? "当前费率折算 · 未扣交易成本" : "扣往返 taker 与滑点预算"}</small></div>
-      <button type="button" onClick={() => setHealthOpen(true)}><span>报价有效率</span><strong>{quoteSelection.keys.length ? `${Math.round((1 - (quoteQuality.stale + quoteQuality.unavailable) / quoteSelection.keys.length) * 100)}%` : "—"}</strong><small>{quoteQuality.stale} 过期 / {quoteQuality.unavailable} 暂缺 · 查看原因</small></button>
-    </div> : null}
-    <div className="perp-venue-strip" role="group" aria-label="快速选择交易所">{exchanges.map(exchange => <button key={exchange.id} type="button" aria-pressed={!selected || selected.has(exchange.id)} aria-label={`${!selected || selected.has(exchange.id) ? "排除" : "启用"} ${exchange.name}`} title={`${exchange.name} · ${expired ? "快照过期" : exchangeLabels[exchange.status]} · ${exchange.freshBookCount ?? exchange.quoteCount} 个有效盘口`} onClick={() => toggleExchange(exchange.id)}><i className={expired ? "stale" : exchange.status} aria-hidden="true"/><span>{exchange.name}</span><small>{exchange.freshBookCount ?? exchange.quoteCount}</small></button>)}</div>
-    <PerpetualManualPairs snapshot={data} mode={filters.priceMode} now={now} budget={qualityBudget} active={active} paused={paused}/>
-    {healthOpen ? <PerpetualHealth active={active} defaultOpen/> : null}
-    <div id="perpetual-alert-region" hidden={!alertsOpen}>{alertsVisited ? <PerpetualAlerts active={active && alertsOpen} pair={alertPair} budget={qualityBudget} defaultOpen/> : null}</div>
-
-    <PerpetualCrossExSettings settings={crossex} now={now}/>
-    <div className="perp-toolbar"><label className="perp-search"><Search size={17} aria-hidden="true"/><input aria-label="搜索币种" placeholder="搜索币种，如 BTC、ETH" value={filters.search} maxLength={40} onChange={event => updateFilters({ search: event.target.value.toUpperCase() })}/>{filters.search ? <button type="button" aria-label="清空搜索" onClick={() => updateFilters({ search: "" })}><X size={14}/></button> : null}</label>
-      <button type="button" className="perp-tool-button" title="选择七所并按现货买卖汇率比较；模拟资格由 CrossEx 模块再次核对" onClick={() => { changeView("rank"); updateFilters({ exchanges: ["binance", "bybit", "okx", "gate", "kraken", "hyperliquid", "lighter"], crossCurrency: true, pairMode: "all", priceMode: "book", search: "", favoritesOnly: false, sortBy: "gross", minSpreadPercent: 0 }); }}>CrossEx 七所</button>
-      {view === "rank" ? <label className="perp-sort"><span className="perp-sr-only">价差排序</span><select aria-label="价差排序" value={filters.sortBy ?? "gross"} onChange={event => updateFilters({ sortBy: event.target.value as PerpetualFilters["sortBy"] })}><option value="gross">毛价差从高到低</option><option value="net">净价差从高到低</option><option value="funding">资金费差从高到低 / 8h</option></select></label> : null}
-      <button type="button" className={`perp-tool-button ${filters.favoritesOnly ? "is-selected" : ""}`} aria-pressed={filters.favoritesOnly} onClick={() => updateFilters({ favoritesOnly: !filters.favoritesOnly })}><Star size={16}/>自选<span>{favoritePairs.size}{favorites.size ? ` + ${favorites.size} 币` : ""}</span></button><button type="button" className={`perp-tool-button ${filtersOpen ? "is-selected" : ""}`} aria-expanded={filtersOpen} aria-controls="perpetual-filters" onClick={() => setFiltersOpen(value => !value)}><SlidersHorizontal size={16}/>筛选<span>{selected ? selected.size : exchanges.length} 平台</span></button>
-    </div>
+    {crossex.error || crossex.saveError ? <div className="perp-notice" role="alert">{crossex.saveError || crossex.error}</div> : null}
+    {crossex.data?.config.requireSpotTransfer ? <p className="scanner-data-note">现货充提筛选已开启：仅显示已核验的合格组合。</p> : null}
     {filtersOpen ? <div className="perp-filters" id="perpetual-filters"><fieldset><legend>交易所 <button type="button" onClick={() => updateFilters({ exchanges: null })}>全选</button><button type="button" onClick={() => updateFilters({ exchanges: [] })}>清空</button></legend><div className="perp-exchange-options">{exchanges.map(exchange => <label key={exchange.id}><input type="checkbox" checked={!selected || selected.has(exchange.id)} onChange={() => toggleExchange(exchange.id)}/>{exchange.name}<small>{exchange.kind.toUpperCase()}</small><span className={`perp-exchange-state ${exchange.status}`}>{exchangeLabels[exchange.status]}</span></label>)}</div></fieldset>
-      <div className="perp-filter-fields"><label>报价口径<select value={filters.priceMode} onChange={event => updateFilters({ priceMode: event.target.value as PerpetualPriceMode })}><option value="book">买卖盘口</option><option value="mark">标记价格 · 仅供参考</option></select></label><label>平台组合<select value={filters.pairMode} onChange={event => updateFilters({ pairMode: event.target.value as PerpetualPairMode })}><option value="all">全部组合</option><option value="cex-dex">CEX ↔ DEX</option><option value="cex-cex">CEX ↔ CEX</option><option value="dex-dex">DEX ↔ DEX</option></select></label><label>{fundingSort ? "最低资金费差 / % / 8h" : `最低${netSort ? "净" : "毛"}价差 / %`}<input type="number" min={fundingSort ? 0 : -100} max={1000} step={fundingSort ? "0.001" : "0.01"} value={fundingSort ? filters.minFundingSpreadPercent ?? 0 : filters.minSpreadPercent} onChange={event => { const value = event.target.valueAsNumber; updateFilters(fundingSort ? { minFundingSpreadPercent: Number.isFinite(value) ? Math.max(0, Math.min(1000, value)) : 0 } : { minSpreadPercent: Number.isFinite(value) ? Math.max(-100, Math.min(1000, value)) : 0 }); }}/></label><label>计价币范围<select value={filters.crossCurrency ? "cross" : "same"} onChange={event => updateFilters({ crossCurrency: event.target.value === "cross" })}><option value="same">仅相同计价币</option><option value="cross">跨计价币 · 按现货汇率校正</option></select></label></div>
+      <div className="perp-filter-fields"><label>价差排序<select aria-label="价差排序" value={filters.sortBy ?? "gross"} onChange={event => updateFilters({ sortBy: event.target.value as PerpetualFilters["sortBy"] })}><option value="gross">毛价差从高到低</option><option value="net">净价差从高到低</option><option value="funding">资金费差从高到低 / 8h</option></select></label><label>报价口径<select value={filters.priceMode} onChange={event => updateFilters({ priceMode: event.target.value as PerpetualPriceMode })}><option value="book">买卖盘口</option><option value="mark">标记价格 · 仅供参考</option></select></label><label>平台组合<select value={filters.pairMode} onChange={event => updateFilters({ pairMode: event.target.value as PerpetualPairMode })}><option value="all">全部组合</option><option value="cex-dex">CEX ↔ DEX</option><option value="cex-cex">CEX ↔ CEX</option><option value="dex-dex">DEX ↔ DEX</option></select></label><label>{fundingSort ? "最低资金费差 / % / 8h" : `最低${netSort ? "净" : "毛"}价差 / %`}<input type="number" min={fundingSort ? 0 : -100} max={1000} step={fundingSort ? "0.001" : "0.01"} value={fundingSort ? filters.minFundingSpreadPercent ?? 0 : filters.minSpreadPercent} onChange={event => { const value = event.target.valueAsNumber; updateFilters(fundingSort ? { minFundingSpreadPercent: Number.isFinite(value) ? Math.max(0, Math.min(1000, value)) : 0 } : { minSpreadPercent: Number.isFinite(value) ? Math.max(-100, Math.min(1000, value)) : 0 }); }}/></label><label>计价币范围<select value={filters.crossCurrency ? "cross" : "same"} onChange={event => updateFilters({ crossCurrency: event.target.value === "cross" })}><option value="same">仅相同计价币</option><option value="cross">跨计价币 · 按现货汇率校正</option></select></label></div>
       {favorites.size ? <div className="perp-saved-legacy"><span>旧版币种自选（包含全部组合）</span>{filters.favorites.map(base => <button type="button" key={base} onClick={() => updateFilters({ favorites: filters.favorites.filter(item => item !== base) })}>{base}<X size={12}/><span className="perp-sr-only">移除币种自选</span></button>)}</div> : null}
       {favoritePairs.size ? <details className="perp-blocked"><summary>管理 {favoritePairs.size} 个自选组合</summary><ul>{filters.favoritePairs!.map(key => <li key={key}><span>{pairName(key)}</span><button type="button" onClick={() => updateFilters({ favoritePairs: filters.favoritePairs!.filter(item => item !== key) })}>取消收藏</button></li>)}</ul></details> : null}
       {(filters.blockedPairs?.length ?? 0) > 0 ? <details className="perp-blocked"><summary>已屏蔽 {filters.blockedPairs!.length} 个组合</summary><ul>{filters.blockedPairs!.map(key => <li key={key}><span>{pairName(key)}</span><button type="button" onClick={() => updateFilters({ blockedPairs: filters.blockedPairs!.filter(item => item !== key) })}>恢复</button></li>)}</ul></details> : null}
       <div className="perp-filter-footer"><span>筛选与组合自选保存在当前浏览器</span><button type="button" onClick={resetFilters}>重置筛选</button><button type="button" className="perp-filter-done" onClick={() => setFiltersOpen(false)}>完成</button></div>
     </div> : null}
 
-    <div className="perp-ranking-heading"><div><div className="perp-view-tabs" role="group" aria-label="行情视图"><button type="button" aria-pressed={view === "rank" && !fundingSort} onClick={() => changeOpportunityMode(false)}>价差排名 {view === "rank" && !fundingSort ? <span>{ranking.length} 组合</span> : null}</button><button type="button" aria-pressed={view === "rank" && fundingSort} onClick={() => changeOpportunityMode(true)}>资金费机会 {view === "rank" && fundingSort ? <span>{ranking.length} 组合</span> : null}</button><button type="button" aria-pressed={view === "quotes"} onClick={() => changeView("quotes")}>全部报价 <span>{quoteSelection.keys.length}</span></button></div><p>{view === "rank" ? fundingSort ? "按正资金费差降序，独立捕捉负入场价差组合；展开详情暂停刷新" : `每个组合独立按${netSort ? "净" : "毛"}价差降序；展开详情暂停刷新` : "包含单平台、未配对及过期报价"}</p></div><div className="perp-price-mode" aria-label="报价口径"><button type="button" aria-pressed={filters.priceMode === "book"} className={filters.priceMode === "book" ? "active" : ""} onClick={() => updateFilters({ priceMode: "book" })}>买卖盘口</button><button type="button" aria-pressed={filters.priceMode === "mark"} className={filters.priceMode === "mark" ? "active" : ""} onClick={() => updateFilters({ priceMode: "mark" })}>标记价格</button></div></div>
-    <div className="perp-basis"><span>WS 优先 · 快照补充</span><span>{filters.crossCurrency ? "跨计价币 · 现货买卖价换算至 USDT" : "仅比较相同计价币"}</span><span>{filters.priceMode === "book" ? "毛价差未扣手续费与滑点" : "标记价仅供估值参考，不代表可成交价格"}</span>{quoteQuality.stale ? <button type="button" className="perp-stale-count perp-inline-button" onClick={() => setHealthOpen(true)}>{quoteQuality.stale} 条报价过期 · 查看原因</button> : null}{quoteQuality.unavailable ? <span>{quoteQuality.unavailable} 条{filters.priceMode === "book" ? "暂无有效盘口" : "暂无标记价"}</span> : null}</div>
-    {view === "rank" ? <>
-      <PerpetualFeeSettings budget={qualityBudget} onChange={next => { setInspection(null); setQualityBudget(next); }}/>
-      {fundingSort ? <p className="perp-funding-caption">过去 1 天 / 3 天为当前做多、做空方向的已结算资金费净累计。未来 24h 估算按当前费率及各腿结算时点计数，假设费率与价差不变；扣费后另减往返 taker 与滑点，不含价差收益。历史不足或资料缺失显示「—」。</p> : null}
-      {fundingSort && fundingHistoryError ? <p className="perp-quality-notice" role="status">{fundingHistoryError}</p> : null}
-      <div className="perp-quality-caption"><span>分别核对：价差持续性、报价收窄证据与资金费收支</span><span>{qualityLoading ? "质量资料更新中 · 保留已获取资料" : qualityReport ? `最近读取 ${stamp(qualityReport.generatedAt)} · 各项按来源时间判断有效性` : "质量资料采集中"}</span></div>
-      {qualityError || qualityReport?.error ? <p className="perp-quality-notice" role="status">{qualityError || qualityReport?.error}</p> : null}
-    </> : null}
+    {view === "rank" && fundingHistoryError ? <p className="perp-quality-notice" role="status">{fundingHistoryError}</p> : null}
     {filters.crossCurrency ? <p className="perp-currency-warning">{fxError || (fx ? `汇率快照 ${stamp(fx.generatedAt)} · 仅纳入有新鲜买卖汇率的组合；USD 等缺失汇率不假定等于 1。换汇手续费另计。` : "正在读取现货汇率，缺失汇率的跨币组合暂不参与排名。")}</p> : null}
     {filters.crossCurrency && fx ? <details className="perp-fx-details"><summary>查看每条汇率的来源时间与买卖价</summary><div>{["USDC", "USD1", "USDG", "USD"].map(currency => { const rate = fx.rates[currency]; return <p key={currency}><strong>{currency} / USDT</strong> · {rate ? <>买 {rate.bid.toFixed(6)} / 卖 {rate.ask.toFixed(6)} · 源时间 {stamp(rate.at)}{now - rate.at > fx.staleAfterMs ? " · 已过期" : ""}</> : "未纳入"}{fx.reasons?.[currency] ? <span> · {fx.reasons[currency]}</span> : null}</p>; })}</div></details> : null}
-    {view === "quotes" ? <><p className="perp-quotes-caption">平台组合与价差阈值仅影响排名。此处保留原始合约单位，独立合约不参与跨所比较。</p><div className="perp-table-wrap"><QuoteDetails crossex={crossex} quotes={quoteRows} venues={venues} mode={filters.priceMode} now={now} staleAfterMs={data?.staleAfterMs ?? 30_000} standalone/>{!quoteRows.length ? <div className="perp-empty"><strong>暂无符合条件的报价</strong><p>{!data || !quotes.length ? emptyMessage : "可以调整币种搜索或交易所筛选。"}</p></div> : null}</div></> : <div className="perp-table-wrap"><table className="perp-table"><thead><tr><th scope="col">币种</th><th scope="col">做多 / {filters.priceMode === "book" ? "买入卖一" : "标记价"}</th><th scope="col">做空 / {filters.priceMode === "book" ? "卖出买一" : "标记价"}</th><th scope="col" aria-sort={fundingSort ? undefined : "descending"}>{netSort ? "净价差" : "毛价差"} {fundingSort ? null : <ArrowDown size={12}/>}<small className="perp-th-note">{netSort ? "扣往返费用 / 滑点" : "附扣费后估算"}</small></th><th scope="col">聚合质量</th><th scope="col" aria-sort={fundingSort ? "descending" : undefined}>资金费差 / 8h{fundingSort ? <ArrowDown size={12}/> : null}{fundingSort ? <small className="perp-th-note">历史累计 / 未来估算</small> : null}</th><th scope="col">报价时间</th><th scope="col"><span className="perp-sr-only">展开报价</span></th></tr></thead>
+    {view === "quotes" ? <><p className="perp-quotes-caption">平台组合与价差阈值仅影响排名。此处保留原始合约单位，独立合约不参与跨所比较。</p><div className="perp-table-wrap"><QuoteDetails crossex={crossex} quotes={quoteRows} venues={venues} mode={filters.priceMode} now={now} staleAfterMs={data?.staleAfterMs ?? 30_000} standalone/>{!quoteRows.length ? <div className="perp-empty"><strong>暂无符合条件的报价</strong><p>{!data || !quotes.length ? emptyMessage : "可以调整币种搜索或交易所筛选。"}</p></div> : null}</div></> : <div className="perp-table-wrap scanner-table-wrap" tabIndex={0} role="region" aria-label="套利组合表格，可横向滚动"><table className="perp-table perp-scanner-table"><thead><tr><th scope="col">币种</th>{visibleColumns.map(column => {
+      const sortable = column.id === "spread" || column.id === "fundingSpread" || column.id === "annualized";
+      const sorted = column.id === "spread" ? !fundingSort : column.id === "fundingSpread" ? fundingSort : false;
+      return <th scope="col" key={column.id} data-column={column.id} aria-sort={sortable && sorted ? "descending" : undefined}>{sortable ? <button type="button" className="scanner-sort-column" onClick={() => updateFilters({ sortBy: column.id === "spread" ? netSort ? "net" : "gross" : "funding" })}>{column.id === "spread" ? netSort ? "净价差" : filters.priceMode === "mark" ? "标记价差" : column.label : column.label}{sorted ? <ArrowDown size={11}/> : null}</button> : column.label}{column.id === "fundingSpread" ? <small>/ 8h</small> : column.id === "annualized" ? <small>当前费率估算</small> : column.id === "quote" ? <small>{filters.priceMode === "book" ? "多卖一 / 空买一" : "标记价 · 仅供参考"}</small> : null}</th>;
+    })}<th scope="col"><span className="perp-sr-only">展开组合详情</span></th></tr></thead>
       <tbody>{rows.map(row => {
         const rowKey = perpetualSpreadKey(row), isExpanded = expanded === rowKey;
         const detailId = `perp-detail-${encodeURIComponent(rowKey)}`;
@@ -407,26 +442,52 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
         const longFunding = normalizedFunding8h(row.long, now), shortFunding = normalizedFunding8h(row.short, now);
         const fundingSpread = longFunding === null || shortFunding === null ? null : shortFunding - longFunding;
         const fundingScenario = fundingScenarios?.get(rowKey);
+        const category = scannerPairCategory(row);
+        const categoryLabel = SCANNER_CATEGORIES.find(item => item.id === category)?.label ?? "未分类";
+        const annualized = annualizedFundingPercent(fundingSpread);
+        const cells: Record<ScannerColumnId, ReactNode> = {
+          type: <span className="scanner-type-tag" title={categoryLabel} aria-label={categoryLabel}>{category === "crypto" ? "C" : category === "unknown" ? "?" : "R"}</span>,
+          pair: <div className="scanner-pair"><ScannerLeg quote={row.long} name={venues.get(row.long.exchange)?.name ?? row.long.exchange} side="long" now={now}/><ScannerLeg quote={row.short} name={venues.get(row.short.exchange)?.name ?? row.short.exchange} side="short" now={now}/></div>,
+          funding: <><ScannerFundingRate quote={row.long} now={now}/><ScannerFundingRate quote={row.short} now={now}/></>,
+          fundingSpread: <span className={scannerPolarity(fundingSpread)}>{scannerPercent(fundingSpread === null ? null : fundingSpread * 100)}</span>,
+          annualized: <span className={scannerPolarity(annualized)} title="当前 8h 资金费差 × 3 × 365；按单腿等名义本金简单外推，未扣费用，不复利">{scannerPercent(annualized, 1)}</span>,
+          volume: <div className="scanner-stack" title="尚未接入各交易所 24h 成交额；不以币数量或合约张数替代金额"><div>—</div><div>—</div></div>,
+          openInterest: <div className="scanner-stack" title="尚未接入按金额统一的持仓量"><div>—</div><div>—</div></div>,
+          quote: <div className="scanner-stack"><div title={String(row.buyPrice)}>{price(row.buyPrice)} <small>{row.long.quoteCurrency}</small></div><div title={String(row.sellPrice)}>{price(row.sellPrice)} <small>{row.short.quoteCurrency}</small></div>{now - row.updatedAt > (data?.staleAfterMs ?? 30_000) ? <small className="scanner-stale">报价已过期</small> : null}</div>,
+          spread: <div className={scannerPolarity(primarySpread)} title={historicalDeviation === null ? undefined : `较 1h 均值 ${historicalDeviation.toFixed(1)} bp`}><strong>{percent(primarySpread)}</strong><small className="secondary">{netSort ? "毛" : "净"} {percent(netSort ? row.spreadPercent : row.netSpreadPercent ?? null)}</small></div>,
+          history24h: <ScannerHistory long={fundingHistoryReport?.legs[`${row.long.exchange}:${row.long.symbol}`]} short={fundingHistoryReport?.legs[`${row.short.exchange}:${row.short.symbol}`]} now={now}/>,
+          history7d: <div className="scanner-history"><strong>—</strong><small>未接入</small></div>,
+          history30d: <div className="scanner-history"><strong>—</strong><small>未接入</small></div>,
+          time: <div className="scanner-time"><time dateTime={new Date(row.updatedAt).toISOString()}>{stamp(row.updatedAt)}</time><small>{age(row.updatedAt, now)}{paused ? now - row.updatedAt > (data?.staleAfterMs ?? 30_000) ? " · 已过期" : " · 已暂停" : ""}</small></div>,
+          quality: <QualityCell quality={quality} pairLabel={pairLabel} onInspect={() => inspect(row, false, "quality")}/>,
+        };
         return <Fragment key={rowKey}><tr className={isExpanded ? "perp-row-expanded" : undefined}>
-          <th scope="row" className="perp-base-cell"><button type="button" className={`perp-star ${isFavorite ? "is-favorite" : ""}`} aria-label={`${isFavorite ? "移除" : "收藏"}组合：${pairLabel}`} aria-pressed={isFavorite} onClick={() => toggleFavorite(row)}><Star size={17} fill={isFavorite ? "currentColor" : "none"}/></button><div><strong>{row.base}</strong><small>{row.crossCurrency ? `${row.long.quoteCurrency} / ${row.short.quoteCurrency}` : row.long.quoteCurrency}<span>{row.fxAdjusted ? "已换汇" : "永续"}</span></small>{favorites.has(row.base) ? <small className="perp-legacy-label">币种自选</small> : null}<PerpetualPushToggle base={row.base} settings={crossex}/><SpotTransferEvidence row={row} settings={crossex} now={now}/></div></th>
-          <td className="perp-leg perp-long"><span className="perp-mobile-label">做多</span><strong>{venues.get(row.long.exchange)?.name ?? row.long.exchange}<small>{venues.get(row.long.exchange)?.kind.toUpperCase()}</small></strong><small className="perp-leg-symbol">{row.long.symbol}</small><span title={String(row.buyPrice)}>{price(row.buyPrice)} <small>{row.long.quoteCurrency}</small></span>{fundingSort ? <FundingSchedule quote={row.long} now={now}/> : null}<DelistingNotice quote={row.long} now={now}/></td>
-          <td className="perp-leg perp-short"><span className="perp-mobile-label">做空</span><strong>{venues.get(row.short.exchange)?.name ?? row.short.exchange}<small>{venues.get(row.short.exchange)?.kind.toUpperCase()}</small></strong><small className="perp-leg-symbol">{row.short.symbol}</small><span title={String(row.sellPrice)}>{price(row.sellPrice)} <small>{row.short.quoteCurrency}</small></span>{fundingSort ? <FundingSchedule quote={row.short} now={now}/> : null}<DelistingNotice quote={row.short} now={now}/></td>
-          <td className={`perp-spread ${primarySpread !== null && primarySpread > 0 ? "positive" : primarySpread !== null && primarySpread < 0 ? "negative" : ""}`}><strong>{percent(primarySpread)}</strong><span className="perp-mobile-label">{netSort ? "净价差" : "毛价差"}</span><small className="perp-secondary-spread">{netSort ? "毛" : "净"} {percent(netSort ? row.spreadPercent : row.netSpreadPercent ?? null)}</small>{historicalDeviation !== null ? <small className="perp-deviation">较 1h 均值 {historicalDeviation >= 0 ? "+" : ""}{historicalDeviation.toFixed(1)} bp</small> : null}</td>
-          <td className="perp-quality-cell"><span className="perp-mobile-label">聚合质量</span><QualityCell quality={quality} pairLabel={pairLabel} onInspect={() => inspect(row, false, "quality")}/></td>
-          <td className={`perp-funding ${fundingSpread !== null && fundingSpread < 0 ? "negative" : ""}`}><span className="perp-mobile-label">费差 / 8h</span><strong>{fundingSpread === null ? "—" : percent(fundingSpread * 100, 4)}</strong>{fundingScenario ? <><small>未来 24h 资金费 {percent(fundingScenario.fundingPercent, 4)}</small><small className={fundingScenario.estimatedNetPercent !== null && fundingScenario.estimatedNetPercent < 0 ? "negative" : ""}>未来 24h 扣费后 {percent(fundingScenario.estimatedNetPercent, 4)}</small>{fundingScenario.reasons.length ? <small>{fundingScenario.reasons[0]}</small> : null}</> : null}{fundingSort ? <FundingHistory long={fundingHistoryReport?.legs[`${row.long.exchange}:${row.long.symbol}`]} short={fundingHistoryReport?.legs[`${row.short.exchange}:${row.short.symbol}`]} now={now}/> : null}</td>
-          <td className="perp-time"><time dateTime={new Date(row.updatedAt).toISOString()}>{stamp(row.updatedAt)}</time><small>{age(row.updatedAt, now)}{paused ? now - row.updatedAt > (data?.staleAfterMs ?? 30_000) ? " · 已过期" : " · 已暂停" : ""}</small></td>
-          <td className="perp-expand-cell"><button type="button" aria-label={`${isExpanded ? "收起" : "展开"} ${pairLabel} 质量依据与各平台报价`} aria-expanded={isExpanded} aria-controls={detailId} onClick={() => inspect(row, true)}><ChevronDown size={17}/></button></td>
-        </tr>{isExpanded ? <tr className="perp-detail-row" id={detailId}><td colSpan={8}>
-          <div className="perp-inspection-bar"><p role="status"><strong>行情已暂停</strong> · 保留 {stamp(data?.generatedAt)} 的排名与报价{expired ? " · 已过期，仅供核对" : ""}</p><button type="button" onClick={() => setInspection(null)}>收起并恢复</button></div>
+          <th scope="row" className="perp-base-cell"><button type="button" className={`perp-star ${isFavorite ? "is-favorite" : ""}`} aria-label={`${isFavorite ? "移除" : "收藏"}组合：${pairLabel}`} aria-pressed={isFavorite} onClick={() => toggleFavorite(row)}><Star size={15} fill={isFavorite ? "currentColor" : "none"}/></button><div><strong>{row.base}</strong><small>{row.crossCurrency ? `${row.long.quoteCurrency} / ${row.short.quoteCurrency}` : row.long.quoteCurrency}{row.fxAdjusted ? " · 已换汇" : ""}</small><PerpetualPushToggle base={row.base} settings={crossex}/></div></th>
+          {visibleColumns.map(column => <td key={column.id} data-column={column.id} className="scanner-number">{cells[column.id]}</td>)}
+          <td className="perp-expand-cell"><button type="button" aria-label={`${isExpanded ? "收起" : "展开"} ${pairLabel} 质量依据与各平台报价`} aria-expanded={isExpanded} aria-controls={detailId} onClick={() => inspect(row, true)}><ChevronDown size={16}/></button></td>
+        </tr>{isExpanded ? <tr className="perp-detail-row" id={detailId}><td colSpan={visibleColumns.length + 2}>
+          <div className="perp-inspection-bar"><p role="status"><strong>行情已暂停</strong> · 保留 {stamp(data?.generatedAt)} 的排名与报价{now - row.updatedAt > (data?.staleAfterMs ?? 30_000) ? " · 报价已过期，仅供核对" : ""}</p><button type="button" onClick={() => setInspection(null)}>收起并恢复</button></div>
+          <div className="scanner-detail-evidence"><SpotTransferEvidence row={row} settings={crossex} now={now}/><DelistingNotice quote={row.long} now={now}/><DelistingNotice quote={row.short} now={now}/><FundingHistory long={fundingHistoryReport?.legs[`${row.long.exchange}:${row.long.symbol}`]} short={fundingHistoryReport?.legs[`${row.short.exchange}:${row.short.symbol}`]} now={now}/>{fundingScenario ? <p>未来 24h 资金费 {percent(fundingScenario.fundingPercent, 4)} · 未来 24h 扣费后 {percent(fundingScenario.estimatedNetPercent, 4)}{fundingScenario.reasons.length ? ` · ${fundingScenario.reasons[0]}` : ""}</p> : null}</div>
           <div className="perp-detail-navigation"><div role="tablist" aria-label="组合详情" onKeyDown={event => { const tabs: DetailTab[] = ["execution", "quality", "exit", "quotes"]; const index = tabs.indexOf(detailTab); const next = event.key === "ArrowRight" ? tabs[(index + 1) % tabs.length] : event.key === "ArrowLeft" ? tabs[(index + tabs.length - 1) % tabs.length] : event.key === "Home" ? tabs[0] : event.key === "End" ? tabs[tabs.length - 1] : null; if (next) { event.preventDefault(); setDetailTab(next); document.getElementById(`${detailId}-tab-${next}`)?.focus(); } }}>{([{ id: "execution", label: "成交与持有" }, { id: "quality", label: "质量依据" }, { id: "exit", label: "平仓与跟踪" }, { id: "quotes", label: "各平台报价" }] as const).map(tab => <button type="button" role="tab" key={tab.id} id={`${detailId}-tab-${tab.id}`} aria-selected={detailTab === tab.id} tabIndex={detailTab === tab.id ? 0 : -1} aria-controls={`${detailId}-content`} onClick={() => setDetailTab(tab.id)}>{tab.label}</button>)}</div><div className="perp-detail-actions">{hubConnected && [row.long.exchange, row.short.exchange].every(id => ["binance", "bybit", "okx", "gate", "kraken", "hyperliquid", "lighter"].includes(id)) && <button type="button" onClick={() => hubNavigate("crossex", { symbol: row.base, longExchange: row.long.exchange, shortExchange: row.short.exchange })}>在 CrossEx 查看</button>}<button type="button" onClick={() => configureAlert(row)}><Bell size={13}/>{fundingSort ? "设置价差提醒" : "设置提醒"}</button><button type="button" onClick={() => blockPair(row)}><X size={13}/>屏蔽组合</button></div></div>
-          <div role="tabpanel" id={`${detailId}-content`} aria-labelledby={`${detailId}-tab-${detailTab}`} className="perp-detail-content">
+          <div role="tabpanel" id={`${detailId}-content`} aria-labelledby={`${detailId}-tab-${detailTab}`} className="perp-detail-content"><Suspense fallback={<p role="status">正在加载组合详情…</p>}>
             {detailTab === "execution" ? <><PerpetualExecution long={row.long} short={row.short} active={active} now={now}/><PerpetualHolding row={row} budget={qualityBudget} now={now} mode={filters.priceMode} fundingFocused={fundingSort}/><PerpetualTrend history={history} now={now} crossCurrency={row.crossCurrency}/></> : detailTab === "quality" ? <QualityEvidence row={row} report={qualityReport} quality={quality} venues={venues} now={now} slippagePercent={qualityBudget.slippagePercent}/> : detailTab === "exit" ? <PerpetualExit long={row.long} short={row.short} budget={qualityBudget} active={opportunitiesActive} now={now} onRegistered={() => { setInspection(null); setWorkspace("positions"); document.getElementById("perp-positions-tab")?.focus(); }}/> : <QuoteDetails crossex={crossex} quotes={detailQuotes} venues={venues} mode={filters.priceMode} now={now} staleAfterMs={data?.staleAfterMs ?? 30_000}/>}
-          </div>
+          </Suspense></div>
         </td></tr> : null}</Fragment>;
       })}</tbody></table>
       {!rows.length ? <div className="perp-empty"><span aria-hidden="true">—</span><strong>{!data || data.status === "connecting" ? "等待实时报价" : fundingSort ? "暂无符合条件的资金费机会" : "暂无符合条件的价差"}</strong><p>{emptyMessage}</p>{quotes.length > 0 ? <button type="button" onClick={resetFilters}>重置筛选</button> : null}</div> : null}
     </div>}
     <div className="perp-pagination"><span>{totalItems ? `${(visiblePage - 1) * pageSize + 1}–${Math.min(visiblePage * pageSize, totalItems)} / ${totalItems} ${view === "rank" ? "组合" : "报价"}` : `0 ${view === "rank" ? "组合" : "报价"}`}<small>每页 {pageSize} 条</small></span><div><button type="button" aria-label="上一页" disabled={visiblePage <= 1} onClick={() => changePage(visiblePage - 1)}><ChevronLeft size={16}/></button><span>{visiblePage} / {totalPages}</span><button type="button" aria-label="下一页" disabled={visiblePage >= totalPages} onClick={() => changePage(visiblePage + 1)}><ChevronRight size={16}/></button></div></div>
+    {view === "rank" ? <p className="scanner-data-note">资金费差统一折算 / 8h；年化按当前费率简单外推。24h 实际为已结算资金费净累计，非账户盈亏。成交额、持仓量和 7 天 / 30 天历史尚未接入，以「—」显示；展开组合可查看 1 天 / 3 天历史与成本估算。</p> : null}
+    <details className="scanner-tools" open={toolsOpen} onToggle={event => setToolsOpen(event.currentTarget.open)}><summary>监控工具与设置<ChevronDown size={14}/></summary><div className="scanner-tools-content">
+      <button type="button" className="perp-tool-button" title="选择七所并按现货买卖汇率比较；模拟资格由 CrossEx 模块再次核对" onClick={() => { changeView("rank"); updateFilters({ exchanges: ["binance", "bybit", "okx", "gate", "kraken", "hyperliquid", "lighter"], crossCurrency: true, pairMode: "all", priceMode: "book", search: "", favoritesOnly: false, sortBy: "gross", minSpreadPercent: 0 }); }}>CrossEx 七所</button>
+      <PerpetualManualPairs snapshot={data} mode={filters.priceMode} now={now} budget={qualityBudget} active={active} paused={paused}/>
+      <div id="perpetual-health-region" hidden={!healthOpen}><Suspense fallback={<p role="status">正在加载报价健康…</p>}>{healthOpen ? <PerpetualHealth active={active} defaultOpen/> : null}</Suspense></div>
+      <div id="perpetual-alert-region" hidden={!alertsOpen}><Suspense fallback={<p role="status">正在加载机会提醒…</p>}>{alertsVisited ? <PerpetualAlerts active={active && alertsOpen} pair={alertPair} budget={qualityBudget} defaultOpen/> : null}</Suspense></div>
+      <PerpetualCrossExSettings settings={crossex} now={now}/>
+      <PerpetualFeeSettings budget={qualityBudget} onChange={next => { setInspection(null); setQualityBudget(next); }}/>
+      <p className="perp-quality-caption">{qualityLoading ? "质量资料更新中" : qualityReport ? `质量资料最近读取 ${stamp(qualityReport.generatedAt)}` : "质量资料采集中"} · {quoteQuality.stale} 条报价过期 / {quoteQuality.unavailable} 条暂缺</p>
+      {qualityError || qualityReport?.error ? <p className="perp-quality-notice" role="status">{qualityError || qualityReport?.error}</p> : null}
+    </div></details>
     <details className="perp-method"><summary>计算口径与数据时间</summary><p>毛价差 =（做空平台价格 ÷ 做多平台价格 − 1）× 100%。买卖盘口取买入卖一、卖出买一；标记价格取两平台标记价。做多与做空必须来自不同在线平台，两腿价格时间相差不超过 5 秒；同一币种的所有有效平台与合约组合分别参与排名，按所选毛价差或净价差从高到低排列。净价差扣除双腿 taker 往返费与滑点预算，尚未计持有期资金费和退出价差；缺失费率的组合不参与净排序。</p><p>资金费差 = 做空腿费率 × 8 ÷ 该腿周期小时数 − 做多腿费率 × 8 ÷ 该腿周期小时数。正值表示按当前费率估算的净收入，负值为净支出；不是已结算收益。资金费或实际周期缺失、超过 5 分钟未更新时显示「—」。</p><p>资金费机会独立按正的 8 小时折算费差筛选，不受毛价差或净价差阈值限制。24h 估算以单腿名义金额为基准，按两腿各自下次结算时间及周期计数，假设费率与入场价差不变，扣除往返 taker 手续费和滑点预算；不包含价差收益，也不代表已锁定利润。下次结算时间缺失或已过时，保留折算费差供比较，实际结算估算显示「—」。现有机会提醒仅按净价差触发。</p><p>过去 1 天 / 3 天只累计交易所真实已结算记录，分别取两腿共同截止时间前 24 / 72 小时，窗口为（截止 − 时长，截止]。净累计 = 空腿费率累计 − 多腿费率累计，分母为单腿等名义本金，不复利、不含交易成本，也不是账户实际收益。窗口前缺少真实结算记录或窗口内无记录时显示「—」，不以当前费率外推或补零；双腿合约与当前行方向一致。历史资料约每 5 分钟更新，过期或刷新失败时保留上次累计并标注状态。</p><p>价格超过 {(data?.staleAfterMs ?? 30_000) / 1000} 秒未更新会退出排名，成交价不会代替缺失盘口。报价时间取两腿较早的价格时间，所有时钟均为北京时间。毛价差未计手续费、滑点、深度和资金费；跨平台对冲仍存在成交差异。</p><p>筛选分权重：市值、市值 / FDV、官方多空拥挤度各 10%，近 1 小时价差持续性 10%，近 24 小时报价收窄证据 40%，资金费收入方向 20%。价差持续存在不代表会收窄；冷启动收窄统计至少积累 12 小时，且需 6 个完整 1h 窗口。只使用真实采样，缺失项不补零；资料不足时暂不评分，分数不代表盈利概率。质量、手续费和资金费差均对应当前行的做多与做空合约组合；净排序依据为扣费后的估算价差，质量分不代表成交容量。1h 历史偏离仅在至少 30 个有效样本、覆盖不低于 50% 时展示，1 bp = 0.01 个百分点。</p><p>每 5 分钟核对交易所公开合约目录；未标记不代表尚未公告，公开接口信息可能不完整。</p><p>最近快照 {stamp(data?.generatedAt)}。展开详情时保留当前列表、页码、平台组合及报价，并暂停本页行情接收；来源时间继续计时，过期值仅供核对。收起、翻页或修改筛选后恢复，后台采集与低频质量资料查询继续运行。页面隐藏或切换监控后暂停接收，返回立即刷新；实时推送中断时自动切换为每 5 秒快照，并尝试恢复推送。</p></details>
     </>}
   </section>;

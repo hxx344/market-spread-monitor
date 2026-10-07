@@ -17,7 +17,8 @@ const MAX_FUTURE_MS = 5_000;
 const fields = ['bid', 'ask', 'mark', 'last', 'fundingRate', 'fundingIntervalHours', 'nextFundingAt'];
 const priceFields = new Set(['bid', 'ask', 'mark', 'last']);
 const feeFields = ['takerFeeRate', 'takerFeeAt', 'takerFeeSource'];
-const catalogFields = new Set(['delisting', 'delistingAt', ...feeFields, 'identityVerified']);
+const identityFields = ['assetClass', 'identitySource', 'identityVerified'];
+const catalogFields = new Set(['delisting', 'delistingAt', ...feeFields, ...identityFields]);
 const streamValueFields = [...fields, 'base', 'quoteCurrency', 'multiplier', 'displayBase', 'contractUnit', 'collateralCurrency', 'comparable', 'transport', ...catalogFields];
 const streamTimeFields = ['bidAt', 'askAt', 'bidAskAt', 'markAt', 'lastAt', 'fundingAt', 'fundingIntervalHoursUpdatedAt', 'nextFundingAtUpdatedAt', 'receivedAt', 'sourceTime'];
 
@@ -120,6 +121,18 @@ export function mergePerpetualQuote(previous, update, now = Date.now()) {
 }
 
 function withMarketMetadata(quote, market) {
+  // Directory classification is display metadata, not a new price confirmation or
+  // permission to compare contracts. Old subscription contexts cannot override it.
+  let classified = quote;
+  for (const field of identityFields) {
+    const candidate = market?.[field];
+    const valid = field === 'identityVerified' ? typeof candidate === 'boolean' : typeof candidate === 'string' && candidate.trim().length > 0;
+    const value = valid ? candidate : quote[field] === undefined ? undefined : null;
+    if (value === quote[field]) continue;
+    if (classified === quote) classified = { ...quote };
+    classified[field] = value;
+  }
+  quote = classified;
   const delisting = market?.delisting === true;
   const delistingAt = delisting && Number.isSafeInteger(market.delistingAt) && market.delistingAt > 0 && market.delistingAt <= 8.64e15 ? market.delistingAt : null;
   const sameLifecycle = quote.delisting === delisting && quote.delistingAt === delistingAt;
@@ -328,7 +341,7 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
         if (!specs.length) throw new Error('No subscriptions');
         state.marketCount = markets.length;
         // Funding intervals, contract multipliers and channel IDs may change while symbols stay the same.
-        // Lifecycle and fee metadata must reach readers even without a new price, and
+        // Lifecycle, fee and classification metadata must reach readers without a new price, and
         // must not tear down subscriptions or refresh the original price times.
         const identities = new Map(markets.map(market => [market.symbol, market]));
         const signature = JSON.stringify([...markets].sort((left, right) => left.symbol.localeCompare(right.symbol)), (key, value) => catalogFields.has(key) ? undefined : value);
