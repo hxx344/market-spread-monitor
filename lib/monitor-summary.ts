@@ -1,7 +1,7 @@
 import type { LiveQuote } from "./market";
 import { createTrend, type MonitorTrend, type TrendHistory } from "./monitor-trend.ts";
 import { hynixExchangeQuote, type ExchangeQuote } from "./exchange-quotes.ts";
-import { goldOilChartPoints, GOLD_OIL_INTERVAL_MS, type GoldOilQuote, type GoldOilHistory } from './gold-oil.ts';
+import { goldOilChartPoints, GOLD_OIL_INTERVAL_MS, GOLD_OIL_INSTRUMENTS, type GoldOilType, type GoldOilQuote, type GoldOilHistory } from './gold-oil.ts';
 import { currentGoldOilFunding } from './gold-oil-funding.ts';
 
 export type SummaryStatus = "loading" | "live" | "snapshot" | "stale" | "error";
@@ -13,12 +13,12 @@ export function goldOilTrend(history: GoldOilHistory | null = null, error = fals
     points: goldOilChartPoints(history, 7).flatMap(point => point.ratio === null ? [] : [{ time: point.time, value: point.ratio }]),
   } : undefined, { days: 7, intervalMs: GOLD_OIL_INTERVAL_MS, label: '7 天 · 15 分钟线', shortLabel: '7天', unit: '桶/盎司' }, error);
 }
-export function goldOilSummary(quote: GoldOilQuote | null, error = false, trend?: MonitorTrend): MonitorSummary {
+export function goldOilSummary(quote: GoldOilQuote | null, error = false, trend?: MonitorTrend, oilType: GoldOilType = quote?.oilType ?? 'cl'): MonitorSummary {
   const funding = currentGoldOilFunding(quote);
   return { status: quote ? error ? 'stale' : quote.status === 'snapshot' ? 'snapshot' : 'live' : error ? 'error' : 'loading',
     fetchedAt: quote?.fetchedAt ?? null,
     metrics: [{ label: '金油比 · 桶/盎司', value: quote ? quote.ratio.toFixed(3) : '—' }, metric('净资金费 / 年化', funding ? funding.annualized * 100 : null, 2, '%')],
-    note: '空黄金、多原油 · 等 USDT 名义', trend: trend ?? goldOilTrend() };
+    note: `空黄金、多${GOLD_OIL_INSTRUMENTS[oilType].name} · 等 USDT 名义`, trend: trend ?? goldOilTrend() };
 }
 export type OilSummaryUpdate = {
   status: SummaryStatus;

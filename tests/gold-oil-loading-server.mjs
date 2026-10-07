@@ -14,8 +14,14 @@ const history = { ...common, interval: '15m', coverageStart: start, points: Arra
 const quote = { ...common, cl: { symbol: 'CLUSDT', price: 80, updatedAt: common.fetchedAt }, xau: { symbol: 'XAUUSDT', price: 4000, updatedAt: common.fetchedAt }, ratio: 50, funding: null };
 const funding = { source: 'Binance', status: 'live', fetchedAt: common.fetchedAt, coverageStart: start, coverageEnd: end,
   points: Array.from({ length: 84 }, (_, index) => ({ time: start + index * 7200000, cl: 0.0001, xau: 0.0003 })) };
-const snapshots = { quote, history, funding };
-const release = registerInitialMarket(new Map([['cl-xau', { handle(action) { return snapshots[action]; } }]]));
+const bz = {
+  quote: { ...quote, oilType: 'bz', cl: undefined, oil: { symbol: 'BZUSDT', price: 100, updatedAt: common.fetchedAt }, ratio: 40 },
+  history: { ...history, oilType: 'bz', points: history.points.map(({ time, xau }) => ({ time, oil: 100, xau, ratio: xau === null ? null : xau / 100 })) },
+  funding: { ...funding, oilType: 'bz', points: funding.points.map(({ time, xau }) => ({ time, oil: 0.0005, xau })) },
+};
+delete bz.quote.cl;
+const snapshots = { quote, history, funding, bz };
+const release = registerInitialMarket(new Map([['cl-xau', { handle(action) { return action.startsWith('bz/') ? bz[action.slice(3)] : snapshots[action]; } }]]));
 const app = next({ dev: false, hostname: '127.0.0.1', port: 3190 });
 await app.prepare();
 const handler = app.getRequestHandler();

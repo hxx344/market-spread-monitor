@@ -35,7 +35,7 @@ test('ratio rules have explicit units, positive thresholds, strict identifiers a
   assert.equal(validateGoldOilAlerts({ enabled: true, rules: [rule()] }).rules[0].metric, 'ratio');
   for (const change of [{ threshold: 0 }, { threshold: -1 }, { threshold: NaN }, { threshold: 1e6 + 1 }, { id: '__proto__' }, { id: 'constructor' }, { metric: 'spreadPercent' }, { label: 'fake\nmessage' }, { cooldownMinutes: -1 }, { hysteresis: Infinity }]) assert.throws(() => validateGoldOilAlerts({ enabled: true, rules: [rule(change)] }));
   assert.throws(() => validateGoldOilAlerts({ enabled: true, rules: [rule(), rule({ id: 'copy' })] }), /重复/);
-  const now = Date.now(); assert.deepEqual(goldOilAlertValues(quote(now), now), { ratio: 50, xau: 4000, cl: 80 });
+  const now = Date.now(); assert.deepEqual(goldOilAlertValues(quote(now), now), { ratio: 50, xau: 4000, oil: 80 });
   assert.equal(goldOilAlertValues({ ...quote(now), funding: { unavailable: true } }, now).ratio, 50);
 });
 

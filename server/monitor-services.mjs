@@ -16,8 +16,8 @@ import { openPerpetualAlertStore } from './perpetual-alert-store.mjs';
 import { openCrossExSettingsStore } from './perpetual-crossex-store.mjs';
 import { openPerpetualPaperStore } from './perpetual-paper-store.mjs';
 import { openMonitorControlStore, attachMonitorControl } from './monitor-control.mjs';
-import { GOLD_OIL_QUOTE_MS, GOLD_OIL_HISTORY_MS, GOLD_OIL_FUNDING_MS } from '../lib/gold-oil.ts';
-import { goldOilAlertDefaults, validateGoldOilAlerts, goldOilAlertDefinition, confirmGoldOilTriggers } from './gold-oil/alerts.mjs';
+import { GOLD_OIL_QUOTE_MS, GOLD_OIL_HISTORY_MS, GOLD_OIL_FUNDING_MS, goldOilAction, parseGoldOilAction } from '../lib/gold-oil.ts';
+import { goldOilAlertDefaults, validateGoldOilAlerts, createGoldOilAlertDefinition, confirmGoldOilTriggers } from './gold-oil/alerts.mjs';
 import { exchangeFundingAction, fundingExchangeFromAction } from '../lib/exchange-funding-history.ts';
 import { OIL_HEDGE_PRICES_ACTION, HEDGE_PRICES_REFRESH_MS } from '../lib/oil-hedge-prices.ts';
 
@@ -27,11 +27,11 @@ const exchangeFundingActions = Object.fromEntries(comparisonExchanges('oil').map
 /** Runtime adapters own their schedule, storage and API. They share one HTTP server. */
 export async function createMonitorServices(directory, { externallyLocked = false, env = process.env, notificationOptions, hynixOptions, oilOptions, goldOilOptions, marketOptions, perpetualOptions } = {}) {
   const oilStore = new FileStore(join(directory, "oil"), externallyLocked);
-  const goldOilStore = new FileStore(join(directory, 'cl-xau'), externallyLocked, { defaults: goldOilAlertDefaults, validate: validateGoldOilAlerts });
+  const goldOilStores = Object.fromEntries(['cl', 'bz'].map(oilType => [oilType, new FileStore(join(directory, 'cl-xau', ...(oilType === 'bz' ? ['bz'] : [])), externallyLocked, { defaults: goldOilAlertDefaults, validate: input => validateGoldOilAlerts(input, oilType) })]));
   await oilStore.acquire();
   let marketStore, perpetualStore;
   try {
-    await goldOilStore.acquire();
+    for (const store of Object.values(goldOilStores)) await store.acquire();
     const controlStore = await openMonitorControlStore(directory);
     const pollSeconds = Number(env.OIL_POLL_INTERVAL_SECONDS || 30);
     if (!Number.isInteger(pollSeconds) || pollSeconds < 10 || pollSeconds > 3600) throw new Error("OIL_POLL_INTERVAL_SECONDS 必须为 10–3600 的整数");
@@ -39,11 +39,15 @@ export async function createMonitorServices(directory, { externallyLocked = fals
     seedMarketDatabase(marketStore);
     let hynixRunning = false, oilRunning = false, goldOilRunning = false;
     const collector = createMarketCollector(marketStore, { jobs: marketJobs({ oilIntervalMs: pollSeconds * 1000 }), ...marketOptions,
-      onStored(job) { if (job.action === "quote") { if (job.id === "hynix" && hynixRunning) return hynix.check(); if (job.id === "oil" && oilRunning) return oil.tick(); if (job.id === 'cl-xau' && goldOilRunning) return goldOil.tick(); } },
+      onStored(job) {
+        if (job.id === 'cl-xau' && goldOilRunning) { const parsed = parseGoldOilAction(job.action); if (parsed?.action === 'quote') return goldOils[parsed.oilType].tick(); }
+        if (job.action === 'quote') { if (job.id === 'hynix' && hynixRunning) return hynix.check(); if (job.id === 'oil' && oilRunning) return oil.tick(); }
+      },
     });
     const read = (id, action, fresh = false) => {
       if (fresh && !collector.healthy()) throw new Error("行情数据库写入失败，暂停告警。");
-      const interval = id === 'cl-xau' ? action === 'quote' ? GOLD_OIL_QUOTE_MS : action === 'funding' ? GOLD_OIL_FUNDING_MS : GOLD_OIL_HISTORY_MS : action === OIL_HEDGE_PRICES_ACTION ? HEDGE_PRICES_REFRESH_MS : action === OIL_CANDLE_ACTION ? OIL_CANDLE_REFRESH_MS : exchangeFromAction(action) ? EXCHANGE_REFRESH_MS : action === "quote" ? id === "oil" ? pollSeconds * 1000 : 10_000 : action === "history" && id === "hynix" ? 60_000 : 300_000;
+      const goldAction = id === 'cl-xau' ? parseGoldOilAction(action)?.action : null;
+      const interval = goldAction ? goldAction === 'quote' ? GOLD_OIL_QUOTE_MS : goldAction === 'funding' ? GOLD_OIL_FUNDING_MS : GOLD_OIL_HISTORY_MS : action === OIL_HEDGE_PRICES_ACTION ? HEDGE_PRICES_REFRESH_MS : action === OIL_CANDLE_ACTION ? OIL_CANDLE_REFRESH_MS : exchangeFromAction(action) ? EXCHANGE_REFRESH_MS : action === "quote" ? id === "oil" ? pollSeconds * 1000 : 10_000 : action === "history" && id === "hynix" ? 60_000 : 300_000;
       const value = marketStore.read(id, action, { fresh, maxAgeMs: interval * 2 + 15_000 });
       return collector.healthy() ? value : { ...value, status: "snapshot", collection: { ...value.collection, stale: true, error: "行情数据库写入失败，保留已保存数据。" } };
     };
@@ -57,11 +61,16 @@ export async function createMonitorServices(directory, { externallyLocked = fals
     const previousOil = await oilStore.read(), oilData = activateBinanceSource(previousOil);
     if (oilData !== previousOil) await oilStore.write(oilData);
     const oil = new Monitor({ store: oilStore, data: oilData, fetchMarket: async () => read("oil", "quote", true), pollSeconds, ...oilOptions, notify: notifications.send, webhookConfigured: notifications.configured });
-    const goldOil = new Monitor({ store: goldOilStore, data: await goldOilStore.read(), fetchMarket: async () => read('cl-xau', 'quote', true), pollSeconds: GOLD_OIL_QUOTE_MS / 1000, ...goldOilOptions,
-      definition: goldOilAlertDefinition, notify: notifications.send, webhookConfigured: notifications.configured,
-      canRun: () => goldOilRunning && controlStore.get().monitors['cl-xau'].enabled,
-      beforeSend: (_market, due) => confirmGoldOilTriggers(read('cl-xau', 'quote', true), due, goldOil.clock()),
-    });
+    const goldOils = {};
+    for (const oilType of ['cl', 'bz']) {
+      const store = goldOilStores[oilType], quoteAction = goldOilAction('quote', oilType);
+      const monitor = new Monitor({ store, data: await store.read(), fetchMarket: async () => read('cl-xau', quoteAction, true), pollSeconds: GOLD_OIL_QUOTE_MS / 1000, ...goldOilOptions,
+        definition: createGoldOilAlertDefinition(oilType), notify: notifications.send, webhookConfigured: notifications.configured,
+        canRun: () => goldOilRunning && controlStore.get().monitors['cl-xau'].enabled,
+        beforeSend: (_market, due) => confirmGoldOilTriggers(read('cl-xau', quoteAction, true), due, monitor.clock(), oilType),
+      });
+      goldOils[oilType] = monitor;
+    }
     let coinIds = {};
     if (env.PERPETUAL_COIN_IDS) {
       try {
@@ -85,16 +94,21 @@ export async function createMonitorServices(directory, { externallyLocked = fals
     const perpetual = await createPerpetual();
     const services = new Map([
       ['cl-xau', {
-        start() { goldOilRunning = true; goldOil.start(); }, async stop() { goldOilRunning = false; await goldOil.stop(); }, healthy: () => collector.healthy() && !goldOil.storageError,
-        actions: { quote: ['GET'], history: ['GET'], funding: ['GET'], status: ['GET'], config: ['GET', 'PUT'], events: ['GET'] },
+        start() { goldOilRunning = true; for (const monitor of Object.values(goldOils)) monitor.start(); },
+        async stop() { goldOilRunning = false; await Promise.all(Object.values(goldOils).map(monitor => monitor.stop())); },
+        healthy: () => collector.healthy() && Object.values(goldOils).every(monitor => !monitor.storageError),
+        actions: Object.fromEntries(['cl', 'bz'].flatMap(oilType => ['quote', 'history', 'funding', 'status', 'config', 'events'].map(action => [goldOilAction(action, oilType), action === 'config' ? ['GET', 'PUT'] : ['GET']]))),
         async handle(action, method, input) {
-          if (method === 'GET' && ['quote', 'history', 'funding'].includes(action)) return read('cl-xau', action);
-          if (action === 'status' && method === 'GET') return { ...goldOil.status(), available: true, monitorId: 'cl-xau' };
-          if (action === 'config' && method === 'GET') return goldOil.configuration();
-          if (action === 'events' && method === 'GET') return { events: structuredClone(goldOil.data.events) };
-          if (action === 'config' && method === 'PUT') {
+          const parsed = parseGoldOilAction(action);
+          if (!parsed) throw Object.assign(Error('模块不支持此接口'), { status: 404 });
+          const monitor = goldOils[parsed.oilType];
+          if (method === 'GET' && ['quote', 'history', 'funding'].includes(parsed.action)) return read('cl-xau', action);
+          if (parsed.action === 'status' && method === 'GET') return { ...monitor.status(), available: true, monitorId: 'cl-xau', oilType: parsed.oilType };
+          if (parsed.action === 'config' && method === 'GET') return { ...monitor.configuration(), oilType: parsed.oilType };
+          if (parsed.action === 'events' && method === 'GET') return { oilType: parsed.oilType, events: structuredClone(monitor.data.events) };
+          if (parsed.action === 'config' && method === 'PUT') {
             if (!Number.isSafeInteger(input?.revision) || input.revision < 0) throw Error('缺少有效配置版本号');
-            return goldOil.configure(input.config, input.revision);
+            return { ...await monitor.configure(input.config, input.revision), oilType: parsed.oilType };
           }
         },
       }],
@@ -127,7 +141,7 @@ export async function createMonitorServices(directory, { externallyLocked = fals
       }],
     ]);
     services.notifications = notifications;
-    services.market = { start: () => collector.start(), healthy: () => collector.healthy(), status: () => marketStore.status(), async stop() { await collector.stop(); marketStore.close(); await goldOilStore.release(); await oilStore.release(); } };
+    services.market = { start: () => collector.start(), healthy: () => collector.healthy(), status: () => marketStore.status(), async stop() { await collector.stop(); marketStore.close(); for (const store of Object.values(goldOilStores)) await store.release(); await oilStore.release(); } };
     return attachMonitorControl(services, controlStore, { collector, factories: { perpetual: createPerpetual } });
-  } catch (error) { perpetualStore?.close(); marketStore?.close(); await goldOilStore.release(); await oilStore.release(); throw error; }
+  } catch (error) { perpetualStore?.close(); marketStore?.close(); for (const store of Object.values(goldOilStores)) await store.release(); await oilStore.release(); throw error; }
 }

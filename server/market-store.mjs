@@ -14,12 +14,17 @@ validators[`oil/${OIL_CANDLE_ACTION}`] = validateIntradaySnapshot;
 validators['cl-xau/quote'] = validateGoldOilQuote;
 validators['cl-xau/history'] = validateGoldOilHistory;
 validators['cl-xau/funding'] = validateGoldOilFunding;
+validators['cl-xau/bz/quote'] = value => validateGoldOilQuote(value, 'bz');
+validators['cl-xau/bz/history'] = value => validateGoldOilHistory(value, 'bz');
+validators['cl-xau/bz/funding'] = value => validateGoldOilFunding(value, 'bz');
 validators[`oil/${OIL_HEDGE_PRICES_ACTION}`] = validateOilHedgePrices;
 for (const id of ['oil', 'hynix']) for (const exchange of comparisonExchanges(id)) validators[`${id}/${exchangeAction(exchange)}`] = value => validateComparisonQuote(value, exchange, id);
 for (const exchange of comparisonExchanges('oil')) validators[`oil/${exchangeFundingAction(exchange)}`] = value => validateExchangeFundingHistory(value, exchange);
 export const datasetKeys = Object.keys(validators);
 const timestamp = value => Date.parse(value.fetchedAt ?? value.metadata?.fetchedAt);
 const keyFor = (id, action) => { const key = `${id}/${action}`; if (!Object.hasOwn(validators, key)) throw new Error('Unknown market dataset'); return key; };
+// Old CL payloads remain on disk; normalize only at the read boundary.
+const decode = (key, payload) => key.startsWith('cl-xau/') ? validators[key](JSON.parse(payload)) : JSON.parse(payload);
 // Source changes use a new namespace. Existing Hyperliquid snapshots and every old observation stay untouched.
 export const storageKey = key => ['oil/quote', 'oil/history', 'oil/funding', `oil/${OIL_CANDLE_ACTION}`].includes(key) ? key.replace('oil/', 'oil/binance/') : key;
 
@@ -55,7 +60,7 @@ export async function openMarketStore(filename, { clock = Date.now } = {}) {
     const save = db.prepare('UPDATE market_datasets SET payload=?,source_ms=?,saved_ms=?,attempt_ms=?,success_ms=?,error=NULL WHERE key=?');
     let closed = false;
     return {
-      raw(id, action) { const row = get.get(storageKey(keyFor(id, action))); return row.payload ? JSON.parse(row.payload) : null; },
+      raw(id, action) { const key = keyFor(id, action), row = get.get(storageKey(key)); return row.payload ? decode(key, row.payload) : null; },
       write(id, action, input, { seed = false } = {}) {
         const key = keyFor(id, action), persistedKey = storageKey(key), previous = get.get(persistedKey);
         if (seed && previous.payload) return false;
@@ -80,11 +85,11 @@ export async function openMarketStore(filename, { clock = Date.now } = {}) {
         db.prepare('UPDATE market_datasets SET attempt_ms=?,error=? WHERE key=?').run(clock(), message, storageKey(keyFor(id, action)));
       },
       read(id, action, { maxAgeMs = action === 'quote' || action.endsWith('/quote') ? 45_000 : 615_000, fresh = false } = {}) {
-        const row = get.get(storageKey(keyFor(id, action)));
+        const key = keyFor(id, action), row = get.get(storageKey(key));
         if (!row.payload) throw new Error('数据库尚未收到行情，后台正在采集。');
         const stale = row.success_ms === null || Boolean(row.error) || clock() - row.source_ms > maxAgeMs;
         if (fresh && stale) throw new Error('后台行情采集失败或已过期。');
-        return { ...JSON.parse(row.payload), status: stale ? 'snapshot' : 'live', collection: { source: 'database', stale, lastAttemptAt: row.attempt_ms === null ? null : new Date(row.attempt_ms).toISOString(), lastSuccessAt: row.success_ms === null ? null : new Date(row.success_ms).toISOString(), error: row.error } };
+        return { ...decode(key, row.payload), status: stale ? 'snapshot' : 'live', collection: { source: 'database', stale, lastAttemptAt: row.attempt_ms === null ? null : new Date(row.attempt_ms).toISOString(), lastSuccessAt: row.success_ms === null ? null : new Date(row.success_ms).toISOString(), error: row.error } };
       },
       status() { return datasetKeys.map(key => { const { payload: _payload, ...row } = get.get(storageKey(key)); return { ...row, key }; }).sort((a, b) => a.key.localeCompare(b.key)); },
       count(id, action) { return db.prepare('SELECT count(*) AS count FROM market_observations WHERE dataset=?').get(storageKey(keyFor(id, action))).count; },

@@ -10,10 +10,11 @@ import { oilSpreadPercent } from "../modules/oil/spread.mjs";
 import type { GoldOilQuote, GoldOilHistory } from './gold-oil';
 import type { GoldOilFundingHistory } from './gold-oil-funding';
 
+export type InitialGoldOilMarket = { quote: GoldOilQuote | null; history: GoldOilHistory | null; funding?: GoldOilFundingHistory | null };
 export type InitialMarketData = {
   renderedAt: number;
   runtime?: MonitorRuntimeMap;
-  'cl-xau'?: { quote: GoldOilQuote | null; history: GoldOilHistory | null; funding?: GoldOilFundingHistory | null };
+  'cl-xau'?: InitialGoldOilMarket & { bz?: InitialGoldOilMarket };
   hynix: { quote: LiveQuote | null; history: MarketData | null; exchanges?: ExternalQuoteSet };
   oil: { quote: (ReturnType<typeof validateOilQuote> & { status: "live" | "snapshot" }) | null; history?: ReturnType<typeof validateOilHistory> | null; candles?: ReturnType<typeof createIntradaySnapshot> | null; exchanges?: ExternalQuoteSet };
 };

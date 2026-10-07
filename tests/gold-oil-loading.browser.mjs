@@ -11,18 +11,26 @@ async page => {
   await page.route('**/api/**', async route => {
     const action = new URL(route.request().url()).pathname.split('/').at(-1);
     if (!route.request().url().includes('/cl-xau/') || !seed[action]) return route.fulfill({ status: 503, json: { error: 'unrelated fixture' } });
-    if (action === 'quote') return route.fulfill({ json: seed.quote });
+    const market = route.request().url().includes('/cl-xau/bz/') ? seed.bz : seed;
+    if (action === 'quote') return route.fulfill({ json: market.quote });
     counts[action]++;
     if (mode === 'hold') await new Promise(resolve => pending.push(resolve));
-    return route.fulfill(mode === 'fail' ? { status: 503, json: { error: 'fixture outage' } } : { json: seed[action] }).catch(() => {});
+    return route.fulfill(mode === 'fail' ? { status: 503, json: { error: 'fixture outage' } } : { json: market[action] }).catch(() => {});
   });
   try {
     await page.setViewportSize({ width: 1440, height: 1050 });
-    await page.goto('http://127.0.0.1:3190/?monitor=cl-xau');
+    await page.goto('http://127.0.0.1:3190/?monitor=cl-xau&goldOil=cl');
     const panel = page.getByRole('tabpanel', { name: '金油比', exact: true }).locator('.oil-panel');
     const price = panel.locator('.gold-chart .gold-chart-svg'), fees = panel.locator('.gold-funding-chart .gold-chart-svg');
     await price.waitFor(); await fees.waitFor();
     check(counts.history === 0 && counts.funding === 0, 'Both seeded charts render without a duplicate initial API read');
+    await page.goto('http://127.0.0.1:3190/?monitor=cl-xau&goldOil=bz');
+    await price.waitFor(); await fees.waitFor();
+    check(await panel.getByRole('button', { name: 'BZ · 布伦特原油', exact: true }).getAttribute('aria-pressed') === 'true', 'SSR URL selects BZ');
+    check((await panel.locator('.metric.featured').innerText()).includes('40.000'), 'SSR BZ quote is rendered from its own seed');
+    check(counts.history === 0 && counts.funding === 0, 'Both BZ seeded charts render without duplicate reads');
+    await page.goto('http://127.0.0.1:3190/?monitor=cl-xau&goldOil=cl');
+    await price.waitFor(); await fees.waitFor();
     check((await panel.locator('.gold-line[data-series=ratio]').getAttribute('d')).split('M').length === 3, 'Missing price period produces two separate subpaths');
     await page.clock.pauseAt(new Date());
     await price.evaluate(node => { node.dataset.retained = 'original'; });
@@ -39,8 +47,8 @@ async page => {
     check(await panel.getByRole('button', { name: '1 天', exact: true }).getAttribute('aria-pressed') === 'true', 'Range retained');
     check(await panel.locator('.gold-cursor-reading').innerText() === reading, 'Full-record cursor retained');
     await page.clock.runFor(50);
-    check(counts.history === 1 && counts.funding === 1, 'Returning resumes background reads');
-    check(await price.isVisible() && await fees.isVisible(), 'Old charts remain visible while both API reads are held');
+    check(counts.history === 1 && counts.funding === 0, 'Returning refreshes expired history and reuses funding within its five-minute cadence');
+    check(await price.isVisible() && await fees.isVisible(), 'Old charts remain visible while the expired history read is held');
     mode = 'fail'; pending.splice(0).forEach(resolve => resolve());
     await panel.getByText(/价格历史待更新/).waitFor();
     check(await price.isVisible() && await price.getAttribute('data-retained') === 'original', 'Failure preserves chart and exposes stale state');

@@ -11,7 +11,7 @@ async page => {
     const path = new URL(route.request().url()).pathname;
     if (route.request().method() === 'GET') reads.push(path);
     if (path === '/api/monitors') return route.fulfill({ json: { schemaVersion: 1, monitors: ['oil', 'cl-xau', 'hynix', 'perpetual'].map(id => ({ id, runtime: { available: true, monitorId: id, enabled: true, running: true, revision: 0, error: '' } })) } });
-    if (path === '/api/monitors/cl-xau/status') return route.fulfill({ json: preview ? { available: false, reason: '当前为网页预览，告警需常驻后台。' } : { available: true, webhookConfigured: true, lastAttemptAt: now, lastSuccessAt: now, stale: false, market: { cl: { price: 80 }, xau: { price: 4000 }, ratio: 50 } } });
+    if (path === '/api/monitors/cl-xau/status') return route.fulfill({ json: preview ? { available: false, reason: '当前为网页预览，告警需常驻后台。' } : { available: true, webhookConfigured: true, lastAttemptAt: now, lastSuccessAt: now, stale: false, market: { source: 'Binance', currency: 'USDT', priceBasis: 'mark', status: 'live', fetchedAt: now, cl: { symbol: 'CLUSDT', price: 80, updatedAt: now }, xau: { symbol: 'XAUUSDT', price: 4000, updatedAt: now }, ratio: 50, funding: null } } });
     if (path === '/api/monitors/cl-xau/config') {
       if (route.request().method() === 'PUT') {
         writes++;
@@ -26,7 +26,7 @@ async page => {
     return route.fulfill({ status: 503, json: { error: 'fixture unavailable' } });
   });
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.goto('http://127.0.0.1:3189/?monitor=cl-xau');
+  await page.goto('http://127.0.0.1:3189/?monitor=cl-xau&goldOil=cl');
   const alerts = page.getByRole('region', { name: '金油比飞书告警梯度', exact: true });
   await alerts.getByText('金油比 · 未启用', { exact: true }).waitFor();
   await alerts.getByRole('button', { name: /飞书告警梯度/ }).click();

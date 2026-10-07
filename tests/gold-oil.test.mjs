@@ -230,7 +230,7 @@ test('failed funding pagination cannot extend durable query coverage', async t =
 });
 
 test('statistics, monthly means and sampling keep full-data extrema and real gaps', () => {
-  const points = Array.from({ length: 4000 }, (_, index) => ({ time: now - (4000 - index) * STEP, cl: 80, xau: 4000, ratio: 50 + index / 10000 }));
+  const points = Array.from({ length: 4000 }, (_, index) => ({ time: now - (4000 - index) * STEP, oil: 80, cl: 80, xau: 4000, ratio: 50 + index / 10000 }));
   points[123].ratio = 100; points[456].ratio = 1; points[789].ratio = null;
   const stats = goldOilStatistics(points), sampled = sampleGoldOilPoints(points);
   assert.equal(stats.max.ratio, 100); assert.equal(stats.min.ratio, 1); assert.equal(stats.count, 3999);

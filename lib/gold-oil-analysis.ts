@@ -20,7 +20,7 @@ export function goldOilStatistics(points: GoldOilPoint[]) {
 export function sampleGoldOilPoints(points: GoldOilPoint[], budget = 1200) {
   if (points.length <= budget) return points;
   const indices = new Set([0, points.length - 1]);
-  const keys = ['ratio', 'xau', 'cl'] as const;
+  const keys = ['ratio', 'xau', 'oil'] as const;
   const width = Math.ceil(points.length / Math.max(1, Math.floor(budget / 8)));
   for (let start = 0; start < points.length; start += width) {
     const end = Math.min(points.length, start + width); indices.add(start); indices.add(end - 1);

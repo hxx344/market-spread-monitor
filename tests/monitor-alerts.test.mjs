@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { hynixAlerts, hynixDraft, hynixConfig, oilAlerts, oilDraft, oilConfig, goldOilAlerts, monitorAlertAdapters } from "../lib/monitor-alerts.ts";
+import { hynixAlerts, hynixDraft, hynixConfig, oilAlerts, oilDraft, oilConfig, goldOilAlerts, goldOilBzAlerts, monitorAlertAdapters } from "../lib/monitor-alerts.ts";
 import { monitors } from "../lib/monitors.ts";
 
 const signal = () => new AbortController().signal;
@@ -88,7 +88,7 @@ test('gold/oil editor uses ratio units, isolated endpoints, canonical saves and 
   assert.equal(Number.isNaN(fresh.threshold), true);
   const view = await goldOilAlerts.load(signal(), async url => {
     calls.push(url);
-    return Response.json(url.endsWith('status') ? { available: true, stale: true, webhookConfigured: true, market: { cl: { price: 80 }, xau: { price: 4000 }, ratio: 999 }, error: 'offline' }
+    return Response.json(url.endsWith('status') ? { available: true, stale: true, webhookConfigured: true, market: goldQuote('cl'), error: 'offline' }
       : url.endsWith('config') ? { revision: 2, config }
       : { events: [{ id: 'event', time: '2026-09-30T00:00:00Z', status: 'sent', rules: [{ label: '旧下沿', operator: 'lte', value: 45, threshold: 46 }] }] });
   });
@@ -104,4 +104,39 @@ test('gold/oil editor uses ratio units, isolated endpoints, canonical saves and 
   calls.length = 0;
   const unavailable = await goldOilAlerts.load(signal(), async url => { calls.push(url); return Response.json({ available: false, reason: '预览' }); });
   assert.equal(unavailable.available, false); assert.deepEqual(calls, ['/api/monitors/cl-xau/status']);
+});
+
+function goldQuote(oilType) {
+  const fetchedAt = '2026-09-30T00:00:00Z', oil = { symbol: oilType === 'cl' ? 'CLUSDT' : 'BZUSDT', price: oilType === 'cl' ? 80 : 100, updatedAt: fetchedAt };
+  return { source: 'Binance', currency: 'USDT', priceBasis: 'mark', status: 'live', fetchedAt, oilType, oil, xau: { symbol: 'XAUUSDT', price: 4000, updatedAt: fetchedAt }, ratio: 999, funding: null };
+}
+
+test('BZ alert editor uses independent endpoints, revisions, labels and saves', async () => {
+  const config = { enabled: false, rules: [] }, calls = [];
+  assert.equal(monitorAlertAdapters['cl-xau-bz'], goldOilBzAlerts);
+  assert.notEqual(goldOilBzAlerts, goldOilAlerts);
+  assert.match(goldOilBzAlerts.metrics[0].label, /XAU \/ BZ/);
+  const view = await goldOilBzAlerts.load(signal(), async url => {
+    calls.push(url);
+    return Response.json(url.endsWith('status') ? { available: true, stale: false, webhookConfigured: true, market: goldQuote('bz') }
+      : url.endsWith('config') ? { revision: 8, config } : { events: [] });
+  });
+  assert.deepEqual(calls.sort(), ['config', 'events', 'status'].map(action => `/api/monitors/cl-xau/bz/${action}`));
+  assert.equal(view.revision, 8); assert.deepEqual(view.draft, { enabled: false, rules: [] });
+  assert.match(view.market, /XAU \/ BZ 40.0000/); assert.match(view.market, /布伦特原油 100.0000/); assert.doesNotMatch(view.market, /CL|WTI/);
+  const draft = { enabled: true, rules: [{ ...goldOilBzAlerts.newRule(view.draft), threshold: 40 }] };
+  const saved = await goldOilBzAlerts.save(draft, 8, signal(), async (url, init) => {
+    assert.equal(url, '/api/monitors/cl-xau/bz/config'); assert.deepEqual(JSON.parse(init.body), { revision: 8, config: oilConfig(draft) });
+    return Response.json({ revision: 9, config: oilConfig(draft) });
+  });
+  assert.deepEqual(saved, { revision: 9, draft });
+});
+
+test('wrong-oil status quotes are hidden while alert configuration remains editable', async () => {
+  for (const [adapter, wrongOil] of [[goldOilAlerts, 'bz'], [goldOilBzAlerts, 'cl']]) {
+    const view = await adapter.load(signal(), async url => Response.json(url.endsWith('status') ? { available: true, market: goldQuote(wrongOil) }
+      : url.endsWith('config') ? { revision: 1, config: { enabled: false, rules: [] } } : { events: [] }));
+    assert.equal(view.available, true); assert.equal(view.market, '服务器尚未取得有效行情。'); assert.match(view.error, /合约标识或格式无效/);
+    assert.deepEqual(view.draft, { enabled: false, rules: [] });
+  }
 });

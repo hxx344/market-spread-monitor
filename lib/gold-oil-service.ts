@@ -1,5 +1,5 @@
-import { GOLD_OIL_INTERVAL_MS, GOLD_OIL_STALE_MS, GOLD_OIL_SYMBOLS, validateGoldOilQuote, validateGoldOilHistory, type GoldOilHistory } from './gold-oil.ts';
-import { parseGoldOilFunding, type GoldOilFundingHistory } from './gold-oil-funding.ts';
+import { GOLD_OIL_INSTRUMENTS, GOLD_OIL_INTERVAL_MS, GOLD_OIL_STALE_MS, GOLD_OIL_SYMBOLS, validateGoldOilQuote, validateGoldOilHistory, type GoldOilHistory, type GoldOilType } from './gold-oil.ts';
+import { parseGoldOilFunding, validateGoldOilFunding, type GoldOilFundingHistory } from './gold-oil-funding.ts';
 
 function number(value: unknown) {
   if ((typeof value !== 'number' && typeof value !== 'string') || String(value).trim() === '' || !Number.isFinite(Number(value))) throw Error('Invalid Binance number');
@@ -9,33 +9,34 @@ function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw Error('Invalid Binance response');
   return value as Record<string, unknown>;
 }
-export function validateGoldOilContracts(input: unknown) {
+export function validateGoldOilContracts(input: unknown, oilType: GoldOilType = 'cl') {
   const symbols = object(input).symbols;
   if (!Array.isArray(symbols)) throw Error('Missing Binance contracts');
-  for (const [base, symbol] of Object.entries(GOLD_OIL_SYMBOLS)) {
+  for (const [base, symbol] of [[oilType, GOLD_OIL_INSTRUMENTS[oilType].symbol], ['xau', GOLD_OIL_SYMBOLS.xau]]) {
     const matches = symbols.map(object).filter(item => item.symbol === symbol), spec = matches[0];
     if (matches.length !== 1 || spec.status !== 'TRADING' || !['PERPETUAL', 'TRADIFI_PERPETUAL'].includes(String(spec.contractType)) || spec.baseAsset !== base.toUpperCase() || spec.quoteAsset !== 'USDT' || spec.marginAsset !== 'USDT') throw Error('Unsupported Binance gold/oil contract');
   }
 }
-export function parseGoldOilQuote(clInput: unknown, xauInput: unknown, now = Date.now(), fundingInfo: unknown = null) {
+export function parseGoldOilQuote(oilInput: unknown, xauInput: unknown, now = Date.now(), fundingInfo: unknown = null, oilType: GoldOilType = 'cl') {
   const leg = (input: unknown, symbol: string) => {
     const value = object(input), time = number(value.time);
     if (value.symbol !== symbol || !Number.isSafeInteger(time) || time < now - GOLD_OIL_STALE_MS || time > now + 1000) throw Error('Delayed or unexpected Binance quote');
     return { symbol, price: number(value.markPrice), updatedAt: new Date(time).toISOString() };
   };
-  const cl = leg(clInput, GOLD_OIL_SYMBOLS.cl), xau = leg(xauInput, GOLD_OIL_SYMBOLS.xau);
-  const base = { source: 'Binance', currency: 'USDT', priceBasis: 'mark', status: 'live', fetchedAt: new Date(Math.min(Date.parse(cl.updatedAt), Date.parse(xau.updatedAt))).toISOString(), cl, xau };
+  const oil = leg(oilInput, GOLD_OIL_INSTRUMENTS[oilType].symbol), xau = leg(xauInput, GOLD_OIL_SYMBOLS.xau);
+  const base = { oilType, source: 'Binance', currency: 'USDT', priceBasis: 'mark', status: 'live', fetchedAt: new Date(Math.min(Date.parse(oil.updatedAt), Date.parse(xau.updatedAt))).toISOString(), oil, xau };
   try {
     if (!Array.isArray(fundingInfo)) throw Error('Missing funding terms');
-    const terms = (key: 'cl' | 'xau', input: unknown) => {
-      const matches = fundingInfo.map(object).filter(row => row.symbol === GOLD_OIL_SYMBOLS[key]), ticker = object(input);
+    const terms = (symbol: string, input: unknown) => {
+      const matches = fundingInfo.map(object).filter(row => row.symbol === symbol), ticker = object(input);
       if (matches.length !== 1) throw Error('Missing funding interval');
       return { rate: number(ticker.lastFundingRate), intervalHours: number(matches[0].fundingIntervalHours), nextFundingAt: new Date(number(ticker.nextFundingTime)).toISOString() };
     };
-    return validateGoldOilQuote({ ...base, funding: { cl: terms('cl', clInput), xau: terms('xau', xauInput) } });
-  } catch { return validateGoldOilQuote(base); }
+    return validateGoldOilQuote({ ...base, funding: { oil: terms(oil.symbol, oilInput), xau: terms(xau.symbol, xauInput) } }, oilType);
+  } catch { return validateGoldOilQuote(base, oilType); }
 }
-export function parseGoldOilHistory(clInput: unknown, xauInput: unknown, now = Date.now(), previous: GoldOilHistory | null = null, coverageStart?: number) {
+export function parseGoldOilHistory(oilInput: unknown, xauInput: unknown, now = Date.now(), previous: GoldOilHistory | null = null, coverageStart?: number, oilType: GoldOilType = 'cl') {
+  if (previous) previous = validateGoldOilHistory(previous, oilType);
   const end = Math.floor(now / GOLD_OIL_INTERVAL_MS) * GOLD_OIL_INTERVAL_MS;
   const candles = (input: unknown) => {
     if (!Array.isArray(input) || !input.length) throw Error('Missing Binance candles');
@@ -48,18 +49,19 @@ export function parseGoldOilHistory(clInput: unknown, xauInput: unknown, now = D
     }
     return values;
   };
-  const cl = candles(clInput), xau = candles(xauInput);
+  const oil = candles(oilInput), xau = candles(xauInput);
   // Keep genuine prior observations when an upstream page omits an older candle.
-  if (previous) for (const row of validateGoldOilHistory(previous).points) {
+  if (previous) for (const row of previous.points) {
     if (row.time >= end) continue;
-    if (!cl.has(row.time) && row.cl !== null) cl.set(row.time, row.cl);
+    if (!oil.has(row.time) && row.oil !== null) oil.set(row.time, row.oil);
     if (!xau.has(row.time) && row.xau !== null) xau.set(row.time, row.xau);
   }
-  const points = [...new Set([...cl.keys(), ...xau.keys()])].sort((a, b) => a - b).map(time => ({ time, cl: cl.get(time) ?? null, xau: xau.get(time) ?? null }));
-  return validateGoldOilHistory({ source: 'Binance', currency: 'USDT', priceBasis: 'mark', interval: '15m', status: 'live', fetchedAt: new Date(now).toISOString(), points, ...(coverageStart === undefined ? {} : { coverageStart: Math.min(coverageStart, previous?.coverageStart ?? coverageStart) }) });
+  const points = [...new Set([...oil.keys(), ...xau.keys()])].sort((a, b) => a - b).map(time => ({ time, oil: oil.get(time) ?? null, xau: xau.get(time) ?? null }));
+  return validateGoldOilHistory({ oilType, source: 'Binance', currency: 'USDT', priceBasis: 'mark', interval: '15m', status: 'live', fetchedAt: new Date(now).toISOString(), points, ...(coverageStart === undefined ? {} : { coverageStart: Math.min(coverageStart, previous?.coverageStart ?? coverageStart) }) }, oilType);
 }
 
-export function createGoldOilReader({ fetcher = fetch, clock = Date.now } = {}) {
+export function createGoldOilReader({ oilType = 'cl', fetcher = fetch, clock = Date.now }: { oilType?: GoldOilType; fetcher?: typeof fetch; clock?: () => number } = {}) {
+  const symbols = [GOLD_OIL_INSTRUMENTS[oilType].symbol, GOLD_OIL_SYMBOLS.xau];
   let metadataUntil = 0, commonStart = 0, pendingMetadata: Promise<void> | undefined;
   let fundingUntil = 0, fundingInfo: unknown = null, pendingFunding: Promise<unknown> | undefined;
   let latestHistory: GoldOilHistory | null = null, latestFunding: GoldOilFundingHistory | null = null;
@@ -72,9 +74,9 @@ export function createGoldOilReader({ fetcher = fetch, clock = Date.now } = {}) 
   function metadata() {
     if (clock() < metadataUntil) return Promise.resolve();
     pendingMetadata ??= request('/fapi/v1/exchangeInfo').then(value => {
-      validateGoldOilContracts(value);
+      validateGoldOilContracts(value, oilType);
       const items = object(value).symbols as Record<string, unknown>[];
-      const dates = Object.values(GOLD_OIL_SYMBOLS).map(symbol => number(items.find(item => item.symbol === symbol)?.onboardDate));
+      const dates = symbols.map(symbol => number(items.find(item => item.symbol === symbol)?.onboardDate));
       if (dates.some(date => !Number.isSafeInteger(date) || date <= 0 || date > clock())) throw Error('Invalid contract listing date');
       commonStart = Math.ceil(Math.max(...dates) / GOLD_OIL_INTERVAL_MS) * GOLD_OIL_INTERVAL_MS;
       metadataUntil = clock() + 300_000;
@@ -106,28 +108,31 @@ export function createGoldOilReader({ fetcher = fetch, clock = Date.now } = {}) 
   }
   return {
     async quote() {
-      const [, cl, xau, funding] = await Promise.all([metadata(), ...Object.values(GOLD_OIL_SYMBOLS).map(symbol => request('/fapi/v1/premiumIndex', { symbol })), fundingTerms()]);
-      return parseGoldOilQuote(cl, xau, clock(), funding);
+      const [, oil, xau, funding] = await Promise.all([metadata(), ...symbols.map(symbol => request('/fapi/v1/premiumIndex', { symbol })), fundingTerms()]);
+      return parseGoldOilQuote(oil, xau, clock(), funding, oilType);
     },
     async history(previous: GoldOilHistory | null = null) {
       await metadata();
       previous ??= latestHistory;
+      if (previous) previous = validateGoldOilHistory(previous, oilType);
       const now = clock(), end = Math.floor(now / GOLD_OIL_INTERVAL_MS) * GOLD_OIL_INTERVAL_MS;
       let start = previous?.coverageStart !== undefined && previous.coverageStart <= commonStart ? Math.max(commonStart, previous.points.at(-1)!.time - 86_400_000) : commonStart;
       let expected = commonStart;
-      for (const row of previous?.points ?? []) { if (expected !== undefined && row.time > expected) start = Math.min(start, expected); if (row.cl === null || row.xau === null) start = Math.min(start, row.time); expected = row.time + GOLD_OIL_INTERVAL_MS; }
-      const [cl, xau] = await Promise.all(Object.values(GOLD_OIL_SYMBOLS).map(symbol => pages('/fapi/v1/markPriceKlines', symbol, start, end, true)));
-      latestHistory = parseGoldOilHistory(cl, xau, now, previous, start);
+      for (const row of previous?.points ?? []) { if (row.time > expected) start = Math.min(start, expected); if (row.oil === null || row.xau === null) start = Math.min(start, row.time); expected = row.time + GOLD_OIL_INTERVAL_MS; }
+      const [oil, xau] = await Promise.all(symbols.map(symbol => pages('/fapi/v1/markPriceKlines', symbol, start, end, true)));
+      latestHistory = parseGoldOilHistory(oil, xau, now, previous, start, oilType);
       return latestHistory;
     },
     async funding(previous: GoldOilFundingHistory | null = null) {
       await metadata();
       previous ??= latestFunding;
-      const now = clock(), start = previous ? Math.max(commonStart, previous.coverageEnd - 2 * 86_400_000) : commonStart;
-      const [cl, xau] = await Promise.all(Object.values(GOLD_OIL_SYMBOLS).map(symbol => pages('/fapi/v1/fundingRate', symbol, start, now, false)));
-      latestFunding = parseGoldOilFunding(cl, xau, start, now, now, previous);
+      if (previous) previous = validateGoldOilFunding(previous, oilType);
+      const now = clock(), start = previous && previous.coverageStart <= commonStart ? Math.max(commonStart, previous.coverageEnd - 2 * 86_400_000) : commonStart;
+      const [oil, xau] = await Promise.all(symbols.map(symbol => pages('/fapi/v1/fundingRate', symbol, start, now, false)));
+      latestFunding = parseGoldOilFunding(oil, xau, start, now, now, previous, oilType);
       return latestFunding;
     },
   };
 }
 export const goldOilReader = createGoldOilReader();
+export const goldOilBzReader = createGoldOilReader({ oilType: 'bz' });
