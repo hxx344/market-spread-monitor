@@ -8,7 +8,7 @@ import { readExchangeQuote } from "./exchange-service.ts";
 import { loadOilIntraday } from "./oil-intraday-service.ts";
 import { OIL_CANDLE_ACTION } from "../modules/oil/intraday.mjs";
 import { loadPerpetualSnapshot } from './perpetual-service.ts';
-import { goldOilReader, goldOilBzReader } from './gold-oil-service.ts';
+import { goldOilReader, goldOilBzReader, goldOilBybitReader, goldOilBybitBzReader } from './gold-oil-service.ts';
 import { GOLD_OIL_QUOTE_MS, GOLD_OIL_HISTORY_MS, GOLD_OIL_FUNDING_MS, parseGoldOilAction } from './gold-oil.ts';
 import { fundingExchangeFromAction, HISTORY_REFRESH_MS, type ExchangeFundingHistory } from './exchange-funding-history.ts';
 import { readExchangeFundingHistory } from './exchange-funding-service.ts';
@@ -22,11 +22,17 @@ export interface DataAdapter {
   'bz/quote'?: () => Promise<unknown>;
   'bz/history'?: () => Promise<unknown>;
   'bz/funding'?: () => Promise<unknown>;
+  'bybit/quote'?: () => Promise<unknown>;
+  'bybit/history'?: () => Promise<unknown>;
+  'bybit/funding'?: () => Promise<unknown>;
+  'bybit/bz/quote'?: () => Promise<unknown>;
+  'bybit/bz/history'?: () => Promise<unknown>;
+  'bybit/bz/funding'?: () => Promise<unknown>;
   "candles/15m"?: () => Promise<unknown>;
 }
 /** Add a data adapter here and a descriptor in monitors.ts to expose a new module. */
 export const dataAdapters: Record<string, DataAdapter> = {
-  'cl-xau': { ...goldOilReader, 'bz/quote': goldOilBzReader.quote, 'bz/history': goldOilBzReader.history, 'bz/funding': goldOilBzReader.funding },
+  'cl-xau': { ...goldOilReader, 'bz/quote': goldOilBzReader.quote, 'bz/history': goldOilBzReader.history, 'bz/funding': goldOilBzReader.funding, 'bybit/quote': goldOilBybitReader.quote, 'bybit/history': goldOilBybitReader.history, 'bybit/funding': goldOilBybitReader.funding, 'bybit/bz/quote': goldOilBybitBzReader.quote, 'bybit/bz/history': goldOilBybitBzReader.history, 'bybit/bz/funding': goldOilBybitBzReader.funding },
   perpetual: { quote: loadPerpetualSnapshot },
   hynix: { quote: loadQuote, history: loadMarket, funding: loadHynixFunding },
   oil: {

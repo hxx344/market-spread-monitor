@@ -20,8 +20,18 @@ const bz = {
   funding: { ...funding, oilType: 'bz', points: funding.points.map(({ time, xau }) => ({ time, oil: 0.0005, xau })) },
 };
 delete bz.quote.cl;
-const snapshots = { quote, history, funding, bz };
-const release = registerInitialMarket(new Map([['cl-xau', { handle(action) { return action.startsWith('bz/') ? bz[action.slice(3)] : snapshots[action]; } }]]));
+const bybitMarket = (market, oilType) => {
+  const bybitQuote = { ...market.quote, source: 'Bybit', oilType, oil: market.quote.oil ?? market.quote.cl,
+    xau: { ...market.quote.xau, price: 4800 }, ratio: 4800 / (market.quote.oil ?? market.quote.cl).price };
+  delete bybitQuote.cl;
+  return { quote: bybitQuote,
+    history: { ...market.history, source: 'Bybit', oilType, points: market.history.points.map(({ time, oil, cl, xau }) => ({ time, oil: oil ?? cl, xau: xau === null ? null : xau * 1.2, ratio: xau === null ? null : xau * 1.2 / (oil ?? cl) })) },
+    funding: { ...market.funding, source: 'Bybit', oilType, points: market.funding.points.map(({ time, oil, cl, xau }) => ({ time, oil: oil ?? cl, xau })) },
+  };
+};
+const bybit = { ...bybitMarket({ quote, history, funding }, 'cl'), bz: bybitMarket(bz, 'bz') };
+const snapshots = { quote, history, funding, bz, bybit };
+const release = registerInitialMarket(new Map([['cl-xau', { handle(action) { const exchange = action.startsWith('bybit/') ? bybit : snapshots, name = action.replace(/^bybit\//, ''); return name.startsWith('bz/') ? exchange.bz[name.slice(3)] : exchange[name]; } }]]));
 const app = next({ dev: false, hostname: '127.0.0.1', port: 3190 });
 await app.prepare();
 const handler = app.getRequestHandler();

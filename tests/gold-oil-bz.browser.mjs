@@ -55,7 +55,7 @@ async page => {
   });
   try {
     await page.setViewportSize({ width: 1440, height: 1050 });
-    await page.goto('http://127.0.0.1:3189/?monitor=cl-xau&goldOil=cl');
+    await page.goto('http://127.0.0.1:3189/?monitor=cl-xau&goldOil=cl&goldOilExchange=binance');
     const panel = page.getByRole('tabpanel', { name: '金油比', exact: true }).locator('.oil-panel');
     const select = oilType => panel.getByRole('button', { name: oilType === 'bz' ? 'BZ · 布伦特原油' : 'CL · WTI 原油', exact: true });
     const metric = panel.locator('.metric.featured'), priceSvg = panel.locator('.gold-chart .gold-chart-svg');

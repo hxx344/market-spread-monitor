@@ -11,7 +11,7 @@ import { createExchangeReader } from '../lib/exchange-service.ts';
 import { fetchIntradaySnapshot, OIL_CANDLE_ACTION, OIL_CANDLE_REFRESH_MS } from '../modules/oil/intraday.mjs';
 import oilIntradayArchive from '../public/oil/data/binance-15m.json' with { type: 'json' };
 import { createGoldOilReader } from '../lib/gold-oil-service.ts';
-import { GOLD_OIL_QUOTE_MS, GOLD_OIL_HISTORY_MS, GOLD_OIL_FUNDING_MS, goldOilAction } from '../lib/gold-oil.ts';
+import { GOLD_OIL_QUOTE_MS, GOLD_OIL_HISTORY_MS, GOLD_OIL_FUNDING_MS, GOLD_OIL_VARIANTS, goldOilAction } from '../lib/gold-oil.ts';
 import { exchangeFundingAction, HISTORY_REFRESH_MS } from '../lib/exchange-funding-history.ts';
 import { createExchangeFundingReader } from '../lib/exchange-funding-service.ts';
 import { OIL_HEDGE_PRICES_ACTION, HEDGE_PRICES_REFRESH_MS } from '../lib/oil-hedge-prices.ts';
@@ -30,12 +30,12 @@ export function marketJobs({ oilIntervalMs = 30_000 } = {}) {
   const readExchange = createExchangeReader();
   const readFundingHistory = createExchangeFundingReader();
   const readHedgePrices = createOilHedgePricesReader();
-  const goldOilJobs = ['cl', 'bz'].flatMap(oilType => {
-    const reader = createGoldOilReader({ oilType });
+  const goldOilJobs = GOLD_OIL_VARIANTS.flatMap(({ oilType, exchange }) => {
+    const reader = createGoldOilReader({ oilType, exchange });
     return [
-      { id: 'cl-xau', action: goldOilAction('quote', oilType), intervalMs: GOLD_OIL_QUOTE_MS, load: () => reader.quote() },
-      { id: 'cl-xau', action: goldOilAction('history', oilType), intervalMs: GOLD_OIL_HISTORY_MS, load: previous => reader.history(previous) },
-      { id: 'cl-xau', action: goldOilAction('funding', oilType), intervalMs: GOLD_OIL_FUNDING_MS, load: previous => reader.funding(previous) },
+      { id: 'cl-xau', action: goldOilAction('quote', oilType, exchange), intervalMs: GOLD_OIL_QUOTE_MS, load: () => reader.quote() },
+      { id: 'cl-xau', action: goldOilAction('history', oilType, exchange), intervalMs: GOLD_OIL_HISTORY_MS, load: previous => reader.history(previous) },
+      { id: 'cl-xau', action: goldOilAction('funding', oilType, exchange), intervalMs: GOLD_OIL_FUNDING_MS, load: previous => reader.funding(previous) },
     ];
   });
   const fetchMarket = async () => marketFromExchangeQuote(await readExchange('binance', 'oil'));

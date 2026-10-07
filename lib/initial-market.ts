@@ -7,17 +7,22 @@ import { createTrend } from "./monitor-trend.ts";
 import { binanceOilExchangeQuote, type ExternalQuoteSet } from "./exchange-quotes.ts";
 import { intradayChartRows, type createIntradaySnapshot } from "../modules/oil/intraday.mjs";
 import { oilSpreadPercent } from "../modules/oil/spread.mjs";
-import type { GoldOilQuote, GoldOilHistory } from './gold-oil';
+import type { GoldOilQuote, GoldOilHistory, GoldOilType, GoldOilExchange } from './gold-oil';
 import type { GoldOilFundingHistory } from './gold-oil-funding';
 
 export type InitialGoldOilMarket = { quote: GoldOilQuote | null; history: GoldOilHistory | null; funding?: GoldOilFundingHistory | null };
 export type InitialMarketData = {
   renderedAt: number;
   runtime?: MonitorRuntimeMap;
-  'cl-xau'?: InitialGoldOilMarket & { bz?: InitialGoldOilMarket };
+  'cl-xau'?: InitialGoldOilMarket & { bz?: InitialGoldOilMarket; bybit?: InitialGoldOilMarket & { bz?: InitialGoldOilMarket } };
   hynix: { quote: LiveQuote | null; history: MarketData | null; exchanges?: ExternalQuoteSet };
   oil: { quote: (ReturnType<typeof validateOilQuote> & { status: "live" | "snapshot" }) | null; history?: ReturnType<typeof validateOilHistory> | null; candles?: ReturnType<typeof createIntradaySnapshot> | null; exchanges?: ExternalQuoteSet };
 };
+
+export function initialGoldOilMarket(initial: InitialMarketData | null | undefined, oilType: GoldOilType = 'cl', exchange: GoldOilExchange = 'binance') {
+  const market = exchange === 'bybit' ? initial?.['cl-xau']?.bybit : initial?.['cl-xau'];
+  return oilType === 'bz' ? market?.bz : market;
+}
 
 export function initialSummaries(initial: InitialMarketData | null) {
   const hynix = initial?.hynix, oil = initial?.oil;

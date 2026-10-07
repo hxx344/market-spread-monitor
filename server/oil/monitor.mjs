@@ -67,7 +67,7 @@ export class Monitor {
       }
       // Persist attempt IDs before external I/O; an uncertain retry retains its ID.
       const batchId = randomUUID();
-      next.events.unshift({ id: batchId, source: 'binance', time: new Date(now).toISOString(), status: 'sending', rules: due.map(item => ({ id: item.id, label: item.rule.label, metric: item.rule.metric, operator: item.rule.operator, threshold: item.rule.threshold, value: item.value })) });
+      next.events.unshift({ id: batchId, source: this.definition.source ?? 'binance', time: new Date(now).toISOString(), status: 'sending', rules: due.map(item => ({ id: item.id, label: item.rule.label, metric: item.rule.metric, operator: item.rule.operator, threshold: item.rule.threshold, value: item.value })) });
       next.events = next.events.slice(0, 100);
       await this.persist(next);
       const message = this.definition.message(market, values, due);

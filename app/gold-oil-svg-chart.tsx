@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { GOLD_OIL_INSTRUMENTS, type GoldOilPoint, type GoldOilType } from '../lib/gold-oil';
+import { GOLD_OIL_INSTRUMENTS, GOLD_OIL_EXCHANGES, GOLD_OIL_VARIANTS, goldOilUnits, goldOilVariantKey, type GoldOilPoint, type GoldOilType, type GoldOilExchange } from '../lib/gold-oil';
 import type { analyzeGoldOilFunding } from '../lib/gold-oil-funding';
 import { chartDomain, chartPath } from '../lib/gold-oil-chart';
 import { nearestTimeIndex } from '../modules/oil/chart-performance.mjs';
@@ -10,10 +10,10 @@ const date = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month
 const shortDate = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit' });
 type Row = { time: number; [key: string]: number | null | undefined };
 type Series = { key: string; label: string; color: string; unit: string; digits: number; right?: boolean };
-const marketSeries = Object.fromEntries((['cl', 'bz'] as const).map(oilType => [oilType, {
-  ratio: [{ key: 'ratio', label: `金油比 XAU / ${GOLD_OIL_INSTRUMENTS[oilType].code}`, color: '#087f83', unit: '桶/盎司', digits: 3 }],
-  prices: [{ key: 'xau', label: '黄金 XAU', color: '#087f83', unit: 'USDT/盎司', digits: 2 }, { key: 'oil', label: `${GOLD_OIL_INSTRUMENTS[oilType].name} ${GOLD_OIL_INSTRUMENTS[oilType].code}`, color: '#356dc4', unit: 'USDT/桶', digits: 3, right: true }],
-}])) as Record<GoldOilType, { ratio: Series[]; prices: Series[] }>;
+const marketSeries = Object.fromEntries(GOLD_OIL_VARIANTS.map(({ oilType, exchange }) => [goldOilVariantKey(oilType, exchange), {
+  ratio: [{ key: 'ratio', label: `金油比 XAU / ${GOLD_OIL_INSTRUMENTS[oilType].code}`, color: '#087f83', unit: goldOilUnits(oilType, exchange).ratio, digits: 3 }],
+  prices: [{ key: 'xau', label: '黄金 XAU', color: '#087f83', unit: 'USDT/盎司', digits: 2 }, { key: 'oil', label: `${GOLD_OIL_INSTRUMENTS[oilType].name} ${GOLD_OIL_INSTRUMENTS[oilType].code}`, color: '#356dc4', unit: goldOilUnits(oilType, exchange).oil, digits: 3, right: true }],
+}])) as Record<string, { ratio: Series[]; prices: Series[] }>;
 const fundingSeries = (annual: boolean): Series[] => [
   { key: annual ? 'longAnnualized' : 'longRate', label: '做多金油比', color: '#356dc4', unit: annual ? '% / 年' : '% / 小时', digits: 5 },
   { key: annual ? 'shortAnnualized' : 'shortRate', label: '做空金油比', color: '#087f83', unit: annual ? '% / 年' : '% / 小时', digits: 5 },
@@ -21,12 +21,12 @@ const fundingSeries = (annual: boolean): Series[] => [
 const annualSeries = fundingSeries(true), rateSeries = fundingSeries(false);
 
 /** React owns SVG and inspection state; no asynchronous renderer or measurement gate. */
-const Plot = memo(function Plot({ points, series, label, reference, percent = false, annual = false, oilType }: { points: Row[]; series: Series[]; label: string; reference?: number; percent?: boolean; annual?: boolean; oilType: GoldOilType }) {
+const Plot = memo(function Plot({ points, series, label, reference, percent = false, annual = false, marketKey }: { points: Row[]; series: Series[]; label: string; reference?: number; percent?: boolean; annual?: boolean; marketKey: string }) {
   const element = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ width: 700, height: percent ? 230 : 340 });
   const [selected, setSelected] = useState<number | null>(null);
-  const [selectedOil, setSelectedOil] = useState(oilType);
-  if (selectedOil !== oilType) { setSelectedOil(oilType); setSelected(null); }
+  const [selectedMarket, setSelectedMarket] = useState(marketKey);
+  if (selectedMarket !== marketKey) { setSelectedMarket(marketKey); setSelected(null); }
   useLayoutEffect(() => {
     const node = element.current;
     if (!node) return;
@@ -76,9 +76,9 @@ const Plot = memo(function Plot({ points, series, label, reference, percent = fa
   </div>;
 });
 
-export const FundingChart = memo(function FundingChart({ points, view, oilType = 'cl' }: { points: ReturnType<typeof analyzeGoldOilFunding>['points']; view: 'annualized' | 'rate'; oilType?: GoldOilType }) {
-  return <Plot oilType={oilType} points={points} series={view === 'annualized' ? annualSeries : rateSeries} label={`历史多空资金费率 · ${GOLD_OIL_INSTRUMENTS[oilType].code} · ${view === 'annualized' ? '累计年化 % / 年' : '日均小时率 % / 小时'}`} reference={0} percent annual={view === 'annualized'}/>;
+export const FundingChart = memo(function FundingChart({ points, view, oilType = 'cl', exchange = 'binance' }: { points: ReturnType<typeof analyzeGoldOilFunding>['points']; view: 'annualized' | 'rate'; oilType?: GoldOilType; exchange?: GoldOilExchange }) {
+  return <Plot marketKey={goldOilVariantKey(oilType, exchange)} points={points} series={view === 'annualized' ? annualSeries : rateSeries} label={`${GOLD_OIL_EXCHANGES[exchange].name} · 历史多空资金费率 · ${GOLD_OIL_INSTRUMENTS[oilType].code} · ${view === 'annualized' ? '累计年化 % / 年' : '日均小时率 % / 小时'}`} reference={0} percent annual={view === 'annualized'}/>;
 });
-export default memo(function GoldOilChart({ points, view = 'ratio', average, oilType = 'cl' }: { points: GoldOilPoint[]; view?: 'ratio' | 'prices'; average?: number; oilType?: GoldOilType }) {
-  return <Plot oilType={oilType} points={points} series={marketSeries[oilType][view]} label={view === 'ratio' ? `金油比走势 XAU / ${GOLD_OIL_INSTRUMENTS[oilType].code} · 桶/盎司` : `黄金左轴 USDT/盎司 · ${GOLD_OIL_INSTRUMENTS[oilType].name}右轴 USDT/桶`} reference={view === 'ratio' ? average : undefined}/>;
+export default memo(function GoldOilChart({ points, view = 'ratio', average, oilType = 'cl', exchange = 'binance' }: { points: GoldOilPoint[]; view?: 'ratio' | 'prices'; average?: number; oilType?: GoldOilType; exchange?: GoldOilExchange }) {
+  return <Plot marketKey={goldOilVariantKey(oilType, exchange)} points={points} series={marketSeries[goldOilVariantKey(oilType, exchange)][view]} label={`${GOLD_OIL_EXCHANGES[exchange].name} · ${view === 'ratio' ? `金油比走势 XAU / ${GOLD_OIL_INSTRUMENTS[oilType].code} · ${goldOilUnits(oilType, exchange).ratio}` : `黄金左轴 USDT/盎司 · ${GOLD_OIL_INSTRUMENTS[oilType].name}右轴 ${goldOilUnits(oilType, exchange).oil}`}`} reference={view === 'ratio' ? average : undefined}/>;
 });

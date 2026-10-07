@@ -4,19 +4,16 @@ import { dirname } from 'node:path';
 import { validateHynixQuote, validateHynixHistory, validateHynixFunding, validateOilQuote, validateOilHistory, validateOilFunding } from '../lib/market-validation.ts';
 import { comparisonExchanges, exchangeAction, validateComparisonQuote } from '../lib/exchange-quotes.ts';
 import { OIL_CANDLE_ACTION, validateIntradaySnapshot } from '../modules/oil/intraday.mjs';
-import { validateGoldOilQuote, validateGoldOilHistory } from '../lib/gold-oil.ts';
+import { validateGoldOilQuote, validateGoldOilHistory, GOLD_OIL_VARIANTS, goldOilAction } from '../lib/gold-oil.ts';
 import { validateGoldOilFunding } from '../lib/gold-oil-funding.ts';
 import { exchangeFundingAction, validateExchangeFundingHistory } from '../lib/exchange-funding-history.ts';
 import { OIL_HEDGE_PRICES_ACTION, validateOilHedgePrices } from '../lib/oil-hedge-prices.ts';
 
 const validators = { 'hynix/quote': validateHynixQuote, 'hynix/history': validateHynixHistory, 'hynix/funding': validateHynixFunding, 'oil/quote': validateOilQuote, 'oil/history': validateOilHistory, 'oil/funding': validateOilFunding };
 validators[`oil/${OIL_CANDLE_ACTION}`] = validateIntradaySnapshot;
-validators['cl-xau/quote'] = validateGoldOilQuote;
-validators['cl-xau/history'] = validateGoldOilHistory;
-validators['cl-xau/funding'] = validateGoldOilFunding;
-validators['cl-xau/bz/quote'] = value => validateGoldOilQuote(value, 'bz');
-validators['cl-xau/bz/history'] = value => validateGoldOilHistory(value, 'bz');
-validators['cl-xau/bz/funding'] = value => validateGoldOilFunding(value, 'bz');
+for (const { oilType, exchange } of GOLD_OIL_VARIANTS) for (const [action, validate] of Object.entries({ quote: validateGoldOilQuote, history: validateGoldOilHistory, funding: validateGoldOilFunding })) {
+  validators[`cl-xau/${goldOilAction(action, oilType, exchange)}`] = value => validate(value, oilType, exchange);
+}
 validators[`oil/${OIL_HEDGE_PRICES_ACTION}`] = validateOilHedgePrices;
 for (const id of ['oil', 'hynix']) for (const exchange of comparisonExchanges(id)) validators[`${id}/${exchangeAction(exchange)}`] = value => validateComparisonQuote(value, exchange, id);
 for (const exchange of comparisonExchanges('oil')) validators[`oil/${exchangeFundingAction(exchange)}`] = value => validateExchangeFundingHistory(value, exchange);

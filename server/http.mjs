@@ -53,7 +53,7 @@ export function createHandler({ service, services, username, password, nextHandl
       if (services && path === '/api/hub/summary') {
         if (request.method !== 'GET') return json(response, 405, { error: '不支持此请求方法' });
         const summaryUrl = new URL(request.url, 'http://localhost');
-        const value = await readHubSummary(services, Date.now(), summaryUrl.searchParams.get('monitor') || 'oil', summaryUrl.searchParams.get('goldOil') || 'cl');
+        const value = await readHubSummary(services, Date.now(), summaryUrl.searchParams.get('monitor') || 'oil', summaryUrl.searchParams.get('goldOil') || 'cl', summaryUrl.searchParams.get('goldOilExchange') || 'binance');
         return json(response, 200, new URL(request.url, 'http://localhost').searchParams.get('schemaVersion') === '2' ? { schemaVersion: 2, data: value } : { schemaVersion: 1, data: { updatedAt: value.updatedAt || new Date(0).toISOString(), metrics: value.metrics } });
       }
       if (services?.notifications && ["/api/notifications/feishu", "/api/notifications/feishu/test"].includes(path)) {

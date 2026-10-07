@@ -16,7 +16,7 @@ import { openPerpetualAlertStore } from './perpetual-alert-store.mjs';
 import { openCrossExSettingsStore } from './perpetual-crossex-store.mjs';
 import { openPerpetualPaperStore } from './perpetual-paper-store.mjs';
 import { openMonitorControlStore, attachMonitorControl } from './monitor-control.mjs';
-import { GOLD_OIL_QUOTE_MS, GOLD_OIL_HISTORY_MS, GOLD_OIL_FUNDING_MS, goldOilAction, parseGoldOilAction } from '../lib/gold-oil.ts';
+import { GOLD_OIL_QUOTE_MS, GOLD_OIL_HISTORY_MS, GOLD_OIL_FUNDING_MS, GOLD_OIL_VARIANTS, GOLD_OIL_EXCHANGES, goldOilVariantKey, goldOilAction, parseGoldOilAction } from '../lib/gold-oil.ts';
 import { goldOilAlertDefaults, validateGoldOilAlerts, createGoldOilAlertDefinition, confirmGoldOilTriggers } from './gold-oil/alerts.mjs';
 import { exchangeFundingAction, fundingExchangeFromAction } from '../lib/exchange-funding-history.ts';
 import { OIL_HEDGE_PRICES_ACTION, HEDGE_PRICES_REFRESH_MS } from '../lib/oil-hedge-prices.ts';
@@ -27,7 +27,7 @@ const exchangeFundingActions = Object.fromEntries(comparisonExchanges('oil').map
 /** Runtime adapters own their schedule, storage and API. They share one HTTP server. */
 export async function createMonitorServices(directory, { externallyLocked = false, env = process.env, notificationOptions, hynixOptions, oilOptions, goldOilOptions, marketOptions, perpetualOptions } = {}) {
   const oilStore = new FileStore(join(directory, "oil"), externallyLocked);
-  const goldOilStores = Object.fromEntries(['cl', 'bz'].map(oilType => [oilType, new FileStore(join(directory, 'cl-xau', ...(oilType === 'bz' ? ['bz'] : [])), externallyLocked, { defaults: goldOilAlertDefaults, validate: input => validateGoldOilAlerts(input, oilType) })]));
+  const goldOilStores = Object.fromEntries(GOLD_OIL_VARIANTS.map(({ oilType, exchange }) => [goldOilVariantKey(oilType, exchange), new FileStore(join(directory, 'cl-xau', ...(exchange === 'bybit' ? ['bybit'] : []), ...(oilType === 'bz' ? ['bz'] : [])), externallyLocked, { defaults: goldOilAlertDefaults, validate: input => validateGoldOilAlerts(input, oilType, exchange), marketSource: exchange })]));
   await oilStore.acquire();
   let marketStore, perpetualStore;
   try {
@@ -40,7 +40,7 @@ export async function createMonitorServices(directory, { externallyLocked = fals
     let hynixRunning = false, oilRunning = false, goldOilRunning = false;
     const collector = createMarketCollector(marketStore, { jobs: marketJobs({ oilIntervalMs: pollSeconds * 1000 }), ...marketOptions,
       onStored(job) {
-        if (job.id === 'cl-xau' && goldOilRunning) { const parsed = parseGoldOilAction(job.action); if (parsed?.action === 'quote') return goldOils[parsed.oilType].tick(); }
+        if (job.id === 'cl-xau' && goldOilRunning) { const parsed = parseGoldOilAction(job.action); if (parsed?.action === 'quote') return goldOils[goldOilVariantKey(parsed.oilType, parsed.exchange)].tick(); }
         if (job.action === 'quote') { if (job.id === 'hynix' && hynixRunning) return hynix.check(); if (job.id === 'oil' && oilRunning) return oil.tick(); }
       },
     });
@@ -62,14 +62,14 @@ export async function createMonitorServices(directory, { externallyLocked = fals
     if (oilData !== previousOil) await oilStore.write(oilData);
     const oil = new Monitor({ store: oilStore, data: oilData, fetchMarket: async () => read("oil", "quote", true), pollSeconds, ...oilOptions, notify: notifications.send, webhookConfigured: notifications.configured });
     const goldOils = {};
-    for (const oilType of ['cl', 'bz']) {
-      const store = goldOilStores[oilType], quoteAction = goldOilAction('quote', oilType);
+    for (const { oilType, exchange } of GOLD_OIL_VARIANTS) {
+      const key = goldOilVariantKey(oilType, exchange), store = goldOilStores[key], quoteAction = goldOilAction('quote', oilType, exchange);
       const monitor = new Monitor({ store, data: await store.read(), fetchMarket: async () => read('cl-xau', quoteAction, true), pollSeconds: GOLD_OIL_QUOTE_MS / 1000, ...goldOilOptions,
-        definition: createGoldOilAlertDefinition(oilType), notify: notifications.send, webhookConfigured: notifications.configured,
+        definition: createGoldOilAlertDefinition(oilType, exchange), notify: notifications.send, webhookConfigured: notifications.configured,
         canRun: () => goldOilRunning && controlStore.get().monitors['cl-xau'].enabled,
-        beforeSend: (_market, due) => confirmGoldOilTriggers(read('cl-xau', quoteAction, true), due, monitor.clock(), oilType),
+        beforeSend: (_market, due) => confirmGoldOilTriggers(read('cl-xau', quoteAction, true), due, monitor.clock(), oilType, exchange),
       });
-      goldOils[oilType] = monitor;
+      goldOils[key] = monitor;
     }
     let coinIds = {};
     if (env.PERPETUAL_COIN_IDS) {
@@ -97,18 +97,18 @@ export async function createMonitorServices(directory, { externallyLocked = fals
         start() { goldOilRunning = true; for (const monitor of Object.values(goldOils)) monitor.start(); },
         async stop() { goldOilRunning = false; await Promise.all(Object.values(goldOils).map(monitor => monitor.stop())); },
         healthy: () => collector.healthy() && Object.values(goldOils).every(monitor => !monitor.storageError),
-        actions: Object.fromEntries(['cl', 'bz'].flatMap(oilType => ['quote', 'history', 'funding', 'status', 'config', 'events'].map(action => [goldOilAction(action, oilType), action === 'config' ? ['GET', 'PUT'] : ['GET']]))),
+        actions: Object.fromEntries(GOLD_OIL_VARIANTS.flatMap(({ oilType, exchange }) => ['quote', 'history', 'funding', 'status', 'config', 'events'].map(action => [goldOilAction(action, oilType, exchange), action === 'config' ? ['GET', 'PUT'] : ['GET']]))),
         async handle(action, method, input) {
           const parsed = parseGoldOilAction(action);
           if (!parsed) throw Object.assign(Error('模块不支持此接口'), { status: 404 });
-          const monitor = goldOils[parsed.oilType];
+          const monitor = goldOils[goldOilVariantKey(parsed.oilType, parsed.exchange)], identity = { oilType: parsed.oilType, exchange: parsed.exchange, source: GOLD_OIL_EXCHANGES[parsed.exchange].name };
           if (method === 'GET' && ['quote', 'history', 'funding'].includes(parsed.action)) return read('cl-xau', action);
-          if (parsed.action === 'status' && method === 'GET') return { ...monitor.status(), available: true, monitorId: 'cl-xau', oilType: parsed.oilType };
-          if (parsed.action === 'config' && method === 'GET') return { ...monitor.configuration(), oilType: parsed.oilType };
-          if (parsed.action === 'events' && method === 'GET') return { oilType: parsed.oilType, events: structuredClone(monitor.data.events) };
+          if (parsed.action === 'status' && method === 'GET') return { ...monitor.status(), available: true, monitorId: 'cl-xau', ...identity };
+          if (parsed.action === 'config' && method === 'GET') return { ...monitor.configuration(), ...identity };
+          if (parsed.action === 'events' && method === 'GET') return { ...identity, events: structuredClone(monitor.data.events) };
           if (parsed.action === 'config' && method === 'PUT') {
             if (!Number.isSafeInteger(input?.revision) || input.revision < 0) throw Error('缺少有效配置版本号');
-            return { ...await monitor.configure(input.config, input.revision), oilType: parsed.oilType };
+            return { ...await monitor.configure(input.config, input.revision), ...identity };
           }
         },
       }],

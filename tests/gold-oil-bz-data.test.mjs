@@ -29,8 +29,8 @@ test('oil actions are exact and retain the original CL endpoints', () => {
   assert.deepEqual(GOLD_OIL_SYMBOLS, { cl: 'CLUSDT', xau: 'XAUUSDT' });
   for (const action of ['quote', 'history', 'funding', 'status', 'config', 'events']) {
     assert.equal(goldOilAction(action), action);
-    assert.deepEqual(parseGoldOilAction(goldOilAction(action, 'cl')), { oilType: 'cl', action });
-    assert.deepEqual(parseGoldOilAction(goldOilAction(action, 'bz')), { oilType: 'bz', action });
+    assert.deepEqual(parseGoldOilAction(goldOilAction(action, 'cl')), { oilType: 'cl', exchange: 'binance', action });
+    assert.deepEqual(parseGoldOilAction(goldOilAction(action, 'bz')), { oilType: 'bz', exchange: 'binance', action });
   }
   for (const action of ['alerts', 'cl/quote', 'bz', 'bz/', 'BZ/quote', 'bz/bz/quote', 'bz/quote/extra', '/quote', 'bz/__proto__']) assert.equal(parseGoldOilAction(action), null);
 });

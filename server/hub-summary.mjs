@@ -1,6 +1,6 @@
 import { oilSpreadPercent } from '../modules/oil/spread.mjs';
 import { monitors } from '../lib/monitors.ts';
-import { goldOilRatio, GOLD_OIL_INSTRUMENTS, goldOilAction, validateGoldOilQuote } from '../lib/gold-oil.ts';
+import { goldOilRatio, GOLD_OIL_INSTRUMENTS, GOLD_OIL_EXCHANGES, goldOilAction, goldOilUnits, validateGoldOilQuote } from '../lib/gold-oil.ts';
 import { currentGoldOilFunding } from '../lib/gold-oil-funding.ts';
 const timestamp = value => { const at = typeof value === 'number' ? value : Date.parse(value); return Number.isFinite(at) && at > 0 ? at : null; };
 const finite = value => typeof value === 'number' && Number.isFinite(value) ? value : null;
@@ -8,10 +8,11 @@ const healthMessage = value => String(value).slice(0, 500);
 const metric = (key, label, value, unit) => ({ key, label, value, unit });
 
 /** Project only the selected module from resident caches; never fetch upstream or read history. */
-export async function readHubSummary(services, now = Date.now(), monitorId = 'oil', oilType = 'cl') {
+export async function readHubSummary(services, now = Date.now(), monitorId = 'oil', oilType = 'cl', exchange = 'binance') {
   const entry = monitors.find(item => item.id === monitorId);
   if (!entry) throw new Error('监控模块不存在');
   if (monitorId === 'cl-xau' && !['cl', 'bz'].includes(oilType)) throw new Error('不支持此金油比原油合约');
+  if (monitorId === 'cl-xau' && !['binance', 'bybit'].includes(exchange)) throw new Error('不支持此金油比交易所');
   const modules = metric('modules', '监控模块', monitors.length, '个');
   const runtime = services.get(monitorId)?.runtime?.();
   if (runtime && (!runtime.enabled || runtime.error)) return { updatedAt: null, health: { state: 'offline', message: `${entry.title}：${runtime.error || '监控已关闭'}`, staleAfterSeconds: 30 }, metrics: [modules] };
@@ -23,18 +24,18 @@ export async function readHubSummary(services, now = Date.now(), monitorId = 'oi
   }
   let quote = null;
   try {
-    const value = await services.get(monitorId)?.handle(monitorId === 'cl-xau' ? goldOilAction('quote', oilType) : 'quote', 'GET') ?? null;
-    quote = value && monitorId === 'cl-xau' ? { ...validateGoldOilQuote(value, oilType), collection: value.collection } : value;
+    const value = await services.get(monitorId)?.handle(monitorId === 'cl-xau' ? goldOilAction('quote', oilType, exchange) : 'quote', 'GET') ?? null;
+    quote = value && monitorId === 'cl-xau' ? { ...validateGoldOilQuote(value, oilType, exchange), collection: value.collection } : value;
   } catch { /* A missing or wrong-instrument cache is explicitly offline. */ }
   const at = timestamp(quote?.fetchedAt), staleAfterSeconds = monitorId === 'oil' ? 90 : monitorId === 'cl-xau' ? 75 : 35;
   const stale = quote && (!at || at > now + 1000 || now - at > staleAfterSeconds * 1000 || quote.status === 'snapshot' || quote.collection?.stale);
   if (monitorId === 'cl-xau') {
-    const oil = finite(quote?.oil?.price), xau = finite(quote?.xau?.price), ratio = goldOilRatio(oil, xau), instrument = GOLD_OIL_INSTRUMENTS[oilType];
+    const oil = finite(quote?.oil?.price), xau = finite(quote?.xau?.price), ratio = goldOilRatio(oil, xau), instrument = GOLD_OIL_INSTRUMENTS[oilType], units = goldOilUnits(oilType, exchange);
     const funding = currentGoldOilFunding(quote);
     return { updatedAt: at ? new Date(at).toISOString() : null,
       health: { state: !quote ? 'offline' : stale ? 'stale' : ratio === null ? 'partial' : 'online', staleAfterSeconds,
-        message: healthMessage(`金油比：XAU ÷ ${instrument.code}，单位桶/盎司；Binance 标记价格${!quote ? '；后台尚未取得报价' : stale ? '；报价已过期，保留原时间' : ratio === null ? '；价格无效' : ''}`) },
-      metrics: [metric('ratio', `金油比 XAU / ${instrument.code}`, ratio, '桶/盎司'), metric('xau', '黄金 XAU', xau, 'USDT/盎司'), metric(oilType, `${instrument.name} ${instrument.code}`, oil, 'USDT/桶'), metric('funding', '做空金油比资金费年化', funding ? funding.annualized * 100 : null, '%'), modules] };
+        message: healthMessage(`金油比：XAU ÷ ${instrument.code}，${units.ratio === '报价比' ? '按原始标记报价计算' : '单位桶/盎司'}；${GOLD_OIL_EXCHANGES[exchange].name} 标记价格${!quote ? '；后台尚未取得报价' : stale ? '；报价已过期，保留原时间' : ratio === null ? '；价格无效' : ''}`) },
+      metrics: [metric('ratio', `金油比 XAU / ${instrument.code}`, ratio, units.ratio), metric('xau', '黄金 XAU', xau, 'USDT/盎司'), metric(oilType, `${instrument.name} ${instrument.code}`, oil, units.oil), metric('funding', '做空金油比资金费年化', funding ? funding.annualized * 100 : null, '%'), modules] };
   }
   const spreadPercent = monitorId === 'oil' ? oilSpreadPercent(finite(quote?.brent?.markPx), finite(quote?.wti?.markPx)) : null;
   const partial = monitorId === 'oil' && spreadPercent === null || quote?.status === 'partial' || quote?.status === 'connecting' || Boolean(quote?.collection?.error) || monitorId === 'hynix' && Boolean(quote?.fundingError);

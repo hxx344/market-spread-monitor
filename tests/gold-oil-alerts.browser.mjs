@@ -26,9 +26,9 @@ async page => {
     return route.fulfill({ status: 503, json: { error: 'fixture unavailable' } });
   });
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.goto('http://127.0.0.1:3189/?monitor=cl-xau&goldOil=cl');
-  const alerts = page.getByRole('region', { name: '金油比飞书告警梯度', exact: true });
-  await alerts.getByText('金油比 · 未启用', { exact: true }).waitFor();
+  await page.goto('http://127.0.0.1:3189/?monitor=cl-xau&goldOil=cl&goldOilExchange=binance');
+  const alerts = page.locator('[data-alert-monitor="cl-xau"]');
+  await alerts.getByText('金油比 · Binance CL · 未启用', { exact: true }).waitFor();
   await alerts.getByRole('button', { name: /飞书告警梯度/ }).click();
   await alerts.getByRole('button', { name: '添加梯度' }).click();
   const first = alerts.getByRole('group', { name: '第 1 档', exact: true });
@@ -55,7 +55,7 @@ async page => {
   await alerts.getByText(/历史上沿 · 金油比 51.0000 ≥ 50 桶\/盎司/).waitFor();
   await alerts.screenshot({ path: 'output/playwright/gold-oil-alerts-desktop.png' });
   await page.reload();
-  await alerts.getByText('金油比 · 已启用 · 2 档', { exact: true }).waitFor();
+  await alerts.getByText('金油比 · Binance CL · 已启用 · 2 档', { exact: true }).waitFor();
   await alerts.getByRole('button', { name: /飞书告警梯度/ }).click();
   check(await second.getByLabel('阈值（桶/盎司）').inputValue() === '45', 'Reload reads saved config');
   conflict = true; await first.getByLabel('阈值（桶/盎司）').fill('52');

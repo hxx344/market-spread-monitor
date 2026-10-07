@@ -7,5 +7,6 @@ export default async function Home({ searchParams }: { searchParams: Promise<Rec
   const [initial, query] = await Promise.all([readInitialMarket(), searchParams]);
   const initialMonitor = query.monitor === "perpetual" || query.monitor === "hynix" || query.monitor === 'cl-xau' ? query.monitor : "oil";
   const initialGoldOil = query.goldOil === 'bz' ? 'bz' : 'cl';
-  return <>{initialMonitor === "oil" ? <><link rel="preload" href="/oil/panel.html" as="fetch" crossOrigin="anonymous"/><link rel="preload" href="/oil/styles.css" as="fetch" crossOrigin="anonymous"/></> : initialMonitor === 'cl-xau' ? <link rel="preload" href="/oil/styles.css" as="style"/> : null}<MonitorHub initial={initial} initialMonitor={initialMonitor} initialGoldOil={initialGoldOil}/></>;
+  const initialGoldOilExchange = query.goldOilExchange === 'bybit' ? 'bybit' : 'binance';
+  return <>{initialMonitor === "oil" ? <><link rel="preload" href="/oil/panel.html" as="fetch" crossOrigin="anonymous"/><link rel="preload" href="/oil/styles.css" as="fetch" crossOrigin="anonymous"/></> : initialMonitor === 'cl-xau' ? <link rel="preload" href="/oil/styles.css" as="style"/> : null}<MonitorHub initial={initial} initialMonitor={initialMonitor} initialGoldOil={initialGoldOil} initialGoldOilExchange={initialGoldOilExchange}/></>;
 }

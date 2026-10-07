@@ -70,7 +70,7 @@ test('legacy CL rows normalize on read without rewriting, while BZ storage and s
 });
 
 test('both collectors share one runtime switch but keep independent identities and schedules', async t => {
-  const jobs = marketJobs().filter(job => job.id === 'cl-xau');
+  const jobs = marketJobs().filter(job => job.id === 'cl-xau' && !job.action.startsWith('bybit/'));
   assert.deepEqual(jobs.map(job => [job.action, job.intervalMs]), [['quote', 30000], ['history', 60000], ['funding', 300000], ['bz/quote', 30000], ['bz/history', 60000], ['bz/funding', 300000]]);
   const directory = await temporary(t), now = Date.now(), store = await openMarketStore(join(directory, 'market.sqlite'));
   let reads = 0;

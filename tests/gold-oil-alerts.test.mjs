@@ -42,7 +42,7 @@ test('ratio rules have explicit units, positive thresholds, strict identifiers a
 test('gold/oil batches tiers, rearms beyond the full margin and preserves cooldown across episodes', async () => {
   const f = fixture({ rules: [rule(), rule({ id: 'ratio-49', threshold: 49, hysteresis: 0.5 })] });
   await f.monitor.tick(); assert.equal(f.messages.length, 1); assert.equal(f.saved.events[0].rules.length, 2);
-  assert.match(f.messages[0], /金油比阈值告警 · CL-XAU/); assert.match(f.messages[0], /50.0000 ≥ 50 桶\/盎司/);
+  assert.match(f.messages[0], /金油比阈值告警 · Binance CL-XAU/); assert.match(f.messages[0], /50.0000 ≥ 50 桶\/盎司/);
   assert.match(f.messages[0], /黄金 4000.0000 USDT\/盎司 · 原油 80.0000 USDT\/桶/); assert.doesNotMatch(f.messages[0], /布伦特|百分比价差/);
   f.advance(60000); await f.monitor.tick(); assert.equal(f.messages.length, 1);
   f.ratio(49.5); await f.monitor.tick(); assert.equal(f.saved.states['ratio-50'].active, true);

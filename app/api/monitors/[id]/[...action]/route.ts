@@ -5,7 +5,7 @@ import { OIL_CANDLE_ACTION } from "../../../../../modules/oil/intraday.mjs";
 import { unavailablePerpetualOpportunities } from "../../../../../lib/perpetual-opportunities.ts";
 import { fundingExchangeFromAction } from '../../../../../lib/exchange-funding-history.ts';
 import { OIL_HEDGE_PRICES_ACTION } from '../../../../../lib/oil-hedge-prices.ts';
-import { parseGoldOilAction } from '../../../../../lib/gold-oil.ts';
+import { GOLD_OIL_EXCHANGES, parseGoldOilAction } from '../../../../../lib/gold-oil.ts';
 
 export async function GET(_request: Request, context: { params: Promise<{ id: string; action: string[] }> }) {
   const { id, action } = await context.params;
@@ -26,7 +26,7 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
   if (exchange && !supportsExchange(id, exchange)) return Response.json({ error: '模块不支持此接口' }, { status: 404, headers });
   if (fundingExchange && id !== 'oil') return Response.json({ error: '模块不支持此接口' }, { status: 404, headers });
   if (hedgePrices && id !== 'oil') return Response.json({ error: '模块不支持此接口' }, { status: 404, headers });
-  if (goldOil?.action === 'status') return Response.json({ available: false, monitorId: id, oilType: goldOil.oilType, reason: '当前为网页行情版。Linux 一键部署后可运行常驻监控并保存飞书告警。' }, { headers });
+  if (goldOil?.action === 'status') return Response.json({ available: false, monitorId: id, oilType: goldOil.oilType, exchange: goldOil.exchange, source: GOLD_OIL_EXCHANGES[goldOil.exchange].name, reason: '当前为网页行情版。Linux 一键部署后可运行常驻监控并保存飞书告警。' }, { headers });
   if (["alerts", "status"].includes(name)) return Response.json({ available: false, monitorId: id, reason: "当前为网页行情版。Linux 一键部署后可运行常驻监控并保存飞书告警。" }, { headers });
   if ((!exchange && !fundingExchange && !hedgePrices && !["quote", "history", "funding", OIL_CANDLE_ACTION].includes(capability)) || !monitor.capabilities.includes(exchange || fundingExchange || hedgePrices ? "quote" : capability)) return Response.json({ error: "模块不支持此接口" }, { status: 404, headers });
   try { return Response.json(await readMonitorData(id, name), { headers }); }

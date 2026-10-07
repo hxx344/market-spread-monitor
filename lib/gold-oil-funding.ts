@@ -1,8 +1,8 @@
-import { GOLD_OIL_INSTRUMENTS, GOLD_OIL_SYMBOLS, goldOilLegValue, validateGoldOilIdentity, type GoldOilQuote, type GoldOilType } from './gold-oil.ts';
+import { GOLD_OIL_EXCHANGES, GOLD_OIL_INSTRUMENTS, GOLD_OIL_SYMBOLS, goldOilLegValue, validateGoldOilIdentity, type GoldOilQuote, type GoldOilType, type GoldOilExchange, type GoldOilSource } from './gold-oil.ts';
 
 export const HOUR = 3_600_000;
 export type FundingEvent = { time: number; oil: number | null; cl?: number | null; xau: number | null };
-export type GoldOilFundingHistory = { oilType: GoldOilType; source: 'Binance'; fetchedAt: string; status: 'live' | 'snapshot'; coverageStart: number; coverageEnd: number; points: FundingEvent[] };
+export type GoldOilFundingHistory = { oilType: GoldOilType; source: GoldOilSource; fetchedAt: string; status: 'live' | 'snapshot'; coverageStart: number; coverageEnd: number; points: FundingEvent[] };
 export function currentGoldOilFunding(quote: GoldOilQuote | null) {
   if (!quote?.funding) return null;
   const { xau, oil } = quote.funding;
@@ -10,10 +10,10 @@ export function currentGoldOilFunding(quote: GoldOilQuote | null) {
   return { hourlyRate, annualized: hourlyRate * 8760, cashPerHour: hourlyRate * 10_000 };
 }
 
-export function validateGoldOilFunding(input: unknown, expectedOil: GoldOilType = 'cl'): GoldOilFundingHistory {
+export function validateGoldOilFunding(input: unknown, expectedOil: GoldOilType = 'cl', expectedExchange: GoldOilExchange = 'binance'): GoldOilFundingHistory {
   const value = input as GoldOilFundingHistory;
-  if (!value || value.source !== 'Binance' || !['live', 'snapshot'].includes(value.status) || !Number.isFinite(Date.parse(value.fetchedAt)) || !Number.isSafeInteger(value.coverageStart) || !Number.isSafeInteger(value.coverageEnd) || value.coverageStart <= 0 || value.coverageEnd <= value.coverageStart || value.coverageEnd > Date.parse(value.fetchedAt) + 1 || !Array.isArray(value.points) || value.points.length > 100_000) throw Error('Invalid gold/oil funding history');
-  validateGoldOilIdentity(value, expectedOil);
+  if (!value || !['live', 'snapshot'].includes(value.status) || !Number.isFinite(Date.parse(value.fetchedAt)) || !Number.isSafeInteger(value.coverageStart) || !Number.isSafeInteger(value.coverageEnd) || value.coverageStart <= 0 || value.coverageEnd <= value.coverageStart || value.coverageEnd > Date.parse(value.fetchedAt) + 1 || !Array.isArray(value.points) || value.points.length > 100_000) throw Error('Invalid gold/oil funding history');
+  validateGoldOilIdentity(value, expectedOil, expectedExchange);
   let previous = 0;
   const points = value.points.map(row => {
     if (!row || typeof row !== 'object' || Array.isArray(row)) throw Error('Invalid gold/oil funding event');
@@ -23,7 +23,7 @@ export function validateGoldOilFunding(input: unknown, expectedOil: GoldOilType 
     for (const rate of [oil, row.xau]) if (rate !== null && (typeof rate !== 'number' || !Number.isFinite(rate) || Math.abs(rate) > 1)) throw Error('Invalid settled funding rate');
     return { time: row.time, oil, ...(expectedOil === 'cl' ? { cl: oil } : {}), xau: row.xau };
   });
-  return { oilType: expectedOil, source: 'Binance', fetchedAt: value.fetchedAt, status: value.status, coverageStart: value.coverageStart, coverageEnd: value.coverageEnd, points };
+  return { oilType: expectedOil, source: GOLD_OIL_EXCHANGES[expectedExchange].name, fetchedAt: value.fetchedAt, status: value.status, coverageStart: value.coverageStart, coverageEnd: value.coverageEnd, points };
 }
 
 export function parseGoldOilFunding(oilInput: unknown, xauInput: unknown, start: number, end: number, now: number, previous: GoldOilFundingHistory | null = null, oilType: GoldOilType = 'cl') {

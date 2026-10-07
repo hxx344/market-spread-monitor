@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { hynixAlerts, hynixDraft, hynixConfig, oilAlerts, oilDraft, oilConfig, goldOilAlerts, goldOilBzAlerts, monitorAlertAdapters } from "../lib/monitor-alerts.ts";
+import { hynixAlerts, hynixDraft, hynixConfig, oilAlerts, oilDraft, oilConfig, goldOilAlerts, goldOilBzAlerts, goldOilBybitAlerts, goldOilBybitBzAlerts, goldOilAlertId, monitorAlertAdapters } from "../lib/monitor-alerts.ts";
 import { monitors } from "../lib/monitors.ts";
 
 const signal = () => new AbortController().signal;
@@ -106,9 +106,9 @@ test('gold/oil editor uses ratio units, isolated endpoints, canonical saves and 
   assert.equal(unavailable.available, false); assert.deepEqual(calls, ['/api/monitors/cl-xau/status']);
 });
 
-function goldQuote(oilType) {
+function goldQuote(oilType, source = 'Binance') {
   const fetchedAt = '2026-09-30T00:00:00Z', oil = { symbol: oilType === 'cl' ? 'CLUSDT' : 'BZUSDT', price: oilType === 'cl' ? 80 : 100, updatedAt: fetchedAt };
-  return { source: 'Binance', currency: 'USDT', priceBasis: 'mark', status: 'live', fetchedAt, oilType, oil, xau: { symbol: 'XAUUSDT', price: 4000, updatedAt: fetchedAt }, ratio: 999, funding: null };
+  return { source, currency: 'USDT', priceBasis: 'mark', status: 'live', fetchedAt, oilType, oil, xau: { symbol: 'XAUUSDT', price: 4000, updatedAt: fetchedAt }, ratio: 999, funding: null };
 }
 
 test('BZ alert editor uses independent endpoints, revisions, labels and saves', async () => {
@@ -139,4 +139,46 @@ test('wrong-oil status quotes are hidden while alert configuration remains edita
     assert.equal(view.available, true); assert.equal(view.market, '服务器尚未取得有效行情。'); assert.match(view.error, /合约标识或格式无效/);
     assert.deepEqual(view.draft, { enabled: false, rules: [] });
   }
+});
+
+test('Bybit CL and BZ adapters keep their own identities, revisions, event labels and saves', async () => {
+  const allAdapters = [goldOilAlerts, goldOilBzAlerts, goldOilBybitAlerts, goldOilBybitBzAlerts];
+  assert.equal(new Set(allAdapters).size, 4);
+  for (const [oilType, adapter, revision] of [['cl', goldOilBybitAlerts, 12], ['bz', goldOilBybitBzAlerts, 19]]) {
+    assert.equal(monitorAlertAdapters[goldOilAlertId(oilType, 'bybit')], adapter);
+    const identity = { source: 'Bybit', exchange: 'bybit', oilType }, prefix = `/api/monitors/cl-xau/bybit/${oilType === 'bz' ? 'bz/' : ''}`, calls = [];
+    const view = await adapter.load(signal(), async url => {
+      calls.push(url);
+      return Response.json({ ...identity, ...(url.endsWith('status') ? { available: true, market: goldQuote(oilType, 'Bybit') }
+        : url.endsWith('config') ? { revision, config: { enabled: false, rules: [] } }
+        : { events: [{ id: 'bybit-event', time: '2026-10-07T00:00:00Z', status: 'sent', rules: [{ label: 'Bybit 阈值', operator: 'gte', value: 48, threshold: 47 }] }] }) });
+    });
+    assert.deepEqual(calls.sort(), ['config', 'events', 'status'].map(action => `${prefix}${action}`));
+    assert.deepEqual(view.draft, { enabled: false, rules: [] }); assert.equal(view.revision, revision);
+    assert.equal(adapter.metrics[0].unit, oilType === 'bz' ? '报价比' : '桶/盎司');
+    assert.equal(adapter.metrics[0].hysteresisUnit, oilType === 'bz' ? '报价比' : '桶/盎司');
+    assert.match(view.market, /^Bybit 标记价/); assert.match(view.history[0].description, new RegExp(`^\\[Bybit ${oilType.toUpperCase()}\\]`));
+    const draft = { enabled: true, rules: [{ ...adapter.newRule(view.draft), threshold: 48 }] };
+    const saved = await adapter.save(draft, revision, signal(), async (url, init) => {
+      assert.equal(url, `${prefix}config`); assert.deepEqual(JSON.parse(init.body), { revision, config: oilConfig(draft) });
+      return Response.json({ ...identity, revision: revision + 1, config: oilConfig(draft) });
+    });
+    assert.deepEqual(saved, { revision: revision + 1, draft });
+    const unavailable = await adapter.load(signal(), async () => Response.json({ ...identity, available: false, reason: '仅行情' }));
+    assert.equal(unavailable.reason, '仅行情');
+  }
+});
+
+test('Bybit alert responses reject crossed identities and hide a crossed market quote', async () => {
+  const identity = { source: 'Bybit', exchange: 'bybit', oilType: 'cl' }, config = { enabled: false, rules: [] };
+  for (const action of ['status', 'config', 'events']) {
+    for (const wrongIdentity of [{}, { ...identity, source: 'Binance' }, { ...identity, exchange: 'binance' }, { ...identity, oilType: 'bz' }]) {
+      await assert.rejects(goldOilBybitAlerts.load(signal(), async url => Response.json({ ...(url.endsWith(action) ? wrongIdentity : identity),
+        ...(url.endsWith('status') ? { available: true, market: goldQuote('cl', 'Bybit') } : url.endsWith('config') ? { revision: 1, config } : { events: [] }) })), /其他交易所或合约/);
+    }
+  }
+  const view = await goldOilBybitAlerts.load(signal(), async url => Response.json({ ...identity,
+    ...(url.endsWith('status') ? { available: true, market: goldQuote('cl', 'Binance') } : url.endsWith('config') ? { revision: 1, config } : { events: [] }) }));
+  assert.equal(view.market, '服务器尚未取得有效行情。'); assert.match(view.error, /合约标识或格式无效/);
+  await assert.rejects(goldOilBybitAlerts.save({ enabled: false, rules: [] }, 1, signal(), async () => Response.json({ source: 'Binance', exchange: 'binance', oilType: 'cl', revision: 2, config })), /其他交易所或合约/);
 });

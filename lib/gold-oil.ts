@@ -4,25 +4,38 @@ export const GOLD_OIL_HISTORY_MS = 60_000;
 export const GOLD_OIL_STALE_MS = 75_000;
 export const GOLD_OIL_FUNDING_MS = 300_000;
 export type GoldOilType = 'cl' | 'bz';
+export type GoldOilExchange = 'binance' | 'bybit';
+export const GOLD_OIL_EXCHANGES = { binance: { name: 'Binance' }, bybit: { name: 'Bybit' } } as const;
+export const GOLD_OIL_VARIANTS = [
+  { exchange: 'binance', oilType: 'cl' }, { exchange: 'binance', oilType: 'bz' },
+  { exchange: 'bybit', oilType: 'cl' }, { exchange: 'bybit', oilType: 'bz' },
+] as const;
+export type GoldOilSource = typeof GOLD_OIL_EXCHANGES[GoldOilExchange]['name'];
+export function goldOilVariantKey(oilType: GoldOilType = 'cl', exchange: GoldOilExchange = 'binance') { return `${exchange}/${oilType}`; }
+export function goldOilUnits(oilType: GoldOilType = 'cl', exchange: GoldOilExchange = 'binance') {
+  return exchange === 'bybit' && oilType === 'bz' ? { ratio: '报价比', oil: 'USDT/BZ' } : { ratio: '桶/盎司', oil: 'USDT/桶' };
+}
 export const GOLD_OIL_INSTRUMENTS = {
   cl: { symbol: 'CLUSDT', code: 'CL', name: 'WTI 原油' },
   bz: { symbol: 'BZUSDT', code: 'BZ', name: '布伦特原油' },
 } as const;
 export const GOLD_OIL_SYMBOLS = { cl: 'CLUSDT', xau: 'XAUUSDT' } as const;
-export function goldOilAction(action: string, oilType: GoldOilType = 'cl') { return oilType === 'bz' ? `bz/${action}` : action; }
-export function parseGoldOilAction(action: string): { oilType: GoldOilType; action: string } | null {
-  const oilType = action.startsWith('bz/') ? 'bz' : 'cl', name = oilType === 'bz' ? action.slice(3) : action;
-  return ['quote', 'history', 'funding', 'status', 'config', 'events'].includes(name) ? { oilType, action: name } : null;
+export function goldOilAction(action: string, oilType: GoldOilType = 'cl', exchange: GoldOilExchange = 'binance') { return `${exchange === 'bybit' ? 'bybit/' : ''}${oilType === 'bz' ? 'bz/' : ''}${action}`; }
+export function parseGoldOilAction(action: string): { oilType: GoldOilType; exchange: GoldOilExchange; action: string } | null {
+  const exchange = action.startsWith('bybit/') ? 'bybit' : 'binance', path = exchange === 'bybit' ? action.slice(6) : action;
+  const oilType = path.startsWith('bz/') ? 'bz' : 'cl', name = oilType === 'bz' ? path.slice(3) : path;
+  return ['quote', 'history', 'funding', 'status', 'config', 'events'].includes(name) ? { oilType, exchange, action: name } : null;
 }
 type Leg = { symbol: string; price: number; updatedAt: string };
 export type GoldOilFundingLeg = { rate: number; intervalHours: number; nextFundingAt: string };
-export type GoldOilQuote = { oilType: GoldOilType; source: 'Binance'; currency: 'USDT'; priceBasis: 'mark'; fetchedAt: string; oil: Leg; cl?: Leg; xau: Leg; ratio: number; status: 'live' | 'snapshot'; funding: { oil: GoldOilFundingLeg; cl?: GoldOilFundingLeg; xau: GoldOilFundingLeg } | null };
+export type GoldOilQuote = { oilType: GoldOilType; source: GoldOilSource; currency: 'USDT'; priceBasis: 'mark'; fetchedAt: string; oil: Leg; cl?: Leg; xau: Leg; ratio: number; status: 'live' | 'snapshot'; funding: { oil: GoldOilFundingLeg; cl?: GoldOilFundingLeg; xau: GoldOilFundingLeg } | null };
 export type GoldOilPoint = { time: number; oil: number | null; cl?: number | null; xau: number | null; ratio: number | null };
-export type GoldOilHistory = { oilType: GoldOilType; source: 'Binance'; currency: 'USDT'; priceBasis: 'mark'; interval: '15m'; fetchedAt: string; status: 'live' | 'snapshot'; points: GoldOilPoint[]; coverageStart?: number };
+export type GoldOilHistory = { oilType: GoldOilType; source: GoldOilSource; currency: 'USDT'; priceBasis: 'mark'; interval: '15m'; fetchedAt: string; status: 'live' | 'snapshot'; points: GoldOilPoint[]; coverageStart?: number };
 
-/** Only historic CL payloads may omit the variant; BZ is always explicit. */
-export function validateGoldOilIdentity(value: Record<string, unknown>, expectedOil: GoldOilType) {
-  if (!['cl', 'bz'].includes(expectedOil) || (value.oilType === undefined ? expectedOil !== 'cl' : value.oilType !== expectedOil)) throw Error('Unexpected gold/oil variant');
+/** Only historic Binance CL payloads may omit the variant. */
+export function validateGoldOilIdentity(value: Record<string, unknown>, expectedOil: GoldOilType, expectedExchange: GoldOilExchange = 'binance') {
+  if (!Object.hasOwn(GOLD_OIL_EXCHANGES, expectedExchange) || value.source !== GOLD_OIL_EXCHANGES[expectedExchange].name) throw Error('Unexpected gold/oil source');
+  if (!['cl', 'bz'].includes(expectedOil) || (value.oilType === undefined ? expectedOil !== 'cl' || expectedExchange !== 'binance' : value.oilType !== expectedOil)) throw Error('Unexpected gold/oil variant');
 }
 function identical(left: unknown, right: unknown): boolean {
   if (left === right) return true;
@@ -49,9 +62,9 @@ function stamp(value: unknown): string {
   if (typeof value !== 'string' || !Number.isFinite(Date.parse(value)) || Date.parse(value) <= 0) throw Error('Invalid gold/oil time');
   return value;
 }
-function common(value: Record<string, unknown>) {
-  if (value.source !== 'Binance' || value.currency !== 'USDT' || value.priceBasis !== 'mark' || !['live', 'snapshot'].includes(String(value.status))) throw Error('Invalid gold/oil source');
-  return { source: 'Binance' as const, currency: 'USDT' as const, priceBasis: 'mark' as const, fetchedAt: stamp(value.fetchedAt), status: value.status as 'live' | 'snapshot' };
+function common(value: Record<string, unknown>, exchange: GoldOilExchange) {
+  if (!Object.hasOwn(GOLD_OIL_EXCHANGES, exchange) || value.source !== GOLD_OIL_EXCHANGES[exchange].name || value.currency !== 'USDT' || value.priceBasis !== 'mark' || !['live', 'snapshot'].includes(String(value.status))) throw Error('Invalid gold/oil source');
+  return { source: GOLD_OIL_EXCHANGES[exchange].name, currency: 'USDT' as const, priceBasis: 'mark' as const, fetchedAt: stamp(value.fetchedAt), status: value.status as 'live' | 'snapshot' };
 }
 /** USDT/ounce divided by USDT/barrel gives barrels/ounce. */
 export function goldOilRatio(oil: number | null, xau: number | null): number | null {
@@ -59,9 +72,9 @@ export function goldOilRatio(oil: number | null, xau: number | null): number | n
   const ratio = xau / oil;
   return Number.isFinite(ratio) && ratio > 0 ? ratio : null;
 }
-export function validateGoldOilQuote(input: unknown, expectedOil: GoldOilType = 'cl'): GoldOilQuote {
-  const value = object(input), base = common(value);
-  validateGoldOilIdentity(value, expectedOil);
+export function validateGoldOilQuote(input: unknown, expectedOil: GoldOilType = 'cl', expectedExchange: GoldOilExchange = 'binance'): GoldOilQuote {
+  const value = object(input), base = common(value, expectedExchange);
+  validateGoldOilIdentity(value, expectedOil, expectedExchange);
   const leg = (input: unknown, symbol: string): Leg => {
     const item = object(input);
     if (item.symbol !== symbol) throw Error('Unexpected gold/oil contract');
@@ -83,9 +96,9 @@ export function validateGoldOilQuote(input: unknown, expectedOil: GoldOilType = 
   }
   return { ...base, oilType: expectedOil, oil, ...(expectedOil === 'cl' ? { cl: oil } : {}), xau, ratio, funding };
 }
-export function validateGoldOilHistory(input: unknown, expectedOil: GoldOilType = 'cl'): GoldOilHistory {
-  const value = object(input), base = common(value);
-  validateGoldOilIdentity(value, expectedOil);
+export function validateGoldOilHistory(input: unknown, expectedOil: GoldOilType = 'cl', expectedExchange: GoldOilExchange = 'binance'): GoldOilHistory {
+  const value = object(input), base = common(value, expectedExchange);
+  validateGoldOilIdentity(value, expectedOil, expectedExchange);
   if (value.interval !== '15m' || !Array.isArray(value.points) || !value.points.length || value.points.length > 100_000) throw Error('Invalid gold/oil history');
   let previous = 0;
   const points = value.points.map(item => {

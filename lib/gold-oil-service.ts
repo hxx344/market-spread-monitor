@@ -1,5 +1,6 @@
-import { GOLD_OIL_INSTRUMENTS, GOLD_OIL_INTERVAL_MS, GOLD_OIL_STALE_MS, GOLD_OIL_SYMBOLS, validateGoldOilQuote, validateGoldOilHistory, type GoldOilHistory, type GoldOilType } from './gold-oil.ts';
+import { GOLD_OIL_INSTRUMENTS, GOLD_OIL_INTERVAL_MS, GOLD_OIL_STALE_MS, GOLD_OIL_SYMBOLS, validateGoldOilQuote, validateGoldOilHistory, type GoldOilHistory, type GoldOilType, type GoldOilExchange } from './gold-oil.ts';
 import { parseGoldOilFunding, validateGoldOilFunding, type GoldOilFundingHistory } from './gold-oil-funding.ts';
+import { createBybitGoldOilReader } from './gold-oil-bybit-service.ts';
 
 function number(value: unknown) {
   if ((typeof value !== 'number' && typeof value !== 'string') || String(value).trim() === '' || !Number.isFinite(Number(value))) throw Error('Invalid Binance number');
@@ -60,7 +61,9 @@ export function parseGoldOilHistory(oilInput: unknown, xauInput: unknown, now = 
   return validateGoldOilHistory({ oilType, source: 'Binance', currency: 'USDT', priceBasis: 'mark', interval: '15m', status: 'live', fetchedAt: new Date(now).toISOString(), points, ...(coverageStart === undefined ? {} : { coverageStart: Math.min(coverageStart, previous?.coverageStart ?? coverageStart) }) }, oilType);
 }
 
-export function createGoldOilReader({ oilType = 'cl', fetcher = fetch, clock = Date.now }: { oilType?: GoldOilType; fetcher?: typeof fetch; clock?: () => number } = {}) {
+export function createGoldOilReader({ oilType = 'cl', exchange = 'binance', fetcher = fetch, clock = Date.now }: { oilType?: GoldOilType; exchange?: GoldOilExchange; fetcher?: typeof fetch; clock?: () => number } = {}) {
+  if (!['cl', 'bz'].includes(oilType) || !['binance', 'bybit'].includes(exchange)) throw Error('Unsupported gold/oil variant');
+  if (exchange === 'bybit') return createBybitGoldOilReader({ oilType, fetcher, clock });
   const symbols = [GOLD_OIL_INSTRUMENTS[oilType].symbol, GOLD_OIL_SYMBOLS.xau];
   let metadataUntil = 0, commonStart = 0, pendingMetadata: Promise<void> | undefined;
   let fundingUntil = 0, fundingInfo: unknown = null, pendingFunding: Promise<unknown> | undefined;
@@ -112,9 +115,9 @@ export function createGoldOilReader({ oilType = 'cl', fetcher = fetch, clock = D
       return parseGoldOilQuote(oil, xau, clock(), funding, oilType);
     },
     async history(previous: GoldOilHistory | null = null) {
-      await metadata();
       previous ??= latestHistory;
       if (previous) previous = validateGoldOilHistory(previous, oilType);
+      await metadata();
       const now = clock(), end = Math.floor(now / GOLD_OIL_INTERVAL_MS) * GOLD_OIL_INTERVAL_MS;
       let start = previous?.coverageStart !== undefined && previous.coverageStart <= commonStart ? Math.max(commonStart, previous.points.at(-1)!.time - 86_400_000) : commonStart;
       let expected = commonStart;
@@ -124,9 +127,9 @@ export function createGoldOilReader({ oilType = 'cl', fetcher = fetch, clock = D
       return latestHistory;
     },
     async funding(previous: GoldOilFundingHistory | null = null) {
-      await metadata();
       previous ??= latestFunding;
       if (previous) previous = validateGoldOilFunding(previous, oilType);
+      await metadata();
       const now = clock(), start = previous && previous.coverageStart <= commonStart ? Math.max(commonStart, previous.coverageEnd - 2 * 86_400_000) : commonStart;
       const [oil, xau] = await Promise.all(symbols.map(symbol => pages('/fapi/v1/fundingRate', symbol, start, now, false)));
       latestFunding = parseGoldOilFunding(oil, xau, start, now, now, previous, oilType);
@@ -136,3 +139,5 @@ export function createGoldOilReader({ oilType = 'cl', fetcher = fetch, clock = D
 }
 export const goldOilReader = createGoldOilReader();
 export const goldOilBzReader = createGoldOilReader({ oilType: 'bz' });
+export const goldOilBybitReader = createGoldOilReader({ exchange: 'bybit' });
+export const goldOilBybitBzReader = createGoldOilReader({ oilType: 'bz', exchange: 'bybit' });

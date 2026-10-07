@@ -45,7 +45,7 @@ async page => {
   });
   try {
     await page.setViewportSize({ width: 1440, height: 1050 });
-    await page.goto('http://127.0.0.1:3189/?monitor=cl-xau&goldOil=cl');
+    await page.goto('http://127.0.0.1:3189/?monitor=cl-xau&goldOil=cl&goldOilExchange=binance');
     const tab = page.getByRole('tabpanel', { name: '金油比', exact: true }), panel = tab.locator('.oil-panel');
     const metric = panel.getByRole('region', { name: '金油比报价' });
     await metric.locator('.metric-number').filter({ hasText: '50.000' }).waitFor();
