@@ -31,14 +31,14 @@ export function ScannerRangeFilters({ inputs, compiled, onChange, onClear, onClo
       </details></legend>
       <div className="scanner-range-rows">{group.rows.map(row => <div key={row.id} className="scanner-range-row" data-range={row.id}>
         <span className="scanner-range-label" aria-hidden="true">{row.label}</span>
-        {(["min", "max"] as const).map(bound => <input key={bound} type="text" inputMode="text" autoComplete="off" spellCheck={false} maxLength={32}
+        {(["min", "max"] as const).map(bound => <input key={bound} name={`scanner-${row.id}-${bound}`} type="text" inputMode="text" autoComplete="off" spellCheck={false} maxLength={32}
           aria-label={`${row.accessible}${bound === "min" ? "最小值" : "最大值"}`} placeholder={bound === "min" ? "最小" : "最大"}
           aria-invalid={Boolean(compiled.errors[row.id])} aria-describedby={compiled.errors[row.id] ? `scanner-range-error-${row.id}` : undefined}
           value={inputs[row.id][bound]} onChange={event => onChange(row.id, bound, event.target.value)}/>)}
         {compiled.errors[row.id] ? <small id={`scanner-range-error-${row.id}`} className="scanner-range-error">{compiled.errors[row.id]}</small> : null}
       </div>)}</div>
     </fieldset>)}</div>
-    <div className="scanner-range-footer"><div><p>金额字段支持 K / M / B · 留空表示不限 · 筛选作用于全部组合，而非仅当前页</p>
+    <div className="scanner-range-footer"><div className="scanner-range-notes"><p>金额支持 K / M / B · 留空不限 · 筛选全部组合</p>
       {compiled.needsFx ? <small>金额按实时汇率折算 USD；缺失、过期或尚未采集的数据暂不匹配。</small> : null}
     </div><div className="scanner-range-actions"><button type="button" onClick={onClear}>全部清除</button><button type="button" className="scanner-range-close" onClick={onClose}>收起</button></div></div>
   </section>;

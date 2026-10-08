@@ -35,8 +35,13 @@ export default function PerpetualManualPairs({ snapshot, mode, now, budget, acti
     try { localStorage.setItem(storageKey, JSON.stringify({ version: 1, pairs: next })); setStorageError(''); }
     catch { setStorageError('保存失败，刷新页面后可能丢失配置。'); }
   }
-  const byKey = useMemo(() => new Map((snapshot?.quotes ?? []).map(q => [manualQuoteKey(q), q])), [snapshot?.quotes]);
-  const venues = useMemo(() => new Map((snapshot?.exchanges ?? []).map(v => [v.id, v.name])), [snapshot?.exchanges]);
+  // Keep the form mounted to preserve drafts, but skip the full market catalog
+  // while either the tools section or this panel is collapsed.
+  const visible = active && open;
+  const quotes = visible ? snapshot?.quotes : null;
+  const exchanges = visible ? snapshot?.exchanges : null;
+  const byKey = useMemo(() => new Map((quotes ?? []).map(q => [manualQuoteKey(q), q])), [quotes]);
+  const venues = useMemo(() => new Map((exchanges ?? []).map(v => [v.id, v.name])), [exchanges]);
   // Price ticks do not change select options; only catalog metadata triggers sorting.
   const catalogSignature = JSON.stringify([...byKey].map(([key, q]) => [key, `${venues.get(q.exchange) ?? q.exchange} · ${q.symbol} · ${q.quoteCurrency}${q.comparable === false ? ' · 独立合约' : ''}`]));
   const catalog = useMemo(() => (JSON.parse(catalogSignature) as [string, string][]).map(([key, label]) => ({ key, label })).sort((a, b) => a.label.localeCompare(b.label)), [catalogSignature]);
@@ -47,8 +52,8 @@ export default function PerpetualManualPairs({ snapshot, mode, now, budget, acti
     return catalog.filter(q => visible.has(q.key));
   }, [catalog, matches, draft.first, draft.second]);
   const needsFx = pairs.some(pair => { const a = byKey.get(pair.first), b = byKey.get(pair.second); return a && b && a.quoteCurrency !== b.quoteCurrency; });
-  const { data: fx, error: fxError } = usePerpetualFx(active && open && needsFx && !paused);
-  const results = useMemo(() => open ? pairs.map(pair => ({ pair, result: evaluateManualPair(pair, snapshot, byKey, mode, now, budget, fx) })) : [], [open, pairs, snapshot, byKey, mode, now, budget, fx]);
+  const { data: fx, error: fxError } = usePerpetualFx(visible && needsFx && !paused);
+  const results = useMemo(() => visible ? pairs.map(pair => ({ pair, result: evaluateManualPair(pair, snapshot, byKey, mode, now, budget, fx) })) : [], [visible, pairs, snapshot, byKey, mode, now, budget, fx]);
   function save(event: FormEvent) {
     event.preventDefault();
     const next = { ...draft, id: draft.id || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`, firstFactor: Number(draft.firstFactor), secondFactor: Number(draft.secondFactor) };

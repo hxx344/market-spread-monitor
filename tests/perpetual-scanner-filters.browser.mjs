@@ -112,7 +112,73 @@ async page => {
     const layout = await filterPanel.locator('fieldset').evaluateAll(elements => elements.map(element => ({ x: element.getBoundingClientRect().x, y: element.getBoundingClientRect().y })));
     check(layout.length === 4 && layout.every(item => Math.abs(item.y - layout[0].y) < 2) && layout.every((item, index) => !index || item.x > layout[index - 1].x), 'Desktop filter groups share one four-column row');
     check(await filterPanel.evaluate(element => getComputedStyle(element).backgroundColor) === 'rgb(36, 35, 31)', 'The expanded panel uses the scanner dark background');
-    await filterPanel.screenshot({ path: 'output/playwright/perpetual-ranges-desktop.png' });
+    check(await filterPanel.getByRole('textbox').evaluateAll(inputs => new Set(inputs.map(input => input.name)).size === 20 && inputs.every(input => input.name)), 'All range inputs have unique form names');
+    await filterPanel.screenshot({ path: 'output/playwright/scanner-layout-ranges-desktop.png' });
+    await filterPanel.getByRole('button', { name: '收起', exact: true }).click();
+    check(await toggle.getAttribute('aria-expanded') === 'false' && await toggle.evaluate(element => element === document.activeElement), 'Desktop collapse is visible and returns focus');
+    const evidence = page.locator('.scanner-metric-evidence');
+    const lastMetric = rows.last().locator('[data-column="openInterest"] .scanner-metric-trigger').last();
+    const evidenceFits = async label => {
+      await tick(32);
+      check(await evidence.evaluate(element => {
+        const r = element.getBoundingClientRect();
+        return r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight && [[r.left + 3, r.top + 3], [r.right - 3, r.bottom - 3]].every(([x, y]) => element.contains(document.elementFromPoint(x, y)));
+      }), `${label}: all source evidence is visible and hit-testable within the viewport`);
+    };
+    await lastMetric.click(); await evidenceFits('Last desktop row');
+    check(await evidence.evaluate(element => element.matches(':popover-open')), 'Supported browsers use the native top layer');
+    check((await evidence.innerText()).includes('official fixture metric') && (await evidence.innerText()).includes('100,000 USD') && await evidence.locator('time').getAttribute('datetime'), 'Evidence retains the exact original amount, currency, source and source time');
+    await page.screenshot({ path: 'output/playwright/scanner-layout-evidence-desktop.png' });
+    await evidence.getByRole('button', { name: '收起指标来源', exact: true }).press('Escape');
+    check(await evidence.count() === 0 && await lastMetric.evaluate(element => element === document.activeElement), 'Evidence Escape closes and restores the original trigger focus');
+    for (const width of [900, 390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      await lastMetric.click();
+      await page.locator('.scanner-table-wrap').evaluate(element => { element.scrollLeft -= 24; });
+      await evidenceFits(`${width}px after horizontal scrolling`);
+      if (width === 390) await page.screenshot({ path: 'output/playwright/scanner-layout-evidence-mobile.png' });
+      await evidence.getByRole('button', { name: '收起指标来源', exact: true }).click();
+      check(await evidence.count() === 0 && await lastMetric.evaluate(element => element === document.activeElement), `${width}px explicit close restores focus`);
+    }
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await lastMetric.click();
+    const nextMetric = rows.last().locator('[data-column="openInterest"] .scanner-metric-trigger').first();
+    await nextMetric.focus(); await nextMetric.press('Enter'); await tick(32);
+    check(await evidence.count() === 1 && await lastMetric.getAttribute('aria-expanded') === 'false' && await nextMetric.getAttribute('aria-expanded') === 'true', 'Opening a second evidence panel by keyboard closes the first');
+    await page.locator('.perp-scanner .perp-heading h2').click();
+    check(await evidence.count() === 0, 'Clicking outside dismisses evidence');
+    await page.evaluate(() => {
+      const descriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'showPopover');
+      window.restoreScannerPopover = () => Object.defineProperty(HTMLElement.prototype, 'showPopover', descriptor);
+      Object.defineProperty(HTMLElement.prototype, 'showPopover', { configurable: true, value: undefined });
+    });
+    try {
+      await lastMetric.click(); await evidenceFits('Fixed fallback');
+      check(await evidence.getAttribute('popover') === null, 'Fallback remains visible without native Popover support');
+      await nextMetric.focus(); await nextMetric.press('Enter'); await tick(32);
+      check(await evidence.count() === 1 && await lastMetric.getAttribute('aria-expanded') === 'false' && await nextMetric.getAttribute('aria-expanded') === 'true', 'Fallback also keeps only one evidence panel open after keyboard navigation');
+      await evidence.getByRole('button', { name: '收起指标来源', exact: true }).press('Escape');
+      check(await evidence.count() === 0 && await nextMetric.evaluate(element => element === document.activeElement), 'Fallback Escape closes and restores focus');
+    } finally { await page.evaluate(() => { window.restoreScannerPopover(); delete window.restoreScannerPopover; }); }
+    await toggle.click();
+    for (const width of [900, 768, 390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      const geometry = await filterPanel.evaluate(element => {
+        const groups = [...element.querySelectorAll('fieldset')].map(group => group.getBoundingClientRect());
+        return { columns: groups.filter(group => Math.abs(group.y - groups[0].y) < 2).length, minInput: Math.min(...[...element.querySelectorAll('input')].map(input => input.getBoundingClientRect().width)) };
+      });
+      check(geometry.columns === (width > 520 ? 2 : 1) && geometry.minInput >= 76, `${width}px ranges remain readable in ${width > 520 ? 'two columns' : 'one column'}`);
+      check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${width}px page has no horizontal overflow`);
+      if (width === 900) await filterPanel.screenshot({ path: 'output/playwright/scanner-layout-ranges-900.png' });
+      if (width <= 390) {
+        await filterPanel.scrollIntoViewIfNeeded();
+        for (const name of ['资金费年化最大值', '7天实际资金费最大值', '30天实际资金费最大值']) {
+          await field(name).focus(); await tick(32);
+          check(await field(name).evaluate(input => { const r = input.getBoundingClientRect(); return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2) === input; }), `${width}px focused ${name} is not covered by sticky actions`);
+        }
+      }
+    }
+    await page.setViewportSize({ width: 1440, height: 1000 });
 
     await field('多头持仓量最小值').fill('500k');
     await expectRows([target]);
@@ -156,7 +222,7 @@ async page => {
     await field('7天实际资金费最大值').fill('-.22');
     check((await filterPanel.innerText()).includes('最小值不能大于最大值'), 'Signed historical ranges retain strict bound ordering');
     await field('7天实际资金费最大值').fill('-.209'); await expectRows([target]);
-    await filterPanel.screenshot({ path: 'output/playwright/perpetual-ranges-filled.png' });
+    await filterPanel.screenshot({ path: 'output/playwright/scanner-layout-ranges-filled.png' });
 
     await field('搜索币种').fill(target);
     const exchanges = await openMenu(/^交易所/);
@@ -194,6 +260,23 @@ async page => {
     const saved = await page.evaluate(key => JSON.parse(localStorage.getItem(key)), rangeKey);
     check(saved.longOpenInterest.min === '500k' && saved.spread.min === '', 'Storage is the complete raw input object without a hidden numeric threshold');
 
+    const tools = page.locator('.scanner-tools > summary');
+    await tools.click();
+    const manual = page.getByRole('region', { name: '手动配对', exact: true });
+    await manual.getByRole('button', { name: /^手动配对/ }).click();
+    const manualSearch = manual.getByRole('textbox', { name: /^搜索可选合约/ });
+    await manualSearch.fill(target);
+    await manual.getByRole('combobox', { name: '合约 A', exact: true }).selectOption(`binance:${target}USDT`);
+    await manual.getByRole('combobox', { name: '合约 B', exact: true }).selectOption(`gate:${target}USDT`);
+    await manual.getByRole('spinbutton', { name: 'A 价格换算倍数', exact: true }).fill('2');
+    await tools.click();
+    venues[1].name = 'Gate 最新目录';
+    await page.getByRole('button', { name: '刷新', exact: true }).click(); await tick(100);
+    await tools.click();
+    check(await manualSearch.inputValue() === target && await manual.getByRole('combobox', { name: '合约 A', exact: true }).inputValue() === `binance:${target}USDT` && await manual.getByRole('combobox', { name: '合约 B', exact: true }).inputValue() === `gate:${target}USDT` && await manual.getByRole('spinbutton', { name: 'A 价格换算倍数', exact: true }).inputValue() === '2', 'Collapsing tools preserves the manual search and unsaved pair draft');
+    await until(async () => (await manual.getByRole('combobox', { name: '合约 B', exact: true }).locator('option:checked').innerText()).includes('Gate 最新目录'), 'Reopening manual pairs rebuilds the current contract catalog');
+    await tools.click();
+
     await page.setViewportSize({ width: 390, height: 844 });
     check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'The 390px page does not overflow horizontally');
     check(await filterPanel.evaluate(element => element.scrollHeight > element.clientHeight && ['auto', 'scroll'].includes(getComputedStyle(element).overflowY)), 'The mobile panel scrolls within its own bounded height');
@@ -206,12 +289,12 @@ async page => {
     await toggle.click();
     await filterPanel.evaluate(element => { element.scrollTop = element.scrollHeight; });
     await filterPanel.scrollIntoViewIfNeeded();
-    await page.screenshot({ path: 'output/playwright/perpetual-ranges-mobile.png', fullPage: false });
+    await page.screenshot({ path: 'output/playwright/scanner-layout-ranges-mobile.png', fullPage: false });
     await filterPanel.getByRole('button', { name: '收起', exact: true }).click();
     check(await toggle.getAttribute('aria-expanded') === 'false', 'Mobile has an explicit collapse action');
     check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'Collapsed mobile filters preserve page width');
     check(errors.length === 0, `Unexpected browser errors: ${errors.join('; ')}`);
     check(external.length === 0, `Unexpected external requests: ${external.join(', ')}`);
-    return { passed: true, checks: ['four dark desktop groups and 20 accessible inputs', '65 candidates beyond page one and bounded batch coverage', 'true USD with K/M/B', 'signed percent ranges', 'hidden columns retain conditions', 'invalid and reversed bounds', 'all-clear preserves independent preferences', 'cached direction reversal without HTTP', 'history pending to ready, missing and true zero', 'reload persistence', '390px bounded scrolling, Escape and collapse'], scannerRequests: scannerRequests.length, apiRequests: Object.fromEntries(counts), screenshots: ['output/playwright/perpetual-ranges-desktop.png', 'output/playwright/perpetual-ranges-filled.png', 'output/playwright/perpetual-ranges-mobile.png'] };
+    return { passed: true, checks: ['four dark desktop groups and 20 named accessible inputs', '65 candidates beyond page one and bounded batch coverage', 'true USD with K/M/B', 'signed percent ranges', 'hidden columns retain conditions', 'invalid and reversed bounds', 'all-clear preserves independent preferences', 'cached direction reversal without HTTP', 'history pending to ready, missing and true zero', 'reload persistence', '900/768px two columns, 390/320px readable inputs and unobscured focus', 'native top-layer and fixed fallback evidence: source/time/currency, clipping, scrolling, Escape, focus return and outside dismissal', 'manual draft preserved and current catalog rebuilt on tools reopen'], scannerRequests: scannerRequests.length, apiRequests: Object.fromEntries(counts), screenshots: ['output/playwright/scanner-layout-ranges-desktop.png', 'output/playwright/scanner-layout-ranges-900.png', 'output/playwright/scanner-layout-ranges-filled.png', 'output/playwright/scanner-layout-ranges-mobile.png', 'output/playwright/scanner-layout-evidence-desktop.png', 'output/playwright/scanner-layout-evidence-mobile.png'] };
   } finally { page.off('pageerror', onError); await page.clock.resume(); }
 }

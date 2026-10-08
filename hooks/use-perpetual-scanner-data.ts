@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { startPerpetualScannerDataFeed } from '../lib/perpetual-scanner-data-feed';
 import { scannerDataRequirementsKey, scannerDataSelectionKey, type PerpetualScannerDataReport, type ScannerDataPair, type ScannerDataRequirements } from '../lib/perpetual-scanner-data';
 
@@ -8,7 +8,8 @@ export function usePerpetualScannerData(pairs: ScannerDataPair[], requirements: 
   const [report, setReport] = useState<PerpetualScannerDataReport | null>(null);
   const [loading, setLoading] = useState(false), [error, setError] = useState('');
   const controls = useRef<ReturnType<typeof startPerpetualScannerDataFeed> | null>(null);
-  const selectionKey = scannerDataSelectionKey(pairs), requirementsKey = scannerDataRequirementsKey(requirements);
+  const selectionKey = useMemo(() => scannerDataSelectionKey(pairs), [pairs]);
+  const requirementsKey = useMemo(() => scannerDataRequirementsKey(requirements), [requirements]);
   useEffect(() => {
     const feed = startPerpetualScannerDataFeed({
       load: async (request, signal) => {

@@ -9,6 +9,7 @@ import { usePerpetualQuality } from "../hooks/use-perpetual-quality";
 import { usePerpetualFundingHistory } from "../hooks/use-perpetual-funding-history";
 import { usePerpetualMarketMetrics } from "../hooks/use-perpetual-market-metrics";
 import { usePerpetualScannerData } from "../hooks/use-perpetual-scanner-data";
+import { createScannerDataPairSelector } from "../lib/perpetual-scanner-data";
 import { fundingWindowTotal, type PerpetualFundingLeg } from "../lib/perpetual-funding-history";
 import { usePerpetualFx } from "../hooks/use-perpetual-fx";
 import PerpetualCrossExSettings from "./perpetual-crossex-settings";
@@ -253,6 +254,7 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
   const fundingSort = filters.sortBy === "funding";
   const selectRanking = useMemo(() => createPerpetualRankingSelector(), []);
   const selectQuotes = useMemo(() => createPerpetualQuoteSelector(), []);
+  const selectScannerPairs = useMemo(() => createScannerDataPairSelector(), []);
   const rankingFilters = useMemo(() => ({ ...filters, search, applyNumericThresholds: false }), [filters, search]);
   const fullRanking = useMemo(() => paused ? inspection.ranking : opportunitiesActive && view === "rank" && visibleData && now ? selectRanking(visibleData, rankingFilters, now, qualityBudget, fx) : emptySpreads, [paused, inspection, opportunitiesActive, view, visibleData, rankingFilters, now, selectRanking, qualityBudget, fx]);
   const qualifiedRanking = useMemo(() => filterCrossExRanking(fullRanking, crossex.error ? null : crossex.data, crossex.spotTransferPairs, now), [fullRanking, crossex.data, crossex.error, crossex.spotTransferPairs, now]);
@@ -271,10 +273,7 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
     return { matching, missing };
   }, [paused, categoryRanking, quoteRanges, now]);
   const candidateRanking = quoteRangeSelection.matching;
-  const scannerPairs = useMemo(() => !ranges.valid || (!ranges.needsMetrics && !ranges.historyHours.length) ? [] : candidateRanking.map(row => {
-    const legs = [row.long, row.short].map(quote => [`${quote.exchange}:${quote.symbol}`, quote.base, quote.quoteCurrency, quote.marketId ?? null, quote.multiplier ?? 1, quote.contractUnit ?? null, quote.collateralCurrency ?? null, quote.settlementCurrency ?? null]).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
-    return { base: row.base, longKey: `${row.long.exchange}:${row.long.symbol}`, shortKey: `${row.short.exchange}:${row.short.symbol}`, identity: JSON.stringify(legs) };
-  }), [candidateRanking, ranges]);
+  const scannerPairs = useMemo(() => selectScannerPairs(ranges.valid && (ranges.needsMetrics || ranges.historyHours.length) ? candidateRanking : emptySpreads), [selectScannerPairs, candidateRanking, ranges.valid, ranges.needsMetrics, ranges.historyHours.length]);
   const scannerRequirements = useMemo(() => ({ metrics: ranges.needsMetrics, historyHours: ranges.historyHours }), [ranges]);
   const { report: scannerData, loading: scannerLoading, error: scannerError } = usePerpetualScannerData(scannerPairs, scannerRequirements, opportunitiesActive && view === "rank" && rangesReady && ranges.valid && (ranges.needsMetrics || ranges.historyHours.length > 0) && !paused);
   const rangeSelection = useMemo(() => {
@@ -564,7 +563,7 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
         <div className="perp-filter-footer"><span>范围、筛选与组合自选保存在当前浏览器</span><button type="button" onClick={resetFilters}>重置全部筛选</button></div>
       </details>
       <button type="button" className="perp-tool-button" title="选择七所并按现货买卖汇率比较；模拟资格由 CrossEx 模块再次核对" onClick={() => { changeView("rank"); updateFilters({ exchanges: ["binance", "bybit", "okx", "gate", "kraken", "hyperliquid", "lighter"], crossCurrency: true, pairMode: "all", priceMode: "book", search: "", favoritesOnly: false, sortBy: "gross", minSpreadPercent: 0 }); }}>CrossEx 七所</button>
-      <PerpetualManualPairs snapshot={data} mode={filters.priceMode} now={now} budget={qualityBudget} active={active} paused={paused}/>
+      <PerpetualManualPairs snapshot={data} mode={filters.priceMode} now={now} budget={qualityBudget} active={opportunitiesActive && toolsOpen} paused={paused}/>
       <div id="perpetual-health-region" hidden={!healthOpen}><Suspense fallback={<p role="status">正在加载报价健康…</p>}>{healthOpen ? <PerpetualHealth active={active} defaultOpen/> : null}</Suspense></div>
       <div id="perpetual-alert-region" hidden={!alertsOpen}><Suspense fallback={<p role="status">正在加载机会提醒…</p>}>{alertsVisited ? <PerpetualAlerts active={active && alertsOpen} pair={alertPair} budget={qualityBudget} defaultOpen/> : null}</Suspense></div>
       <PerpetualCrossExSettings settings={crossex} now={now}/>
@@ -572,7 +571,7 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
       <p className="perp-quality-caption">{qualityLoading ? "质量资料更新中" : qualityReport ? `质量资料最近读取 ${stamp(qualityReport.generatedAt)}` : "质量资料采集中"} · {quoteQuality.stale} 条报价过期 / {quoteQuality.unavailable} 条暂缺</p>
       {qualityError || qualityReport?.error ? <p className="perp-quality-notice" role="status">{qualityError || qualityReport?.error}</p> : null}
     </div></details>
-    <details className="perp-method"><summary>计算口径与数据时间</summary><p>毛价差 =（做空平台价格 ÷ 做多平台价格 − 1）× 100%。买卖盘口取买入卖一、卖出买一；标记价格取两平台标记价。做多与做空必须来自不同在线平台，两腿价格时间相差不超过 5 秒；同一币种的所有有效平台与合约组合分别参与排名，按所选毛价差或净价差从高到低排列。净价差扣除双腿 taker 往返费与滑点预算，尚未计持有期资金费和退出价差；缺失费率的组合不参与净排序。</p><p>资金费差 = 做空腿费率 × 8 ÷ 该腿周期小时数 − 做多腿费率 × 8 ÷ 该腿周期小时数。正值表示按当前费率估算的净收入，负值为净支出；不是已结算收益。资金费或实际周期缺失、超过 5 分钟未更新时显示「—」。</p><p>资金费机会独立按正的 8 小时折算费差筛选，不受毛价差或净价差阈值限制。24h 估算以单腿名义金额为基准，按两腿各自下次结算时间及周期计数，假设费率与入场价差不变，扣除往返 taker 手续费和滑点预算；不包含价差收益，也不代表已锁定利润。下次结算时间缺失或已过时，保留折算费差供比较，实际结算估算显示「—」。现有机会提醒仅按净价差触发。</p><p>过去 1 天 / 3 天只累计交易所真实已结算记录，分别取两腿共同截止时间前 24 / 72 小时，窗口为（截止 − 时长，截止]。净累计 = 空腿费率累计 − 多腿费率累计，分母为单腿等名义本金，不复利、不含交易成本，也不是账户实际收益。窗口前缺少真实结算记录或窗口内无记录时显示「—」，不以当前费率外推或补零；双腿合约与当前行方向一致。历史资料约每 5 分钟更新，过期或刷新失败时保留上次累计并标注状态。</p><p>价格超过 {(data?.staleAfterMs ?? 30_000) / 1000} 秒未更新会退出排名，成交价不会代替缺失盘口。报价时间取两腿较早的价格时间，所有时钟均为北京时间。毛价差未计手续费、滑点、深度和资金费；跨平台对冲仍存在成交差异。</p><p>筛选分权重：市值、市值 / FDV、官方多空拥挤度各 10%，近 1 小时价差持续性 10%，近 24 小时报价收窄证据 40%，资金费收入方向 20%。价差持续存在不代表会收窄；冷启动收窄统计至少积累 12 小时，且需 6 个完整 1h 窗口。只使用真实采样，缺失项不补零；资料不足时暂不评分，分数不代表盈利概率。质量、手续费和资金费差均对应当前行的做多与做空合约组合；净排序依据为扣费后的估算价差，质量分不代表成交容量。1h 历史偏离仅在至少 30 个有效样本、覆盖不低于 50% 时展示，1 bp = 0.01 个百分点。</p><p>每 5 分钟核对交易所公开合约目录；未标记不代表尚未公告，公开接口信息可能不完整。</p><p>最近快照 {stamp(data?.generatedAt)}。展开详情时保留当前列表、页码、平台组合及报价，并暂停本页行情接收；来源时间继续计时，过期值仅供核对。收起、翻页或修改筛选后恢复，后台采集与低频质量资料查询继续运行。页面隐藏或切换监控后暂停接收，返回立即刷新；实时推送中断时自动切换为每 5 秒快照，并尝试恢复推送。</p></details>
+    <details className="perp-method"><summary>计算口径与数据时间</summary><p>毛价差 =（做空平台价格 ÷ 做多平台价格 − 1）× 100%。买卖盘口取买入卖一、卖出买一；标记价格取两平台标记价。做多与做空必须来自不同在线平台，两腿价格时间相差不超过 5 秒；同一币种的所有有效平台与合约组合分别参与排名，按所选毛价差或净价差从高到低排列。净价差扣除双腿 taker 往返费与滑点预算，尚未计持有期资金费和退出价差；缺失费率的组合在净排序中置后，净价差显示缺失状态。</p><p>资金费差 = 做空腿费率 × 8 ÷ 该腿周期小时数 − 做多腿费率 × 8 ÷ 该腿周期小时数。正值表示按当前费率估算的净收入，负值为净支出；不是已结算收益。资金费或实际周期缺失、超过 5 分钟未更新时显示「—」。</p><p>资金费排序按 8 小时折算费差从高到低排列；开仓价差、资金费差和年化分别使用筛选面板中可见的范围，支持负值。24h 估算以单腿名义金额为基准，按两腿各自下次结算时间及周期计数，假设费率与入场价差不变，扣除往返 taker 手续费和滑点预算；不包含价差收益，也不代表已锁定利润。下次结算时间缺失或已过时，保留折算费差供比较，实际结算估算显示「—」。现有机会提醒仅按净价差触发。</p><p>过去 1 天 / 3 天只累计交易所真实已结算记录，分别取两腿共同截止时间前 24 / 72 小时，窗口为（截止 − 时长，截止]。净累计 = 空腿费率累计 − 多腿费率累计，分母为单腿等名义本金，不复利、不含交易成本，也不是账户实际收益。窗口前缺少真实结算记录或窗口内无记录时显示「—」，不以当前费率外推或补零；双腿合约与当前行方向一致。历史资料约每 5 分钟更新，过期或刷新失败时保留上次累计并标注状态。</p><p>价格超过 {(data?.staleAfterMs ?? 30_000) / 1000} 秒未更新会退出排名，成交价不会代替缺失盘口。报价时间取两腿较早的价格时间，所有时钟均为北京时间。毛价差未计手续费、滑点、深度和资金费；跨平台对冲仍存在成交差异。</p><p>筛选分权重：市值、市值 / FDV、官方多空拥挤度各 10%，近 1 小时价差持续性 10%，近 24 小时报价收窄证据 40%，资金费收入方向 20%。价差持续存在不代表会收窄；冷启动收窄统计至少积累 12 小时，且需 6 个完整 1h 窗口。只使用真实采样，缺失项不补零；资料不足时暂不评分，分数不代表盈利概率。质量、手续费和资金费差均对应当前行的做多与做空合约组合；净排序依据为扣费后的估算价差，质量分不代表成交容量。1h 历史偏离仅在至少 30 个有效样本、覆盖不低于 50% 时展示，1 bp = 0.01 个百分点。</p><p>每 5 分钟核对交易所公开合约目录；未标记不代表尚未公告，公开接口信息可能不完整。</p><p>最近快照 {stamp(data?.generatedAt)}。展开详情时保留当前列表、页码、平台组合及报价，并暂停本页行情接收；来源时间继续计时，过期值仅供核对。收起、翻页或修改筛选后恢复，后台采集与低频质量资料查询继续运行。页面隐藏或切换监控后暂停接收，返回立即刷新；实时推送中断时自动切换为每 5 秒快照，并尝试恢复推送。</p></details>
     </>}
   </section>;
 }
