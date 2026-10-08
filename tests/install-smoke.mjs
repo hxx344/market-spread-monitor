@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, writeFile, rm, stat, utimes } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm, stat, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -17,6 +17,7 @@ const root = process.cwd();
 const installer = join(root, "deploy/install.sh");
 const scratch = await mkdtemp(join(tmpdir(), "market-spread-installer-test-"));
 const base = "http://127.0.0.1:31877";
+const buildWorkspace = "/opt/market-spread-monitor/build";
 let headers;
 const timings = [];
 async function run(command, args) {
@@ -31,6 +32,7 @@ async function install(source, succeeds = true, { script = installer, cleanup = 
   } catch (error) { result = error; failed = true; }
   const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.replace(/登录密码：[^\r\n]*/g, "登录密码：[redacted]");
   assert.equal(failed, !succeeds, output.slice(-6000));
+  assert.equal(existsSync(buildWorkspace), false, "Completed or failed installation must not leave a third dependency/build workspace");
   timings.push({ source: source.split("/").at(-1), seconds: Number(((Date.now() - started) / 1000).toFixed(2)), success: !failed });
   return output;
 }
@@ -73,6 +75,10 @@ async function replaceConfig(value) {
   await run("sudo", ["install", "-m", "0600", path, "/etc/market-spread-monitor.env"]);
 }
 async function buildCount() { return (await run("sudo", ["cat", "/var/cache/market-spread-monitor/install-test-builds"])).stdout.trim().split("\n").length; }
+function logBuildEvidence(label, output) {
+  const lines = output.replace(/\u001b\[[0-9;]*m/g, "").split("\n").filter(line => /Installer (cache|compile)|cached modules|built modules|compiled successfully|Compiled successfully|restore cache|pack from cache/i.test(line));
+  console.log(`Installer ${label} build evidence:\n${lines.join("\n")}`);
+}
 async function releases() { return (await run("find", ["/opt/market-spread-monitor/releases", "-mindepth", "1", "-maxdepth", "1", "-type", "d"])).stdout.trim().split("\n").sort(); }
 async function copySource(name) {
   const target = join(scratch, name);
@@ -102,16 +108,44 @@ try {
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   manifest.scripts["build:linux"] = "node tests/install-build-wrapper.mjs";
   await writeFile(manifestPath, JSON.stringify(manifest));
-  await writeFile(join(baseline, "tests/install-build-wrapper.mjs"), `import { appendFileSync, existsSync, readFileSync, writeFileSync, cpSync } from 'node:fs';
+  const routePath = join(baseline, "app/install-cache-probe/route.ts");
+  const routeSource = version => `export const dynamic = 'force-dynamic';\nexport function GET() { return Response.json({ version: '${version}' }); }\n`;
+  await mkdir(join(baseline, "app/install-cache-probe"));
+  await writeFile(routePath, routeSource("initial-compiled-route"));
+  await writeFile(join(baseline, "tests/install-build-wrapper.mjs"), `import assert from 'node:assert/strict';
+import { appendFileSync, existsSync, readFileSync, writeFileSync, cpSync, realpathSync, statSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-appendFileSync('/var/cache/market-spread-monitor/install-test-builds', 'build\\n');
+assert.equal(realpathSync('.'), '/opt/market-spread-monitor/build', 'Every real Next build must use the same physical directory');
+appendFileSync('/var/cache/market-spread-monitor/install-test-builds', JSON.stringify({ cwd: realpathSync('.') }) + '\\n');
 const mode = existsSync('install-fixture-mode') ? readFileSync('install-fixture-mode','utf8').trim() : '';
+if (mode === 'check-build-cache') {
+  const previousCache = '/opt/market-spread-monitor/current/.next/cache/';
+  for (const name of ['webpack', '.rscinfo', '.tsbuildinfo']) assert.ok(existsSync('.next/cache/' + name), 'Missing reusable compiler cache: ' + name);
+  for (const name of ['.rscinfo', '.tsbuildinfo']) {
+    assert.equal(readFileSync('.next/cache/' + name, 'utf8'), readFileSync(previousCache + name, 'utf8'), name + ' contents must be preserved before compilation');
+    assert.equal(statSync('.next/cache/' + name).mtimeMs, statSync(previousCache + name).mtimeMs, name + ' modification time must survive the copy');
+    assert.notEqual(statSync('.next/cache/' + name).ino, statSync(previousCache + name).ino, name + ' must not share a writable inode with the running version');
+  }
+  const packs = readdirSync('.next/cache/webpack', { recursive: true }).filter(name => name.endsWith('.pack'));
+  assert.ok(packs.length > 0, 'The warm build must receive actual Webpack cache packs');
+  const pack = 'webpack/' + packs[0];
+  assert.equal(statSync('.next/cache/' + pack).mtimeMs, statSync(previousCache + pack).mtimeMs);
+  assert.notEqual(statSync('.next/cache/' + pack).ino, statSync(previousCache + pack).ino);
+  for (const name of ['images', 'fetch-cache', 'install-unapproved-cache']) assert.equal(existsSync('.next/cache/' + name), false, 'Runtime and unapproved caches must not enter the compiler workspace');
+  console.log('Installer cache: independent Webpack packs, .rscinfo and .tsbuildinfo preserved before compilation');
+}
 if (mode === 'fail-build') { writeFileSync('node_modules/.isolation-probe', 'new release only'); process.exit(42); }
 if (mode === 'reuse-build') { cpSync('/opt/market-spread-monitor/current/.next', '.next', {recursive:true}); }
-else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/next','build','--webpack'], {stdio:'inherit'}); process.exit(result.status ?? 1); }
+else {
+  const started = Date.now();
+  const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/next','build','--webpack'], {stdio:'inherit', env: {...process.env, NEXT_WEBPACK_LOGGING: '1'}});
+  console.log('Installer compile milliseconds:', Date.now() - started);
+  process.exit(result.status ?? 1);
+}
 `);
   console.log("Installer: fresh install through stdin and sudo");
-  await install(baseline);
+  const coldBuild = await install(baseline);
+  logBuildEvidence("cold", coldBuild);
   await active();
   const originalConfig = await config();
   const values = Object.fromEntries(originalConfig.trim().split("\n").map(line => {
@@ -121,6 +155,7 @@ else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/n
   headers = { Authorization: `Basic ${Buffer.from(`${values.APP_USERNAME}:${values.APP_PASSWORD}`).toString("base64")}` };
   assert.equal((await fetch(base)).status, 401);
   assert.equal((await fetch(base, { headers })).status, 200);
+  assert.deepEqual(await (await fetch(`${base}/install-cache-probe`, { headers })).json(), { version: "initial-compiled-route" });
   const initial = await state();
   const persistedFunding = await fetch(`${base}/api/monitors/hynix/funding`, { headers }).then(response => response.json());
   assert.equal(persistedFunding.collection.source, 'database');
@@ -208,9 +243,18 @@ else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/n
   assert.equal(await current(), firstRelease);
   assert.equal(await buildCount(), 1);
 
-  console.log("Installer: new source reuses independent dependency copies and builds changed code");
+  console.log("Installer: changed TypeScript route reuses independent compiler caches and returns newly compiled code");
+  for (const name of ["images", "fetch-cache", "install-unapproved-cache"]) {
+    await run("sudo", ["mkdir", "-p", join(firstRelease, ".next/cache", name)]);
+    await run("sudo", ["install", "-m", "0644", "/dev/null", join(firstRelease, ".next/cache", name, "install-preserve-marker")]);
+  }
+  await writeFile(join(baseline, "install-fixture-mode"), "check-build-cache");
+  await writeFile(routePath, routeSource("upgraded-compiled-route"));
   await writeFile(join(baseline, "public/install-version-marker.txt"), "upgraded-source");
   const upgraded = await install(baseline);
+  assert.match(upgraded, /Installer cache: independent Webpack packs, \.rscinfo and \.tsbuildinfo preserved before compilation/);
+  assert.match(upgraded.replace(/\u001b\[[0-9;]*m/g, ""), /\bcached modules\b[^\r\n]*\b[1-9][0-9]* modules?\b/, "The warm compilation must report actual cached modules, not merely copied cache files");
+  logBuildEvidence("warm", upgraded);
   const secondRelease = await current();
   assert.notEqual(firstRelease, secondRelease);
   assert.match(upgraded, /依赖未变，复用已安装依赖/);
@@ -219,6 +263,8 @@ else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/n
   assert.equal((await stat(join(secondRelease, "node_modules/.package-lock.json"))).mtimeMs, firstDependencyTime);
   assert.notEqual((await stat(join(firstRelease, "node_modules/next/package.json"))).ino, (await stat(join(secondRelease, "node_modules/next/package.json"))).ino);
   assert.equal(await (await fetch(`${base}/install-version-marker.txt`, { headers })).text(), "upgraded-source");
+  assert.deepEqual(await (await fetch(`${base}/install-cache-probe`, { headers })).json(), { version: "upgraded-compiled-route" }, "Compiler cache reuse must not serve the previous TypeScript route");
+  for (const name of ["images", "fetch-cache", "install-unapproved-cache"]) await run("sudo", ["test", "-f", join(firstRelease, ".next/cache", name, "install-preserve-marker")]);
   assert.equal(await config(), expectedConfig);
   const releaseSet = await releases();
   assert.equal(await databaseMarker(), 'persisted', 'Source upgrade preserves the existing SQLite database');
@@ -273,6 +319,12 @@ else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/n
   assert.equal(existsSync(join(secondRelease, "node_modules/.isolation-probe")), false);
   await active();
   assert.equal(await config(), expectedConfig);
+  assert.deepEqual((await state()).config.rules, rules);
+  assert.equal((await state()).revision, savedState.revision);
+  assert.deepEqual((await oilState()).config, oilConfig);
+  assert.deepEqual(await sharedState(), sharedConfig);
+  assert.equal(await databaseMarker(), 'persisted', 'Build failure preserves the existing SQLite database');
+  assert.deepEqual(await (await fetch(`${base}/install-cache-probe`, { headers })).json(), { version: "upgraded-compiled-route" });
 
   console.log("Installer: failed startup restores the old release and service");
   await writeFile(join(baseline, "install-fixture-mode"), "reuse-build");
@@ -321,6 +373,7 @@ else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/n
   assert.match(backendOnly, /Next 构建输入未变/);
   assert.equal(await buildCount(), buildBeforeBackend);
   assert.equal(await readFile(join(backendRelease, ".install-build-source"), "utf8"), compiledSource);
+  for (const name of ["webpack", ".rscinfo", ".tsbuildinfo"]) await run("sudo", ["test", "-e", join(backendRelease, ".next/cache", name)]);
   assert.equal((await fetch(base, { headers })).status, 200);
   assert.equal((await stat(join(backendRelease, "server/linux.mjs"))).uid, 0);
   assert.equal((await stat(join(backendRelease, "node_modules/next/package.json"))).uid, 0);
@@ -342,6 +395,9 @@ else { const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/n
   assert.equal(await buildCount(), buildBeforeBackend + 2);
   assert.ok(existsSync(join(await current(), ".next/build-manifest.json")));
   assert.equal(await databaseMarker(), 'persisted');
+  const buildRecords = (await run("sudo", ["cat", "/var/cache/market-spread-monitor/install-test-builds"])).stdout.trim().split("\n").map(line => JSON.parse(line));
+  assert.ok(buildRecords.length >= 2);
+  assert.ok(buildRecords.every(record => record.cwd === buildWorkspace), "All build attempts, including failed ones, use the stable workspace path");
   console.log("Complete installer timings:", JSON.stringify(timings));
 } finally {
   await run("sudo", ["systemctl", "stop", "market-spread-monitor.service"]).catch(() => {});

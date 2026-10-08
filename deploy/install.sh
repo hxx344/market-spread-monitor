@@ -8,6 +8,36 @@ download() { curl --fail --silent --show-error --location --retry 3 --connect-ti
 digest() { sha256sum "$1" | cut -d ' ' -f 1; }
 unit_fingerprint() { systemctl cat --no-pager market-spread-monitor.service | sha256sum | cut -d ' ' -f 1; }
 
+# Next includes its absolute installation path in Webpack's cache version.
+# Build every candidate at the same path, then move it into its final release.
+# This is a temporary candidate, never a third persistent dependency tree.
+managed_build_workspace() {
+  local path="$base/build"
+  [[ -d "$path" && ! -L "$path" && $(readlink -f "$path") == "$path" &&
+      -f "$path/.install-build-workspace" && ! -L "$path/.install-build-workspace" &&
+      $(cat "$path/.install-build-workspace") == v1 && -f "$path/.install-owned" ]]
+}
+
+cleanup_build_workspace() {
+  local path="$base/build"
+  [[ -e "$path" || -L "$path" ]] || return 0
+  managed_build_workspace || die "$path 已存在且不属于本安装器的构建目录，请保留并移开后重试"
+  read_storage_protection
+  protects_path "$path" && die '构建目录包含运行版本、源码或数据，保留该目录并停止安装'
+  rm -rf --one-file-system -- "$path"
+  log '已回收上次中断留下的临时构建目录。'
+}
+
+restore_build_workspace() {
+  [[ -n "${building_release:-}" ]] || return 0
+  managed_build_workspace && [[ "$building_release" == "$new_release" &&
+      "${building_release%/*}" == "$base/releases" && ! -e "$building_release" && ! -L "$building_release" ]] || return 1
+  mv -T -- "$base/build" "$building_release" || return 1
+  release=$building_release
+  building_release=''
+  rm -f -- "$release/.install-build-workspace"
+}
+
 # Only installer-owned, real first-level directories are eligible for deletion.
 managed_release() {
   local path=$1 name=${1##*/}
@@ -208,6 +238,9 @@ finish() {
   trap - EXIT INT TERM
   set +e
   local rollback_failed=0
+  if ! restore_build_workspace; then
+    printf '临时构建目录已保留；下次部署会检查并回收。\n' >&2
+  fi
   if (( status != 0 && switching )); then
     rollback || { rollback_failed=1; printf '自动恢复未完成，请查看 systemctl status market-spread-monitor。\n' >&2; }
   fi
@@ -230,7 +263,7 @@ main() {
   unit=/etc/systemd/system/market-spread-monitor.service
   local source_dir='' requested_port='' architecture node_name runtime release_id first_install=0 rebuild=0 cleanup_only=0 dependency_key='' candidate='' reused=0
   local input_dir='' runtime_key='' build_key='' build_source='' reused_build=0 candidate_sizes='' candidate_valid=0 candidate_dependencies_valid=0 candidate_source_valid=1 install_described=0 npm_version
-  scratch='' release='' new_release='' switching=0 old_current='' was_active=0
+  scratch='' release='' new_release='' building_release='' switching=0 old_current='' was_active=0
   storage_current='' storage_running='' storage_data_dir='' storage_config_stamp='' storage_free_kb=0 storage_free_inodes=0
   build_required_kb=786432 build_required_inodes=15000
 
@@ -269,6 +302,7 @@ main() {
   mkdir -p /run/lock
   exec 9>/run/lock/market-spread-monitor-install.lock
   flock -n 9 || die '已有部署正在运行，请等待结束'
+  cleanup_build_workspace
   # Runs before mktemp/downloads, including when /tmp shares a full root filesystem.
   prune_releases
   if (( cleanup_only )); then
@@ -438,16 +472,27 @@ main() {
         if "$runtime/bin/node" "$release/deploy/install-inputs.mjs" "$release" --valid-build; then reused_build=1;
         else rm -rf -- "$release/.next"; fi
       fi
-      # Compiler cache is optional; do not duplicate runtime caches or exhaust headroom.
-      if (( ! reused_build )) && [[ -d "$candidate/.next/cache/webpack" && ! -L "$candidate/.next/cache/webpack" ]]; then
-        local cache_kb cache_inodes
-        cache_kb=$(du -sk -- "$candidate/.next/cache/webpack" | awk '{print $1}')
-        cache_inodes=$(du --inodes -s -- "$candidate/.next/cache/webpack" | awk '{print $1}')
-        storage_stats "$base/releases"
-        if (( storage_free_kb >= cache_kb + build_required_kb + 262144 )) && { [[ "$storage_free_inodes" == - ]] || (( storage_free_inodes >= cache_inodes + build_required_inodes )); }; then
-          mkdir -p "$release/.next/cache"
-          cp -a --reflink=auto "$candidate/.next/cache/webpack" "$release/.next/cache/webpack" || rm -rf -- "$release/.next/cache/webpack"
-        else log '剩余空间较少，跳过可选编译缓存副本。'; fi
+      # Copy only compilation caches. .rscinfo preserves Next's own expiring
+      # build salt (part of the Webpack key); .tsbuildinfo enables incremental
+      # type checking. Never copy runtime image/fetch caches or fix the salt.
+      if [[ -d "$candidate/.next/cache" && ! -L "$candidate/.next/cache" ]]; then
+        local cache_kb=0 cache_inodes=0 cache_entry
+        local -a compiler_caches=()
+        for cache_entry in webpack .rscinfo .tsbuildinfo; do
+          [[ -e "$candidate/.next/cache/$cache_entry" && ! -L "$candidate/.next/cache/$cache_entry" ]] || continue
+          compiler_caches+=("$candidate/.next/cache/$cache_entry")
+          cache_kb=$((cache_kb + $(du -sk -- "$candidate/.next/cache/$cache_entry" | awk '{print $1}')))
+          cache_inodes=$((cache_inodes + $(du --inodes -s -- "$candidate/.next/cache/$cache_entry" | awk '{print $1}')))
+        done
+        if (( ${#compiler_caches[@]} )); then
+          storage_stats "$base/releases"
+          if (( storage_free_kb >= cache_kb + build_required_kb + 262144 )) && { [[ "$storage_free_inodes" == - ]] || (( storage_free_inodes >= cache_inodes + build_required_inodes )); }; then
+            mkdir -p "$release/.next/cache"
+            if cp -a --reflink=auto -- "${compiler_caches[@]}" "$release/.next/cache/"; then
+              log '已复制 Webpack 与 TypeScript 编译缓存，构建时按内容校验复用。'
+            else rm -rf -- "$release/.next/cache"; fi
+          else log '剩余空间较少，跳过可选编译缓存副本。'; fi
+        fi
       fi
     else
       log '依赖副本不完整，自动重新安装。'
@@ -458,6 +503,16 @@ main() {
   # writes to the candidate/.next, not into an existing dependency installation.
   find "$release" -path "$release/node_modules" -prune -o -exec chown -h spread-monitor:spread-monitor {} +
   require_space "$base/releases" "$build_required_kb" "$build_required_inodes"
+  if (( ! reused || ! reused_build )); then
+    [[ ! -e "$base/build" && ! -L "$base/build" ]] || die '临时构建目录已被占用'
+    read_storage_protection
+    protects_path "$base/build" && die '临时构建路径与配置的数据或源码目录重合，原服务未切换'
+    printf 'v1\n' > "$release/.install-build-workspace"
+    building_release=$release
+    mv -T -- "$release" "$base/build"
+    release=$base/build
+    log '在固定目录执行构建，复用跨版本增量编译结果。'
+  fi
   (
     cd "$release"
     if (( ! reused )); then
@@ -469,6 +524,7 @@ main() {
       runuser -u spread-monitor -- env PATH="$runtime/bin:$PATH" NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 npm run build:linux
     fi
   )
+  restore_build_workspace || die '无法将构建结果移入版本目录'
   "$runtime/bin/node" "$release/deploy/install-inputs.mjs" "$release" --valid-build || die '构建未生成完整可启动版本'
   build_source=$release_id
   if (( reused_build )); then build_source=$(cat "$candidate/.install-build-source"); fi
