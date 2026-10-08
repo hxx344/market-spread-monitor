@@ -10,6 +10,48 @@ const snapshot = (quotes, exchanges = [venue("a"), venue("b"), venue("c", "dex")
 const fx = { baseCurrency: "USDT", generatedAt: now, staleAfterMs: 180000, rates: { USDC: { bid: 1, ask: 1, at: now, source: "fixture" } } };
 const rank = (data, filters = {}, fxSnapshot = fx) => rankPerpetualSpreads(data, { ...defaultPerpetualFilters, ...filters }, now, defaultQualityBudget, fxSnapshot);
 
+test("scanner discovery disables hidden numeric bounds while legacy ranking retains its thresholds", () => {
+  const data = snapshot([quote("a", { bid: 100, ask: 100, fundingRate: 0 }), quote("b", { bid: 101, ask: 101, fundingRate: 0.001 }), quote("c", { bid: 100, ask: 100, fundingRate: null })]);
+  assert.equal(rank(data).length, 4);
+  assert.equal(rank(data, { sortBy: "funding" }).length, 1);
+  assert.equal(rank(data, { sortBy: "net" }).length, 0);
+  const unrestricted = { applyNumericThresholds: false, minSpreadPercent: 999, minFundingSpreadPercent: 999 };
+  for (const sortBy of ["gross", "funding", "net"]) {
+    const rows = rank(data, { ...unrestricted, sortBy });
+    assert.equal(rows.length, 6, sortBy);
+    assert.ok(rows.some(row => row.spreadPercent < 0));
+    assert.ok(rows.some(row => row.spreadPercent === 0));
+    assert.deepEqual(createPerpetualRankingSelector()(data, { ...defaultPerpetualFilters, ...unrestricted, sortBy }, now), rows);
+    assert.deepEqual(rankBestPerpetualSpreads(data, { ...defaultPerpetualFilters, ...unrestricted, sortBy }, now), [rows[0]]);
+  }
+  const funding = rank(data, { ...unrestricted, sortBy: "funding" });
+  assert.deepEqual(funding.map(row => row.fundingSpread8h), [0.001, -0.001, null, null, null, null]);
+  assert.equal(rank(snapshot([quote("a"), quote("b")]), { ...unrestricted, sortBy: "funding" }).length, 2);
+  assert.equal(rank(snapshot([quote("a"), quote("b")]), { sortBy: "funding" }).length, 0);
+  assert.equal(rank({ ...data, status: "unavailable" }, unrestricted).length, 0);
+  assert.equal(rank({ ...data, quotes: data.quotes.map(q => ({ ...q, comparable: false })) }, unrestricted).length, 0);
+  assert.equal(rank({ ...data, quotes: data.quotes.map(q => ({ ...q, bidAskAt: now - 30001 })) }, unrestricted).length, 0);
+});
+
+test("scanner net sorting puts unavailable values after negative known values and cache settings stay independent", () => {
+  const data = snapshot([quote("binance", { bid: 100, ask: 100 }), quote("gate", { bid: 99, ask: 101 }), quote("unknown", { bid: 100, ask: 100 })], [venue("binance"), venue("gate"), venue("unknown")]);
+  const filters = { ...defaultPerpetualFilters, sortBy: "net", applyNumericThresholds: false };
+  const rows = rank(data, filters);
+  assert.equal(rows.length, 6);
+  assert.ok(rows[0].netSpreadPercent < 0);
+  assert.ok(rows[1].netSpreadPercent < 0);
+  assert.ok(rows.slice(2).every(row => row.netSpreadPercent === null));
+  const select = createPerpetualRankingSelector();
+  assert.deepEqual(select(data, filters, now), rows);
+  assert.deepEqual(select(data, { ...filters, applyNumericThresholds: true }, now), []);
+  assert.deepEqual(select(data, filters, now), rows);
+  const missing = snapshot([quote("a", { fundingRate: null }), quote("b", { fundingRate: null })]);
+  const fundingFilters = { ...defaultPerpetualFilters, sortBy: "funding", applyNumericThresholds: false };
+  const unknownFunding = rank(missing, fundingFilters);
+  assert.equal(unknownFunding.length, 2);
+  assert.deepEqual(rankBestPerpetualSpreads(missing, fundingFilters, now), [unknownFunding[0]]);
+});
+
 test("saved coin blocks update ranking and quote caches without mutating the source snapshot", () => {
   const data = snapshot(['BTC', 'ETH', 'BTC2'].flatMap(base => [quote('a', { base, symbol: `${base}USDT`, displayBase: 'BTC' }), quote('b', { base, symbol: `${base}USDT`, bid: 102, ask: 103 })]));
   const sourceQuotes = [...data.quotes], selectRank = createPerpetualRankingSelector(), selectQuotes = createPerpetualQuoteSelector();

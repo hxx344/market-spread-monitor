@@ -11,6 +11,8 @@ export interface PerpetualFilters {
   minSpreadPercent: number;
   /** Minimum positive short-minus-long funding carry, in percentage points per eight hours. */
   minFundingSpreadPercent?: number;
+  /** Scanner range inputs apply numeric bounds after discovery; other consumers keep legacy thresholds. */
+  applyNumericThresholds?: boolean;
   favoritesOnly: boolean;
   favorites: string[];
   /** Gross/net use minSpreadPercent; funding uses its independent eight-hour threshold. */
@@ -108,8 +110,10 @@ function rankingContext(snapshot: PerpetualSnapshot, filters: PerpetualFilters, 
   const search = filters.search.trim().toUpperCase();
   const netSort = filters.sortBy === "net";
   const fundingSort = filters.sortBy === "funding";
+  const applyNumericThresholds = filters.applyNumericThresholds !== false;
+  const comparableMetric = (value: number | null | undefined) => typeof value === "number" && Number.isFinite(value) ? value : -Infinity;
   const compare = (a: PerpetualSpread, b: PerpetualSpread) =>
-    (fundingSort ? b.fundingSpread8h! - a.fundingSpread8h! : netSort ? b.netSpreadPercent! - a.netSpreadPercent! : b.spreadPercent - a.spreadPercent)
+    (fundingSort ? comparableMetric(b.fundingSpread8h) - comparableMetric(a.fundingSpread8h) : netSort ? comparableMetric(b.netSpreadPercent) - comparableMetric(a.netSpreadPercent) : b.spreadPercent - a.spreadPercent)
     || compareText(a.base, b.base) || compareLegs(a.long, a.short, b.long, b.short);
   return { compare, collect(base: string, source: Iterable<PerpetualQuote>, bestPerBase: boolean): PerpetualSpread[] {
     if (snapshot.status === "unavailable" || (search && !base.includes(search))) return [];
@@ -150,18 +154,21 @@ function rankingContext(snapshot: PerpetualSnapshot, filters: PerpetualFilters, 
         const longFunding = longLeg.funding, shortFunding = shortLeg.funding;
         const fundingSpread8h = longFunding === null || shortFunding === null ? null : shortFunding - longFunding;
         const metric = fundingSort ? fundingSpread8h === null ? null : fundingSpread8h * 100 : netSort ? netSpreadPercent : spreadPercent;
-        if (metric === null) continue;
-        if (fundingSort ? !Number.isFinite(metric) || metric <= 0 || metric < (filters.minFundingSpreadPercent ?? 0) : metric < filters.minSpreadPercent) continue;
+        if (applyNumericThresholds) {
+          if (metric === null) continue;
+          if (fundingSort ? !Number.isFinite(metric) || metric <= 0 || metric < (filters.minFundingSpreadPercent ?? 0) : metric < filters.minSpreadPercent) continue;
+        }
         if (blockedPairs.size || (filters.favoritesOnly && !favorites.has(base))) {
           const key = perpetualSpreadKey({ base, long, short });
           if (blockedPairs.has(key) || (filters.favoritesOnly && !favorites.has(base) && !favoritePairs.has(key))) continue;
         }
-        if (best && (metric < bestMetric || (metric === bestMetric && compareLegs(long, short, best.long, best.short) >= 0))) continue;
+        const orderingMetric = comparableMetric(metric);
+        if (best && (orderingMetric < bestMetric || (orderingMetric === bestMetric && compareLegs(long, short, best.long, best.short) >= 0))) continue;
         const row: PerpetualSpread = { base, long, short, buyPrice, sellPrice, spreadPercent, fundingSpread8h,
           updatedAt: Math.min(longLeg.time, shortLeg.time), crossCurrency, roundTripFeePercent, netSpreadPercent, netUnavailableReason,
           fxAdjusted: crossCurrency, fxAt: crossCurrency ? Math.min(longLeg.fx!.at, shortLeg.fx!.at) : null,
           rawSpreadPercent: (sellPrice / buyPrice - 1) * 100, referenceBuyPrice, referenceSellPrice };
-        if (bestPerBase) { best = row; bestMetric = metric; } else rows.push(row);
+        if (bestPerBase) { best = row; bestMetric = orderingMetric; } else rows.push(row);
       }
     }
     if (best) rows.push(best);

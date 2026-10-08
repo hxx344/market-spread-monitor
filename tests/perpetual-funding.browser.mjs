@@ -42,6 +42,7 @@ async page => {
     if (sessionStorage.getItem('scanner-regression-seeded')) return;
     sessionStorage.setItem('scanner-regression-seeded', '1');
     localStorage.removeItem('market-monitor:perpetual-scanner:v1');
+    localStorage.removeItem('market-monitor:perpetual-scanner-ranges:v1');
     localStorage.setItem('market-monitor:perpetual:v1', JSON.stringify({ version: 2, sortBy: 'gross' }));
     localStorage.setItem('market-monitor:perpetual-quality-budget:v1', JSON.stringify({ version: 2, takerOverrides: { binance: 0.05, gate: 0.05 }, slippagePercent: 0.10 }));
   }, { localOrigin: origin });
@@ -111,7 +112,7 @@ async page => {
       check((await row.locator('.perp-long > strong').innerText()).startsWith(long), `${base} long leg is ${long}`);
       check((await row.locator('.perp-short > strong').innerText()).startsWith(short), `${base} short leg is ${short}`);
     };
-    const sort = page.getByRole('combobox', { name: '价差排序', exact: true });
+    const sort = page.locator('select[aria-label="价差排序"]');
     const filters = page.getByRole('button', { name: /^筛选/ });
     const fundingView = page.getByRole('button', { name: '资金费套利', exact: true });
     const grossView = page.getByRole('button', { name: '价格套利', exact: true });
@@ -153,8 +154,13 @@ async page => {
     check((await rowFor('ADA').locator('[data-column="volume"] summary').first().innerText()).includes('不支持'), 'Unsupported money data is explicit');
     check((await rowFor('ETH').locator('[data-column="openInterest"] summary').first().innerText()).includes('暂无数据'), 'A successful source without verified open-interest money is marked unavailable rather than a failed refresh');
     const readyHistoryReads = historyRequests.length, readyMetricReads = metricRequests.length;
-    await page.getByLabel('最低毛价差 / %', { exact: true }).fill('1.5');
+    const spreadMinimum = page.getByRole('textbox', { name: '开仓价差最小值', exact: true });
+    const fundingMinimum = page.getByRole('textbox', { name: '资金费差最小值', exact: true });
+    await spreadMinimum.fill('1.5');
     await waitBases(['BTC']);
+    // Range inputs are independent of sort mode; choose the desired positive-carry bounds explicitly.
+    await spreadMinimum.fill('');
+    await fundingMinimum.fill('0');
     await fundingView.click();
     await waitBases(['BTC', 'ETH']);
     check(await sort.inputValue() === 'funding', 'Funding entry selects funding sort');
@@ -176,12 +182,11 @@ async page => {
     check((await rowFor('ETH').innerText()).includes('+0.0200%'), 'Funding rows are descending independently of the gross threshold');
     check(await rowFor('SOL').count() === 0 && await rowFor('ADA').count() === 0, 'Stale and missing funding are excluded despite fresh positive-spread quotes');
 
-    const fundingMinimum = page.getByLabel('最低资金费差 / % / 8h', { exact: true });
     await fundingMinimum.fill('0.03'); await waitBases(['BTC']);
     await fundingMinimum.fill('0.07'); await waitBases([]);
-    check((await page.locator('.perp-empty').innerText()).includes('当前筛选下没有正资金费差机会'), 'A funding threshold miss is not mislabeled as missing transfer qualification');
+    check(/没有组合满足当前范围|未找到匹配组合/.test(await page.locator('.perp-empty').innerText()), 'A funding threshold miss is not mislabeled as missing transfer qualification');
     await fundingMinimum.fill('0'); await waitBases(['BTC', 'ETH']);
-    await page.getByRole('button', { name: '完成', exact: true }).click();
+    await filters.click();
 
     await rowFor('BTC').getByRole('button', { name: /^收藏组合：BTC，/ }).click();
     const favorites = page.getByRole('button', { name: /^自选/ });
@@ -249,7 +254,10 @@ async page => {
     await page.screenshot({ path: '.sites-runtime/perpetual-funding-mobile.png', fullPage: true });
 
     await page.setViewportSize({ width: 1280, height: 900 });
+    await filters.click();
+    await fundingMinimum.fill(''); await spreadMinimum.fill('1.5');
     await grossView.click(); await waitBases(['BTC']);
+    await filters.click();
     check(await history24('BTC').innerText() === '−0.0300%', 'Returning to price mode reverses the historical cashflow with the row direction');
     let columns = await openMenu(/^显示列/);
     await columns.getByRole('checkbox', { name: '24h · 实际', exact: true }).uncheck();
@@ -273,12 +281,18 @@ async page => {
     await checkDirection('BTC', 'Binance', 'Gate');
     await filters.click();
     check(await sort.inputValue() === 'gross', 'Returning to spread ranking restores gross sort');
-    check(await page.getByLabel('最低毛价差 / %', { exact: true }).inputValue() === '1.5', 'Funding threshold changes preserve the independent gross threshold');
+    check(await spreadMinimum.inputValue() === '1.5', 'Explicit gross threshold survives reload');
+    await spreadMinimum.fill(''); await fundingMinimum.fill('0');
+    await page.locator('.scanner-tools > summary').click();
+    await page.locator('.scanner-advanced-filters > summary').click();
     await sort.selectOption('funding'); await waitBases(['BTC', 'ETH']);
     check(await fundingView.getAttribute('aria-pressed') === 'true', 'Sort select and funding tab stay synchronized');
-    await page.getByRole('button', { name: '重置筛选', exact: true }).click(); await waitBases(['BTC', 'ADA', 'ETH', 'SOL']);
+    await page.getByRole('button', { name: '重置全部筛选', exact: true }).click();
+    check(await spreadMinimum.inputValue() === '' && await fundingMinimum.inputValue() === '', 'Reset clears all explicit numeric bounds');
+    await spreadMinimum.fill('0'); await waitBases(['BTC', 'ADA', 'ETH', 'SOL']);
     check(await page.locator('[data-column="history24h"]').count() === 0, 'Resetting ranking filters preserves independent display columns');
-    await page.getByRole('button', { name: '完成', exact: true }).click();
+    await filters.click();
+    await page.locator('.scanner-tools > summary').click();
     await page.getByRole('checkbox', { name: '加密', exact: true }).uncheck(); await waitBases(['ADA', 'SOL']);
     check((await rowFor('ADA').locator('[data-column="type"]').innerText()) === 'R', 'An explicit official stock category is shown as RWA');
     check((await rowFor('SOL').locator('[data-column="type"]').innerText()) === '?', 'A familiar ticker without verified crypto evidence stays unknown');
