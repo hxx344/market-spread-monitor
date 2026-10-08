@@ -240,7 +240,7 @@ export async function discoverMarkets(exchangeId, { fetchImpl = fetch, signal, n
       // Keep announced delistings while trading. A true flag with zero open
       // positions is explicitly already delisted in Gate's contract schema.
       .filter(row => row.type === 'direct' && row.name?.endsWith('_USDT') && (!row.status || row.status === 'trading') && !(row.in_delisting === true && number(row.position_size) === 0))
-      .map(row => market(exchangeId, row.name, row.name.slice(0, -5), 'USDT', { ...classifyMarketIdentity(exchangeId, row.name.slice(0, -5), row), ...delistingMetadata(exchangeId, row), crossexVerified: ['', 'crypto'].includes(row.contract_type) && row.is_pre_market === false && Number(row.quanto_multiplier) > 0, fundingIntervalHours: number(row.funding_interval, true) === null ? null : Number(row.funding_interval) / 3600 }));
+      .map(row => market(exchangeId, row.name, row.name.slice(0, -5), 'USDT', { ...classifyMarketIdentity(exchangeId, row.name.slice(0, -5), row), ...delistingMetadata(exchangeId, row), contractSize: number(row.quanto_multiplier, true), crossexVerified: ['', 'crypto'].includes(row.contract_type) && row.is_pre_market === false && Number(row.quanto_multiplier) > 0, fundingIntervalHours: number(row.funding_interval, true) === null ? null : Number(row.funding_interval) / 3600 }));
   } else if (exchangeId === 'hyperliquid') {
     const data = await request('https://api.hyperliquid.xyz/info', options, { type: 'meta' });
     rows = assertArray(data.universe, exchangeId)

@@ -67,6 +67,17 @@ test('Gate point-deduction contract fee fields are not exposed as retail VIP0 fe
   assert.equal(Object.hasOwn(row, 'takerFeeRate'), false);
 });
 
+test('Gate directory retains the contract face value separately from token price normalization', async () => {
+  const fixture = directoryFixture('gate', [{ name: '1000PEPE_USDT', quanto_multiplier: '10' }, { quanto_multiplier: '' }, { quanto_multiplier: '-1' }, { quanto_multiplier: '0.0001' }]);
+  const rows = await discoverMarkets('gate', { fetchImpl: fixture.fetchImpl, now: NOW });
+  const bySymbol = new Map(rows.map(row => [row.symbol, row]));
+  assert.equal(bySymbol.get('1000PEPE_USDT').multiplier, 1000);
+  assert.equal(bySymbol.get('1000PEPE_USDT').contractSize, 10);
+  assert.equal(bySymbol.get('COIN1_USDT').contractSize, null);
+  assert.equal(bySymbol.get('COIN2_USDT').contractSize, null);
+  assert.equal(bySymbol.get('COIN3_USDT').contractSize, 0.0001);
+});
+
 test('OKX retail schedules apply only to identified normal crypto fee groups', async () => {
   const fixture = directoryFixture('okx', [{ groupId: '4', instCategory: '1' }, { groupId: '5', instCategory: '2' }, { groupId: '6', instCategory: '1' }, { groupId: '4', instCategory: '3' }, { groupId: '4', ruleType: 'pre_market' }, {}]);
   const rows = await discoverMarkets('okx', { fetchImpl: fixture.fetchImpl, now: NOW });

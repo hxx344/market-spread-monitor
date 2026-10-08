@@ -7,6 +7,7 @@ import { Activity, ArrowDown, Bell, ChevronDown, ChevronLeft, ChevronRight, Refr
 import { usePerpetualFeed } from "../hooks/use-perpetual-feed";
 import { usePerpetualQuality } from "../hooks/use-perpetual-quality";
 import { usePerpetualFundingHistory } from "../hooks/use-perpetual-funding-history";
+import { usePerpetualMarketMetrics } from "../hooks/use-perpetual-market-metrics";
 import { fundingWindowTotal, type PerpetualFundingLeg } from "../lib/perpetual-funding-history";
 import { usePerpetualFx } from "../hooks/use-perpetual-fx";
 import PerpetualCrossExSettings from "./perpetual-crossex-settings";
@@ -20,7 +21,7 @@ import { classifyPerpetualQuote, createPerpetualQuoteSelector, createPerpetualRa
 import type { PerpetualExchange, PerpetualPairMode, PerpetualPriceMode, PerpetualQuote, PerpetualSnapshot } from "../lib/perpetual-types";
 import type { SummaryProps } from "../lib/monitor-summary";
 import { SCANNER_COLUMNS, SCANNER_CATEGORIES, defaultScannerPreferences, parseScannerPreferences, scannerPairCategory, scannerQuoteCategory, annualizedFundingPercent, type ScannerPreferences, type ScannerCategoryId, type ScannerColumnId } from "../lib/perpetual-scanner";
-import { ScannerMenu, ScannerLeg, ScannerFundingRate, ScannerHistory, scannerPercent, scannerPolarity } from "./perpetual-scanner-parts";
+import { ScannerMenu, ScannerLeg, ScannerFundingRate, ScannerHistory, ScannerMarketMetric, scannerPercent, scannerPolarity } from "./perpetual-scanner-parts";
 import "./perpetual.css";
 import "./perpetual-scanner.css";
 
@@ -68,7 +69,7 @@ function pairName(key: string) {
 
 const fundingHistoryStatus = { pending: "采集中", partial: "历史不足", stale: "已过期", error: "更新失败", unsupported: "不支持", ready: "" };
 function FundingHistory({ long, short, now }: { long: PerpetualFundingLeg | undefined; short: PerpetualFundingLeg | undefined; now: number }) {
-  const windows = [fundingWindowTotal(long, short, 24, now), fundingWindowTotal(long, short, 72, now)];
+  const windows = ([24, 72, 168, 720] as const).map(hours => fundingWindowTotal(long, short, hours, now));
   const asOf = windows[0].asOf;
   return <div className="perp-funding-history" aria-label="历史已结算资金费累计">
     <dl>{windows.map(window => <div key={window.hours} data-history-hours={window.hours}>
@@ -268,7 +269,8 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
   const rows = useMemo(() => ranking.slice((visiblePage - 1) * pageSize, visiblePage * pageSize), [ranking, visiblePage]);
   const qualityPairs = useMemo(() => rows.map(row => ({ base: row.base, longKey: `${row.long.exchange}:${row.long.symbol}`, shortKey: `${row.short.exchange}:${row.short.symbol}`, ...(perpetualSpreadKey(row) === expanded ? { includeSeries: true } : {}) })), [rows, expanded]);
   const { report: qualityReport, loading: qualityLoading, error: qualityError } = usePerpetualQuality(qualityPairs, opportunitiesActive && view === "rank" && (scanner.columns.includes("quality") || paused || toolsOpen));
-  const { report: fundingHistoryReport, error: fundingHistoryError } = usePerpetualFundingHistory(qualityPairs, opportunitiesActive && view === "rank" && (scanner.columns.includes("history24h") || paused));
+  const { report: fundingHistoryReport, error: fundingHistoryError } = usePerpetualFundingHistory(qualityPairs, opportunitiesActive && view === "rank" && (scanner.columns.some(column => column === "history24h" || column === "history7d" || column === "history30d") || paused));
+  const { report: marketMetricsReport, error: marketMetricsError } = usePerpetualMarketMetrics(qualityPairs, opportunitiesActive && view === "rank" && (scanner.columns.includes("volume") || scanner.columns.includes("openInterest")));
   const qualities = useMemo(() => new Map(rows.map(row => [qualityPairKey(row), evaluateOpportunityQuality(row, qualityReport, now, qualityBudget, filters.priceMode)])), [rows, qualityReport, now, qualityBudget, filters.priceMode]);
   const fundingScenarios = useMemo(() => fundingSort ? new Map(rows.map(row => [perpetualSpreadKey(row), estimatePerpetualHoldingScenario(row, qualityBudget, { holdingHours: 24, exitSpreadPercent: row.spreadPercent, priceMode: filters.priceMode, staleAfterMs: data?.staleAfterMs }, now)])) : null, [fundingSort, rows, qualityBudget, filters.priceMode, data?.staleAfterMs, now]);
   const quoteRows = view === "quotes" ? quoteSelection.keys.slice((visiblePage - 1) * pageSize, visiblePage * pageSize).map(key => quoteSelection.byKey.get(key)!) : emptyQuotes;
@@ -423,6 +425,7 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
     </div> : null}
 
     {view === "rank" && fundingHistoryError ? <p className="perp-quality-notice" role="status">{fundingHistoryError}</p> : null}
+    {view === "rank" && marketMetricsError ? <p className="perp-quality-notice" role="status">{marketMetricsError}</p> : null}
     {filters.crossCurrency ? <p className="perp-currency-warning">{fxError || (fx ? `汇率快照 ${stamp(fx.generatedAt)} · 仅纳入有新鲜买卖汇率的组合；USD 等缺失汇率不假定等于 1。换汇手续费另计。` : "正在读取现货汇率，缺失汇率的跨币组合暂不参与排名。")}</p> : null}
     {filters.crossCurrency && fx ? <details className="perp-fx-details"><summary>查看每条汇率的来源时间与买卖价</summary><div>{["USDC", "USD1", "USDG", "USD"].map(currency => { const rate = fx.rates[currency]; return <p key={currency}><strong>{currency} / USDT</strong> · {rate ? <>买 {rate.bid.toFixed(6)} / 卖 {rate.ask.toFixed(6)} · 源时间 {stamp(rate.at)}{now - rate.at > fx.staleAfterMs ? " · 已过期" : ""}</> : "未纳入"}{fx.reasons?.[currency] ? <span> · {fx.reasons[currency]}</span> : null}</p>; })}</div></details> : null}
     {view === "quotes" ? <><p className="perp-quotes-caption">平台组合与价差阈值仅影响排名。此处保留原始合约单位，独立合约不参与跨所比较。</p><div className="perp-table-wrap"><QuoteDetails crossex={crossex} quotes={quoteRows} venues={venues} mode={filters.priceMode} now={now} staleAfterMs={data?.staleAfterMs ?? 30_000} standalone/>{!quoteRows.length ? <div className="perp-empty"><strong>暂无符合条件的报价</strong><p>{!data || !quotes.length ? emptyMessage : "可以调整币种搜索或交易所筛选。"}</p></div> : null}</div></> : <div className="perp-table-wrap scanner-table-wrap" tabIndex={0} role="region" aria-label="套利组合表格，可横向滚动"><table className="perp-table perp-scanner-table"><thead><tr><th scope="col">币种</th>{visibleColumns.map(column => {
@@ -451,13 +454,13 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
           funding: <><ScannerFundingRate quote={row.long} now={now}/><ScannerFundingRate quote={row.short} now={now}/></>,
           fundingSpread: <span className={scannerPolarity(fundingSpread)}>{scannerPercent(fundingSpread === null ? null : fundingSpread * 100)}</span>,
           annualized: <span className={scannerPolarity(annualized)} title="当前 8h 资金费差 × 3 × 365；按单腿等名义本金简单外推，未扣费用，不复利">{scannerPercent(annualized, 1)}</span>,
-          volume: <div className="scanner-stack" title="尚未接入各交易所 24h 成交额；不以币数量或合约张数替代金额"><div>—</div><div>—</div></div>,
-          openInterest: <div className="scanner-stack" title="尚未接入按金额统一的持仓量"><div>—</div><div>—</div></div>,
+          volume: <ScannerMarketMetric long={marketMetricsReport?.legs[`${row.long.exchange}:${row.long.symbol}`]} short={marketMetricsReport?.legs[`${row.short.exchange}:${row.short.symbol}`]} metricName="volume24h" now={now}/>,
+          openInterest: <ScannerMarketMetric long={marketMetricsReport?.legs[`${row.long.exchange}:${row.long.symbol}`]} short={marketMetricsReport?.legs[`${row.short.exchange}:${row.short.symbol}`]} metricName="openInterest" now={now}/>,
           quote: <div className="scanner-stack"><div title={String(row.buyPrice)}>{price(row.buyPrice)} <small>{row.long.quoteCurrency}</small></div><div title={String(row.sellPrice)}>{price(row.sellPrice)} <small>{row.short.quoteCurrency}</small></div>{now - row.updatedAt > (data?.staleAfterMs ?? 30_000) ? <small className="scanner-stale">报价已过期</small> : null}</div>,
           spread: <div className={scannerPolarity(primarySpread)} title={historicalDeviation === null ? undefined : `较 1h 均值 ${historicalDeviation.toFixed(1)} bp`}><strong>{percent(primarySpread)}</strong><small className="secondary">{netSort ? "毛" : "净"} {percent(netSort ? row.spreadPercent : row.netSpreadPercent ?? null)}</small></div>,
           history24h: <ScannerHistory long={fundingHistoryReport?.legs[`${row.long.exchange}:${row.long.symbol}`]} short={fundingHistoryReport?.legs[`${row.short.exchange}:${row.short.symbol}`]} now={now}/>,
-          history7d: <div className="scanner-history"><strong>—</strong><small>未接入</small></div>,
-          history30d: <div className="scanner-history"><strong>—</strong><small>未接入</small></div>,
+          history7d: <ScannerHistory long={fundingHistoryReport?.legs[`${row.long.exchange}:${row.long.symbol}`]} short={fundingHistoryReport?.legs[`${row.short.exchange}:${row.short.symbol}`]} now={now} hours={168}/>,
+          history30d: <ScannerHistory long={fundingHistoryReport?.legs[`${row.long.exchange}:${row.long.symbol}`]} short={fundingHistoryReport?.legs[`${row.short.exchange}:${row.short.symbol}`]} now={now} hours={720}/>,
           time: <div className="scanner-time"><time dateTime={new Date(row.updatedAt).toISOString()}>{stamp(row.updatedAt)}</time><small>{age(row.updatedAt, now)}{paused ? now - row.updatedAt > (data?.staleAfterMs ?? 30_000) ? " · 已过期" : " · 已暂停" : ""}</small></div>,
           quality: <QualityCell quality={quality} pairLabel={pairLabel} onInspect={() => inspect(row, false, "quality")}/>,
         };
@@ -477,7 +480,7 @@ function PerpetualPanel({ active = true, onSummary, hubConnected = false }: Summ
       {!rows.length ? <div className="perp-empty"><span aria-hidden="true">—</span><strong>{!data || data.status === "connecting" ? "等待实时报价" : fundingSort ? "暂无符合条件的资金费机会" : "暂无符合条件的价差"}</strong><p>{emptyMessage}</p>{quotes.length > 0 ? <button type="button" onClick={resetFilters}>重置筛选</button> : null}</div> : null}
     </div>}
     <div className="perp-pagination"><span>{totalItems ? `${(visiblePage - 1) * pageSize + 1}–${Math.min(visiblePage * pageSize, totalItems)} / ${totalItems} ${view === "rank" ? "组合" : "报价"}` : `0 ${view === "rank" ? "组合" : "报价"}`}<small>每页 {pageSize} 条</small></span><div><button type="button" aria-label="上一页" disabled={visiblePage <= 1} onClick={() => changePage(visiblePage - 1)}><ChevronLeft size={16}/></button><span>{visiblePage} / {totalPages}</span><button type="button" aria-label="下一页" disabled={visiblePage >= totalPages} onClick={() => changePage(visiblePage + 1)}><ChevronRight size={16}/></button></div></div>
-    {view === "rank" ? <p className="scanner-data-note">资金费差统一折算 / 8h；年化按当前费率简单外推。24h 实际为已结算资金费净累计，非账户盈亏。成交额、持仓量和 7 天 / 30 天历史尚未接入，以「—」显示；展开组合可查看 1 天 / 3 天历史与成本估算。</p> : null}
+    {view === "rank" ? <p className="scanner-data-note">资金费差统一折算 / 8h；年化按当前费率简单外推。24h、7 天和 30 天实际为已结算资金费净累计，非账户盈亏。成交额与持仓金额按多腿 / 空腿排列，保留来源计价币，点击数值查看来源时间；数据每 5 分钟更新，首次历史回补期间显示采集状态。展开组合可查看双腿累计与成本估算。</p> : null}
     <details className="scanner-tools" open={toolsOpen} onToggle={event => setToolsOpen(event.currentTarget.open)}><summary>监控工具与设置<ChevronDown size={14}/></summary><div className="scanner-tools-content">
       <button type="button" className="perp-tool-button" title="选择七所并按现货买卖汇率比较；模拟资格由 CrossEx 模块再次核对" onClick={() => { changeView("rank"); updateFilters({ exchanges: ["binance", "bybit", "okx", "gate", "kraken", "hyperliquid", "lighter"], crossCurrency: true, pairMode: "all", priceMode: "book", search: "", favoritesOnly: false, sortBy: "gross", minSpreadPercent: 0 }); }}>CrossEx 七所</button>
       <PerpetualManualPairs snapshot={data} mode={filters.priceMode} now={now} budget={qualityBudget} active={active} paused={paused}/>

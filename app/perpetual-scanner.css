@@ -355,6 +355,15 @@
 .perp-scanner .scanner-stack { display: flex; flex-direction: column; gap: 4px; }
 .perp-scanner .scanner-stack > div { min-height: 18px; line-height: 18px; }
 .perp-scanner .scanner-stack small { margin-left: 4px; color: #939286; font-size: 9px; }
+.perp-scanner .scanner-market-metric { position: relative; }
+.perp-scanner .scanner-metric { min-height: 18px; line-height: 18px; }
+.perp-scanner .scanner-metric > summary { display: flex; align-items: baseline; justify-content: flex-end; min-height: 18px; list-style: none; cursor: pointer; }
+.perp-scanner .scanner-metric > summary::-webkit-details-marker { display: none; }
+.perp-scanner .scanner-metric > summary:hover { color: var(--scanner-focus); }
+.perp-scanner .scanner-metric-state { margin-left: 5px; color: var(--scanner-muted); font-size: 9px; }
+.perp-scanner .scanner-metric-evidence { position: absolute; z-index: 7; right: 0; min-width: 240px; max-width: min(360px, calc(100vw - 32px)); padding: 10px 12px; border: 1px solid #635e49; border-radius: 3px; background: #26251f; color: var(--scanner-text); box-shadow: 0 6px 20px #0006; font-size: 11px; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.perp-scanner .scanner-metric-evidence > p { margin: 4px 0 0; color: var(--scanner-muted); }
+.perp-scanner .scanner-metric-close { float: right; min-height: 24px; margin: -4px -4px 0 8px; padding: 2px 4px; border: 0; background: transparent; color: var(--scanner-focus); font-size: 10px; }
 .perp-scanner .scanner-number { font-size: 12px; font-weight: 500; }
 .perp-scanner .scanner-number > strong { font-size: inherit; font-weight: 600; }
 .perp-scanner .scanner-number .secondary,
@@ -451,6 +460,8 @@
 }
 
 @media (max-width: 700px) {
+  .perp-scanner .scanner-metric-evidence { position: fixed; z-index: 80; right: 12px; bottom: 16px; left: 12px; min-width: 0; max-width: none; padding: 12px 14px; }
+  .perp-scanner .scanner-metric-close { min-height: 36px; margin-top: -6px; padding: 8px; }
   .perpetual-panel.perp-scanner { grid-template-columns: minmax(0, 1fr); padding: 12px 10px 18px; }
   .perp-scanner > .perp-heading { grid-column: 1; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 5px; }
   .perp-scanner .perp-heading > div:first-child { flex: 1 1 auto; }

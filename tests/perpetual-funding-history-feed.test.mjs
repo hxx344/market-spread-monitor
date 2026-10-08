@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fundingHistoryRequestKey, isFundingHistoryReport, startPerpetualFundingHistoryFeed } from '../lib/perpetual-funding-history-feed.ts';
+import { createPerpetualFundingHistoryCache, fundingHistoryRequestKey, isFundingHistoryReport, startPerpetualFundingHistoryFeed } from '../lib/perpetual-funding-history-feed.ts';
 import { fundingWindowTotal } from '../lib/perpetual-funding-history.ts';
 
 const pair = (base = 'BTC') => ({ base, longKey: `a:${base}`, shortKey: `b:${base}` });
@@ -12,10 +12,10 @@ const leg = (key, at = 1_700_000_000_000, status = 'ready') => {
 };
 const report = (pairs, at = 1_700_000_000_000, status = 'ready') => ({ schemaVersion: 1, generatedAt: at, legs: Object.fromEntries(pairs.flatMap(row => [row.longKey, row.shortKey]).map(key => [key, leg(key, at, status)])) });
 
-function fixture(load = async pairs => report(pairs)) {
+function fixture(load = async pairs => report(pairs), cache = createPerpetualFundingHistoryCache()) {
   let now = 0, id = 0;
   const timers = new Map(), requests = [], results = [], errors = [];
-  const feed = startPerpetualFundingHistoryFeed({
+  const feed = startPerpetualFundingHistoryFeed({ cache, now: () => now,
     load: (pairs, signal) => { requests.push({ pairs, signal }); return load(pairs, signal); },
     onData: value => results.push(value), onError: error => errors.push(error), onLoading() {},
     schedule: (callback, delay) => { const timer = ++id; timers.set(timer, { callback, at: now + delay }); return timer; },
@@ -41,15 +41,15 @@ test('request identity ignores ranking order and quote updates but preserves exa
   assert.equal(JSON.parse(fundingHistoryRequestKey(Array.from({ length: 80 }, (_, index) => pair(String(index))))).length, 30);
 });
 
-test('inactive pages read nothing; pending polls after 3 seconds and ready reads after 60 seconds', async () => {
+test('inactive pages read nothing; pending polls after 3 seconds and ready reads after 5 minutes', async () => {
   let pending = true;
   const f = fixture(async pairs => report(pairs, 1_700_000_000_000, pending ? 'pending' : 'ready'));
-  f.feed.setPairs([pair()]); await f.advance(60000); assert.equal(f.requests.length, 0);
+  f.feed.setPairs([pair()]); await f.advance(300000); assert.equal(f.requests.length, 0);
   f.feed.setActive(true); await settle(); assert.equal(f.requests.length, 1);
   await f.advance(2999); assert.equal(f.requests.length, 1);
   pending = false; await f.advance(1); assert.equal(f.requests.length, 2);
   for (let index = 0; index < 20; index++) f.feed.setPairs([{ ...pair(), price: index }]);
-  await f.advance(59999); assert.equal(f.requests.length, 2);
+  await f.advance(299999); assert.equal(f.requests.length, 2);
   await f.advance(1); assert.equal(f.requests.length, 3);
   f.feed.stop(); assert.equal(f.timers.size, 0);
 });
@@ -84,7 +84,7 @@ test('hidden, offline or inactive state aborts, rejects late data and resumes cu
   const f = fixture(pairs => new Promise(resolve => pending.push(() => resolve(report(pairs)))));
   f.feed.setPairs([pair()]); f.feed.setActive(true);
   f.feed.setActive(false); assert.equal(f.requests[0].signal.aborted, true); assert.equal(f.timers.size, 0);
-  f.feed.setPairs([pair('ETH')]); await f.advance(60000); assert.equal(f.requests.length, 1);
+  f.feed.setPairs([pair('ETH')]); await f.advance(300000); assert.equal(f.requests.length, 1);
   f.feed.setActive(true); pending[0](); await settle();
   assert.equal(f.results.length, 0); assert.equal(f.requests[1].pairs[0].base, 'ETH');
   pending[1](); await settle(); assert.equal(f.results.at(-1).legs['a:BTC'], undefined);
@@ -101,13 +101,13 @@ test('cache retains source timestamps through pending/error refreshes and old se
   });
   f.feed.setPairs([pair()]); f.feed.setActive(true); await settle();
   const original = f.results.at(-1).legs['a:BTC'];
-  status = 'pending'; await f.advance(60000);
+  status = 'pending'; await f.advance(300000);
   assert.deepEqual(f.results.at(-1).legs['a:BTC'].records, original.records);
   assert.equal(f.results.at(-1).legs['a:BTC'].fetchedAt, original.fetchedAt);
   status = 'error'; await f.advance(3000);
   assert.equal(f.results.at(-1).legs['a:BTC'].error, 'upstream failed');
   assert.deepEqual(f.results.at(-1).legs['a:BTC'].coverage, original.coverage);
-  status = 'ready'; at -= 60000; await f.advance(60000);
+  status = 'ready'; at -= 60000; await f.advance(300000);
   assert.deepEqual(f.results.at(-1).legs['a:BTC'].coverage, original.coverage);
   f.feed.stop();
 });
@@ -119,6 +119,7 @@ test('A to B to A reuses distinct cached legs; cache is capped at 500 and exclud
   assert.ok(f.results.at(-1).legs['a:BTC']); assert.ok(f.results.at(-1).legs['a:ETH']);
   assert.equal(f.results.at(-1).legs['other:BTC'], undefined);
   f.feed.setPairs([pair()]); assert.ok(f.results.at(-1).legs['a:BTC']); await f.advance(1200);
+  assert.equal(f.requests.length, 2, 'Returning to fresh contracts does not request them again');
   for (let index = 0; index < 9; index++) {
     f.feed.setPairs(Array.from({ length: 30 }, (_, token) => pair(`TOKEN${index * 30 + token}`))); await f.advance(1200);
   }
@@ -131,7 +132,7 @@ test('failed/malformed reads preserve data and timeout aborts with a bounded ret
   let fail = false;
   const f = fixture(async pairs => fail ? { schemaVersion: 1, generatedAt: 0, legs: [] } : report(pairs));
   f.feed.setPairs([pair()]); f.feed.setActive(true); await settle();
-  fail = true; await f.advance(60000);
+  fail = true; await f.advance(300000);
   assert.equal(f.results.length, 1); assert.match(f.errors.at(-1), /保留上次记录/); f.feed.stop();
   const timeout = fixture((_pairs, signal) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true })));
   timeout.feed.setPairs([pair()]); timeout.feed.setActive(true);
@@ -156,11 +157,78 @@ test('changed catalog identity clears prior settlements even when the same contr
   });
   f.feed.setPairs([pair()]); f.feed.setActive(true); await settle();
   assert.ok(f.results.at(-1).legs['a:BTC'].records.length);
-  changed = true; await f.advance(60000);
+  changed = true; await f.advance(300000);
   const legs = f.results.at(-1).legs;
   assert.equal(legs['a:BTC'].identity, 'relisted-market-v2');
   assert.equal(legs['a:BTC'].coverage, null); assert.deepEqual(legs['a:BTC'].records, []);
   assert.equal(fundingWindowTotal(legs['a:BTC'], legs['b:BTC'], 24, 1_700_000_000_000).netPercent, null);
   assert.ok(legs['b:BTC'].records.length, 'Unchanged identity retains its own source history');
+  f.feed.stop();
+});
+
+test('backfill with the same newest timestamp extends coverage without reloading existing windows', async () => {
+  let complete = false;
+  const f = fixture(async pairs => {
+    const value = report(pairs);
+    for (const item of Object.values(value.legs)) {
+      item.backfillComplete = complete;
+      if (complete) {
+        item.coverage.from -= 28 * 86_400_000;
+        item.records.unshift({ time: item.coverage.from, rate: .0001 });
+      }
+    }
+    return value;
+  });
+  f.feed.setPairs([pair()]); f.feed.setActive(true); await settle();
+  const original = f.results.at(-1).legs['a:BTC'];
+  assert.equal(fundingWindowTotal(original, f.results.at(-1).legs['b:BTC'], 24, original.coverage.to).status, 'ready');
+  complete = true; await f.advance(3000);
+  const extended = f.results.at(-1).legs['a:BTC'];
+  assert.equal(extended.coverage.to, original.coverage.to);
+  assert.ok(extended.coverage.from < original.coverage.from);
+  assert.ok(extended.records.length > original.records.length);
+  await f.advance(299999); assert.equal(f.requests.length, 2);
+  f.feed.stop();
+});
+
+test('a shared cache deduplicates concurrent hooks, survives remount and does not abort remaining subscribers', async () => {
+  const cache = createPerpetualFundingHistoryCache();
+  let resolve;
+  const first = fixture(pairs => new Promise(done => { resolve = () => done(report(pairs)); }), cache);
+  const second = fixture(undefined, cache);
+  first.feed.setPairs([pair()]); first.feed.setActive(true);
+  second.feed.setPairs([pair()]); second.feed.setActive(true);
+  assert.equal(first.requests.length, 1); assert.equal(second.requests.length, 0);
+  first.feed.stop();
+  assert.equal(first.requests[0].signal.aborted, false, 'A remaining subscriber owns the same request');
+  resolve(); await settle();
+  assert.equal(second.results.at(-1).legs['a:BTC'].status, 'ready');
+  second.feed.stop();
+  const remounted = fixture(undefined, cache);
+  remounted.feed.setPairs([{ ...pair(), longKey: 'b:BTC', shortKey: 'a:BTC' }]); remounted.feed.setActive(true);
+  assert.equal(remounted.requests.length, 0);
+  assert.ok(remounted.results.at(-1).legs['a:BTC']);
+  remounted.feed.stop();
+});
+
+test('isolated default server instances never share data and reports preserve persistence errors', async () => {
+  const first = fixture(async pairs => ({ ...report(pairs), storageError: '历史缓存保存失败' }));
+  const second = fixture();
+  first.feed.setPairs([pair()]); first.feed.setActive(true); await settle();
+  assert.equal(first.results.at(-1).storageError, '历史缓存保存失败');
+  second.feed.setPairs([pair()]); second.feed.setActive(true); await settle();
+  assert.equal(second.requests.length, 1);
+  first.feed.stop(); second.feed.stop();
+});
+
+test('unsupported funding with incomplete coverage does not stay on the backfill short poll', async () => {
+  const f = fixture(async pairs => {
+    const value = report(pairs, 1_700_000_000_000, 'unsupported');
+    for (const item of Object.values(value.legs)) item.backfillComplete = false;
+    return value;
+  });
+  f.feed.setPairs([pair()]); f.feed.setActive(true); await settle();
+  await f.advance(299999); assert.equal(f.requests.length, 1);
+  await f.advance(1); assert.equal(f.requests.length, 2);
   f.feed.stop();
 });

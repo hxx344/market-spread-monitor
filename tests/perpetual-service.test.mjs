@@ -200,6 +200,30 @@ function setup(overrides = {}) {
 }
 async function until(check) { for (let i = 0; i < 100; i++) { if (check()) return; await delay(5); } assert.fail('Condition did not become true'); }
 
+test('cached metric action is wired to current catalogs, persists once and does not renew quote times', async t => {
+  const now = Date.UTC(2026, 9, 8), savedMetrics = [], savedHistory = [];
+  let reads = 0;
+  const quotes = ['first', 'second'].map(exchange => update({ exchange, sourceTime: now }));
+  const { service, sockets } = setup({ clock: () => now,
+    exchanges: quotes.map(quote => ({ id: quote.exchange, name: quote.exchange, kind: 'cex' })),
+    discover: async exchange => quotes.filter(quote => quote.exchange === exchange),
+    store: { load: () => [], save() {}, prune() {}, close() {}, loadContractMetrics: () => [], saveContractMetrics: entry => savedMetrics.push(entry), loadFundingHistory: () => [], saveFundingHistory: entry => savedHistory.push(entry) },
+    marketMetricsOptions: { reader: async () => { reads++; return { volume24h: { value: 0, currency: 'USDT', observedAt: now, source: 'official', error: '' }, openInterest: { value: 123, currency: 'USDT', observedAt: now, source: 'official', error: '' } }; }, hostSpacingMs: 0 },
+  });
+  t.after(() => service.stop()); service.start(); await until(() => sockets.length === 2);
+  sockets.forEach((socket, index) => { socket.open(); socket.message([quotes[index]]); });
+  const input = { pairs: [{ base: 'BTC', longKey: 'first:BTCUSDT', shortKey: 'second:BTCUSDT' }] };
+  assert.deepEqual(service.actions.metrics, ['POST']);
+  assert.equal(service.handle('metrics', 'POST', input).legs['first:BTCUSDT'].status, 'pending');
+  await until(() => reads === 2 && service.handle('metrics', 'POST', input).legs['first:BTCUSDT'].status === 'ready');
+  const report = service.handle('metrics', 'POST', input);
+  for (let index = 0; index < 10; index++) service.handle('metrics', 'POST', input);
+  await delay(10); assert.equal(reads, 2); assert.equal(report.legs['first:BTCUSDT'].volume24h.value, 0);
+  assert.ok(savedMetrics.some(entry => entry.value.status === 'ready')); assert.equal(savedHistory.length, 0);
+  assert.ok(service.snapshot().quotes.every(quote => quote.bidAskAt === now));
+  assert.equal(service.handle('diagnostics', 'GET').marketMetrics.cached, 2);
+});
+
 test('lightweight overview counts unblocked bases and live price venues without renewing source times', async t => {
   let now = 1000, discoveries = 0;
   const markets = exchange => [

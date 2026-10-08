@@ -81,16 +81,26 @@ function retryAfter(response, now) {
 /** Public histories for exact directory-verified contracts. Returned rates are
  * decimal amounts at their actual settlement timestamps, in inclusive bounds.
  * The owning service controls market authorization, host budgets and caching. */
-export function createPerpetualFundingReader({ fetchImpl = fetch, clock = Date.now } = {}) {
-  return async (market, range, { signal } = {}) => {
+export function createPerpetualFundingReader({ fetchImpl = fetch, clock = Date.now, requestSpacingMs = 0 } = {}) {
+  const lastRequest = new Map();
+  return async (market, range, { signal, onProgress } = {}) => {
     validateMarket(market);
     const now = milliseconds(clock());
     const from = milliseconds(range?.from), to = milliseconds(range?.to);
-    if (from > to || to > now || to - from > MAX_RANGE_MS) throw Error('历史资金费查询区间无效，单次最多 4 天');
+    const maxRange = market.exchange === 'bitget' ? 32 * 24 * HOUR : MAX_RANGE_MS;
+    if (from > to || to > now || to - from > maxRange) throw Error('历史资金费查询区间无效');
     range = { from, to };
     signal?.throwIfAborted();
     async function request(url, init = {}) {
       signal?.throwIfAborted();
+      const host = new URL(url).host, delay = Math.max(0, (lastRequest.get(host) ?? 0) + requestSpacingMs - clock());
+      if (delay) await new Promise((resolve, reject) => {
+        const finish = () => { signal?.removeEventListener('abort', abort); resolve(); };
+        const timer = setTimeout(finish, delay);
+        const abort = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); reject(signal.reason); };
+        signal?.addEventListener('abort', abort, { once: true });
+      });
+      signal?.throwIfAborted(); lastRequest.set(host, clock());
       const timeout = AbortSignal.timeout(10_000);
       const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
       const response = await fetchImpl(url, { ...init, credentials: 'omit', redirect: 'error', cache: 'no-store', signal: requestSignal });
@@ -108,7 +118,7 @@ export function createPerpetualFundingReader({ fetchImpl = fetch, clock = Date.n
     if (CEX_EXCHANGES.has(market.exchange)) {
       // The optional exact allowlist is created only from the server's verified
       // market. Existing oil readers retain their fixed BZ/CL allowlist.
-      const read = createCexFundingHistoryReader({ request, clock: () => now, contracts: { [market.exchange]: [market.symbol] }, bitgetProductType: market.quoteCurrency === 'USDC' ? 'USDC-FUTURES' : 'USDT-FUTURES' });
+      const read = createCexFundingHistoryReader({ request, clock: () => now, contracts: { [market.exchange]: [market.symbol] }, bitgetProductType: market.quoteCurrency === 'USDC' ? 'USDC-FUTURES' : 'USDT-FUTURES', onProgress: market.exchange === 'bitget' ? onProgress : undefined });
       return read(market.exchange, market.symbol, range);
     }
     if (Object.hasOwn(LIGHTER_HOSTS, market.exchange)) {

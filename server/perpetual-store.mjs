@@ -17,12 +17,44 @@ export async function openPerpetualStore(filename) {
     db.exec('CREATE TABLE IF NOT EXISTS quotes (id TEXT PRIMARY KEY, payload TEXT NOT NULL); PRAGMA user_version=1;');
     // Additive cache tables keep older binaries compatible during installer rollback.
     db.exec('CREATE TABLE IF NOT EXISTS quality_samples (bucket INTEGER PRIMARY KEY, payload BLOB NOT NULL);');
+    db.exec('CREATE TABLE IF NOT EXISTS funding_history_cache (id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL, payload BLOB NOT NULL); CREATE TABLE IF NOT EXISTS contract_metrics_cache (id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL, payload BLOB NOT NULL);');
     const upsert = db.prepare('INSERT INTO quotes(id,payload) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload');
     const insertSample = db.prepare('INSERT INTO quality_samples(bucket,payload) VALUES (?,?) ON CONFLICT(bucket) DO NOTHING');
     const pruneSamples = db.prepare('DELETE FROM quality_samples WHERE bucket<=? OR bucket NOT IN (SELECT bucket FROM quality_samples ORDER BY bucket DESC LIMIT 1440)');
+    function publicCache(table) {
+      db.exec(`CREATE INDEX IF NOT EXISTS ${table}_updated_at ON ${table}(updated_at DESC)`);
+      const selectOne = db.prepare(`SELECT payload FROM ${table} WHERE id=?`);
+      const selectRecent = db.prepare(`SELECT payload FROM ${table} ORDER BY updated_at DESC LIMIT ?`);
+      const write = db.prepare(`INSERT INTO ${table}(id,updated_at,payload) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at,payload=excluded.payload`);
+      const trim = db.prepare(`DELETE FROM ${table} WHERE id NOT IN (SELECT id FROM ${table} ORDER BY updated_at DESC LIMIT 5000)`);
+      const size = db.prepare(`SELECT COUNT(*) AS count FROM ${table}`);
+      return {
+        load(key, limit = 500) {
+          const rows = key === undefined ? selectRecent.all(Math.max(1, Math.min(5000, Math.trunc(limit) || 500))) : selectOne.all(key);
+          return rows.flatMap(row => {
+            try { return [JSON.parse(gunzipSync(row.payload, { maxOutputLength: 1_000_000 }).toString())]; }
+            catch { return []; } // A corrupt recoverable cache is a miss, never invented data.
+          });
+        },
+        save(entry) {
+          if (!entry || typeof entry.key !== 'string' || !entry.key || entry.key.length > 200 || !Number.isSafeInteger(entry.lastAccessAt) || entry.lastAccessAt < 0) throw new Error('Invalid contract cache entry');
+          const json = JSON.stringify(entry);
+          if (Buffer.byteLength(json) > 1_000_000) throw new Error('Contract cache entry exceeds size limit');
+          const payload = gzipSync(json, { level: 1 });
+          db.exec('BEGIN IMMEDIATE');
+          try { write.run(entry.key, entry.lastAccessAt, payload); if (size.get().count > 5000) trim.run(); db.exec('COMMIT'); }
+          catch (error) { db.exec('ROLLBACK'); throw error; }
+        },
+      };
+    }
+    const fundingCache = publicCache('funding_history_cache'), metricsCache = publicCache('contract_metrics_cache');
     let closed = false;
     return {
       load() { return db.prepare('SELECT payload FROM quotes').all().map(row => JSON.parse(row.payload)); },
+      loadFundingHistory: fundingCache.load,
+      saveFundingHistory: fundingCache.save,
+      loadContractMetrics: metricsCache.load,
+      saveContractMetrics: metricsCache.save,
       *loadQualitySamples(now) {
         // Decode one minute at a time: no full-day JSON allocation on restart.
         for (const row of db.prepare('SELECT bucket,payload FROM quality_samples WHERE bucket>? AND bucket<=? ORDER BY bucket LIMIT 1440').iterate(now - 86_400_000, now)) {

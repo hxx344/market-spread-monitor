@@ -227,3 +227,26 @@ test('unsupported venues, Kraken accrual semantics and invalid inputs are reject
   for (const range of [{ from: FROM - 1, to: NOW }, { from: NOW, to: NOW + 1 }, { from: NOW, to: NOW - 1 }, { from: NaN, to: NOW }, { from: FROM / 1000, to: NOW }]) await assert.rejects(read(market('gate'), range));
   assert.equal(calls, 0);
 });
+
+test('Bitget 32-day backfill reads each page once and publishes only verified contiguous progress', async () => {
+  const rows = Array.from({ length: 769 }, (_, index) => cexRow('bitget', NOW - index * HOUR, '0.0001'));
+  const pages = [], progress = [];
+  const read = reader(async url => {
+    const page = Number(new URL(url).searchParams.get('pageNo')); pages.push(page);
+    return response(cexEnvelope('bitget', rows.slice((page - 1) * 100, page * 100)));
+  });
+  const range = { from: NOW - 32 * 24 * HOUR, to: NOW };
+  const result = await read(market('bitget'), range, { onProgress: value => progress.push(value) });
+  assert.equal(result.length, 769); assert.deepEqual(pages, [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.equal(progress[0].records.length, 100); assert.equal(progress[0].coverage.from, NOW - 99 * HOUR);
+  assert.deepEqual(progress.at(-1).coverage, range);
+  const partial = [];
+  const fail = reader(async url => {
+    const page = Number(new URL(url).searchParams.get('pageNo'));
+    if (page === 3) throw Error('disconnected');
+    return response(cexEnvelope('bitget', rows.slice((page - 1) * 100, page * 100)));
+  });
+  await assert.rejects(fail(market('bitget'), range, { onProgress: value => partial.push(value) }), /disconnected/);
+  assert.equal(partial.length, 2); assert.equal(partial.at(-1).coverage.from, NOW - 199 * HOUR);
+  await assert.rejects(read(market('bitget'), { ...range, from: range.from - 1 }));
+});

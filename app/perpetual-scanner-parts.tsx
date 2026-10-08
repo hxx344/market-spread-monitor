@@ -1,7 +1,8 @@
 import type { ReactNode } from "react";
 import type { PerpetualQuote } from "../lib/perpetual-types";
 import { normalizedFunding8h } from "../lib/perpetual-spreads";
-import { fundingWindowTotal, type PerpetualFundingLeg } from "../lib/perpetual-funding-history";
+import { fundingWindowTotal, type FundingWindowTotal, type PerpetualFundingLeg } from "../lib/perpetual-funding-history";
+import { PERPETUAL_MARKET_METRICS_STALE_MS, type PerpetualMarketMetricsLeg } from "../lib/perpetual-market-metrics";
 
 const dateFormat = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 export const scannerPercent = (value: number | null, digits = 4) => value === null || !Number.isFinite(value) ? "—" : `${value > 0 ? "+" : value < 0 ? "−" : ""}${Math.abs(value).toFixed(digits)}%`;
@@ -38,11 +39,43 @@ export function ScannerFundingRate({ quote, now }: { quote: PerpetualQuote; now:
   </div>;
 }
 
-export function ScannerHistory({ long, short, now }: { long: PerpetualFundingLeg | undefined; short: PerpetualFundingLeg | undefined; now: number }) {
-  const value = fundingWindowTotal(long, short, 24, now);
+export function ScannerHistory({ long, short, now, hours = 24 }: { long: PerpetualFundingLeg | undefined; short: PerpetualFundingLeg | undefined; now: number; hours?: FundingWindowTotal["hours"] }) {
+  const value = fundingWindowTotal(long, short, hours, now);
   const labels = { pending: "采集中", partial: "历史不足", stale: "已过期", error: "更新失败", unsupported: "不支持", ready: "" };
-  return <div className="scanner-history" data-history-hours="24" title={`已结算资金费净累计 = 空腿 − 多腿；单腿等名义本金${value.asOf === null ? "" : `；截止 ${dateFormat.format(value.asOf)} 北京时间`}。${value.reason}`}>
+  return <div className="scanner-history" data-history-hours={hours} title={`已结算资金费净累计 = 空腿 − 多腿；单腿等名义本金${value.asOf === null ? "" : `；截止 ${dateFormat.format(value.asOf)} 北京时间`}。${value.reason}`}>
     <strong className={scannerPolarity(value.netPercent)}>{scannerPercent(value.netPercent)}</strong>
     {value.status !== "ready" ? <small>{labels[value.status]}</small> : null}
   </div>;
+}
+
+const amountFormat = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 });
+const exactAmountFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 8 });
+function ScannerMetricLeg({ leg, metricName, side, now }: { leg: PerpetualMarketMetricsLeg | undefined; metricName: "volume24h" | "openInterest"; side: "多" | "空"; now: number }) {
+  const metric = leg?.[metricName];
+  const value = metric?.value ?? null;
+  const issue = metric?.error || (leg?.status === "error" && !leg.volume24h.error && !leg.openInterest.error ? leg.error : "");
+  const observedAt = metric?.observedAt ?? null;
+  const stale = observedAt !== null && (observedAt > now + 5_000 || now - observedAt > PERPETUAL_MARKET_METRICS_STALE_MS);
+  const state = leg?.status === "unsupported" ? "不支持" : value === null ? !leg || leg.status === "pending" ? "采集中" : leg.status === "error" ? "更新失败" : "暂无数据" : issue ? "更新失败" : stale ? "已过期" : "";
+  const label = metricName === "volume24h" ? "24h 成交额" : "持仓金额";
+  return <details className="scanner-metric" name="perpetual-metric-evidence" data-metric={metricName} data-side={side} onKeyDown={event => {
+    if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); }
+  }}>
+    <summary aria-label={`${side}腿${label}，${value === null ? "暂无数据" : `${exactAmountFormat.format(value)} ${metric?.currency}`}，${state || "查看来源时间"}`}>
+      <span>{value === null ? "—" : amountFormat.format(value)}</span>{value !== null ? <small>{metric?.currency}</small> : null}
+      {state ? <span className={`scanner-metric-state${value !== null ? " scanner-stale" : ""}`}>{state}</span> : null}
+    </summary>
+    <div className="scanner-metric-evidence">
+      <button type="button" className="scanner-metric-close" aria-label="收起指标来源" onClick={event => { const details = event.currentTarget.closest("details"); if (details) { details.open = false; details.querySelector("summary")?.focus(); } }}>关闭</button>
+      <strong>{side}腿 · {label}</strong>
+      <p>{value === null ? "—" : `${exactAmountFormat.format(value)} ${metric?.currency}`}</p>
+      <p>来源：{metric?.source || "等待来源"}</p>
+      <p>源时间：{observedAt === null ? "—" : <time dateTime={new Date(observedAt).toISOString()}>{dateFormat.format(observedAt)} 北京时间</time>}</p>
+      {state ? <p>{state}{issue ? `：${issue}` : leg?.status === "unsupported" && leg.error ? `：${leg.error}` : ""}</p> : null}
+    </div>
+  </details>;
+}
+
+export function ScannerMarketMetric({ long, short, metricName, now }: { long: PerpetualMarketMetricsLeg | undefined; short: PerpetualMarketMetricsLeg | undefined; metricName: "volume24h" | "openInterest"; now: number }) {
+  return <div className="scanner-stack scanner-market-metric"><ScannerMetricLeg leg={long} metricName={metricName} side="多" now={now}/><ScannerMetricLeg leg={short} metricName={metricName} side="空" now={now}/></div>;
 }

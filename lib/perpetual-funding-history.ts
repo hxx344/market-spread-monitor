@@ -2,7 +2,8 @@ import type { SettledFundingRecord, FundingHistoryRange } from './exchange-fundi
 
 export const PERPETUAL_FUNDING_REFRESH_MS = 300_000;
 export const PERPETUAL_FUNDING_STALE_MS = 615_000;
-export const PERPETUAL_FUNDING_LOOKBACK_MS = 4 * 86_400_000;
+export const PERPETUAL_FUNDING_LOOKBACK_MS = 32 * 86_400_000;
+export type FundingWindowHours = 24 | 72 | 168 | 720;
 export interface FundingHistoryPairRequest { base: string; longKey: string; shortKey: string }
 export interface PerpetualFundingLeg {
   key: string;
@@ -15,14 +16,19 @@ export interface PerpetualFundingLeg {
   coverage: FundingHistoryRange | null;
   records: SettledFundingRecord[];
   error: string;
+  /** A successful recent window can be read while older chunks are still backfilling. */
+  backfillComplete?: boolean;
+  nextRefreshAt?: number;
+  cacheUpdatedAt?: number;
 }
 export interface PerpetualFundingHistoryReport {
   schemaVersion: 1;
   generatedAt: number;
   legs: Record<string, PerpetualFundingLeg>;
+  storageError?: string;
 }
 export interface FundingWindowTotal {
-  hours: 24 | 72;
+  hours: FundingWindowHours;
   asOf: number | null;
   longPercent: number | null;
   shortPercent: number | null;
@@ -37,7 +43,7 @@ export interface FundingWindowTotal {
  * The denominator is one leg's equal notional, consistent with the holding estimate.
  * Query coverage plus a preceding real settlement avoids presenting a new listing as a full window.
  */
-export function fundingWindowTotal(long: PerpetualFundingLeg | undefined, short: PerpetualFundingLeg | undefined, hours: 24 | 72, now: number): FundingWindowTotal {
+export function fundingWindowTotal(long: PerpetualFundingLeg | undefined, short: PerpetualFundingLeg | undefined, hours: FundingWindowHours, now: number): FundingWindowTotal {
   const result: FundingWindowTotal = { hours, asOf: null, longPercent: null, shortPercent: null, netPercent: null, longCount: 0, shortCount: 0, status: 'pending', reason: '历史结算采集中' };
   if (!long || !short) return result;
   if (long.status === 'unsupported' || short.status === 'unsupported') return { ...result, status: 'unsupported', reason: long.status === 'unsupported' ? long.error : short.error };
@@ -51,7 +57,7 @@ export function fundingWindowTotal(long: PerpetualFundingLeg | undefined, short:
   });
   [result.longCount, result.shortCount] = totals.map(total => total.count);
   [result.longPercent, result.shortPercent] = totals.map(total => total.percent);
-  if (totals.some(total => total.percent === null)) return { ...result, status: 'partial', reason: '历史不足或窗口内无结算记录' };
+  if (totals.some(total => total.percent === null)) return { ...result, status: long.backfillComplete === false || short.backfillComplete === false ? 'pending' : 'partial', reason: long.backfillComplete === false || short.backfillComplete === false ? '正在回补历史结算' : '历史不足或窗口内无结算记录' };
   result.netPercent = result.shortPercent! - result.longPercent!;
   if (asOf > now + 5_000 || now - asOf > PERPETUAL_FUNDING_STALE_MS) return { ...result, status: 'stale', reason: '历史已过期，保留上次累计' };
   if (long.error || short.error) return { ...result, status: 'error', reason: '更新失败，保留上次累计' };

@@ -1,25 +1,26 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { fundingHistoryRequestKey, startPerpetualFundingHistoryFeed } from "../lib/perpetual-funding-history-feed";
-import type { FundingHistoryPairRequest, PerpetualFundingHistoryReport } from "../lib/perpetual-funding-history";
+import { marketMetricsRequestKey, startPerpetualMarketMetricsFeed } from "../lib/perpetual-market-metrics-feed";
+import type { FundingHistoryPairRequest } from "../lib/perpetual-funding-history";
+import type { PerpetualMarketMetricsReport } from "../lib/perpetual-market-metrics";
 
-export function usePerpetualFundingHistory(pairs: FundingHistoryPairRequest[], active: boolean) {
-  const [report, setReport] = useState<PerpetualFundingHistoryReport | null>(null);
+export function usePerpetualMarketMetrics(pairs: FundingHistoryPairRequest[], active: boolean) {
+  const [report, setReport] = useState<PerpetualMarketMetricsReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const controls = useRef<ReturnType<typeof startPerpetualFundingHistoryFeed> | null>(null);
-  const requestKey = fundingHistoryRequestKey(pairs);
+  const controls = useRef<ReturnType<typeof startPerpetualMarketMetricsFeed> | null>(null);
+  const requestKey = marketMetricsRequestKey(pairs);
 
   useEffect(() => {
-    const feed = startPerpetualFundingHistoryFeed({
+    const feed = startPerpetualMarketMetricsFeed({
       load: async (requested, signal) => {
-        const response = await fetch("/api/monitors/perpetual/funding-history", {
+        const response = await fetch("/api/monitors/perpetual/metrics", {
           method: "POST", cache: "no-store", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ pairs: requested }), signal,
         });
-        if (!response.ok) throw new Error("历史结算读取失败");
-        return await response.json() as PerpetualFundingHistoryReport;
+        if (!response.ok) throw new Error("市场指标读取失败");
+        return await response.json() as PerpetualMarketMetricsReport;
       },
       onData: setReport, onError: setError, onLoading: setLoading,
     });

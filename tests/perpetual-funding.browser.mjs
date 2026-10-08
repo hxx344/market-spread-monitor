@@ -6,7 +6,7 @@ async page => {
   const origin = 'http://127.0.0.1:3193', hour = 3_600_000, anchor = Date.UTC(2026, 9, 6);
   let now = anchor, priceAge = 0;
   const check = (condition, message) => { if (!condition) throw new Error(message); };
-  const errors = [], externalRequests = [], historyRequests = [], counts = new Map();
+  const errors = [], externalRequests = [], historyRequests = [], metricRequests = [], counts = new Map();
   const onPageError = error => errors.push(error.message);
   page.on('pageerror', onPageError);
   const bases = ['BTC', 'ETH', 'SOL', 'ADA'];
@@ -66,12 +66,28 @@ async page => {
         const { pairs } = route.request().postDataJSON();
         historyRequests.push(pairs);
         const pending = historyRequests.length === 1;
+        const backfilled = historyRequests.length >= 3;
         const legs = Object.fromEntries(pairs.flatMap(pair => [pair.longKey, pair.shortKey]).map(key => {
           const [exchange, symbol] = key.split(':'), isBtc = symbol === 'BTCUSDT';
-          const hours = isBtc ? [96, 88, 80, 72, 64, 56, 48, 40, 32, 24, 16, 8, 0] : [32, 24, 16, 8, 0];
+          const hours = isBtc ? backfilled ? Array.from({ length: 97 }, (_, index) => (96 - index) * 8) : [96, 88, 80, 72, 64, 56, 48, 40, 32, 24, 16, 8, 0] : [32, 24, 16, 8, 0];
           return [key, { key, exchange, symbol, identity: `${key}:fixture`, status: pending ? 'pending' : 'ready', fetchedAt: pending ? null : anchor,
-            coverage: pending ? null : { from: anchor - 96 * hour, to: anchor }, error: '',
+            coverage: pending ? null : { from: anchor - (isBtc && backfilled ? 768 : 96) * hour, to: anchor }, error: '', backfillComplete: !isBtc || backfilled,
             records: pending ? [] : hours.map(offset => ({ time: anchor - offset * hour, rate: !isBtc ? 0 : exchange === 'gate' ? .0002 : offset < 24 ? .0003 : .0001 })),
+          }];
+        }));
+        return route.fulfill({ json: { schemaVersion: 1, generatedAt: now, legs } });
+      }
+      if (path.endsWith('/perpetual/metrics')) {
+        const { pairs } = route.request().postDataJSON(); metricRequests.push(pairs);
+        const pending = metricRequests.length === 1;
+        const metric = (value, currency, observedAt = anchor, error = '') => ({ value, currency, observedAt, source: 'official fixture ticker', error });
+        const empty = error => metric(null, null, null, error);
+        const legs = Object.fromEntries(pairs.flatMap(pair => [pair.longKey, pair.shortKey]).map(key => {
+          const [exchange, symbol] = key.split(':'), binance = exchange === 'binance', unsupported = symbol === 'ADAUSDT';
+          return [key, { key, exchange, symbol, identity: `${key}:fixture`, status: unsupported ? 'unsupported' : pending ? 'pending' : 'ready', fetchedAt: pending || unsupported ? null : anchor,
+            volume24h: pending || unsupported ? empty('') : metric(binance ? 123456789 : 45678901, binance ? 'USDT' : 'USDC', symbol === 'SOLUSDT' ? anchor - 700000 : anchor),
+            openInterest: pending || unsupported ? empty('') : symbol === 'ETHUSDT' ? empty('交易所未提供持仓金额') : metric(binance ? 0 : 5000000, binance ? 'USDT' : 'USD', anchor, symbol === 'SOLUSDT' ? 'upstream failed' : ''),
+            error: unsupported ? '该合约暂不支持金额指标' : '',
           }];
         }));
         return route.fulfill({ json: { schemaVersion: 1, generatedAt: now, legs } });
@@ -117,8 +133,26 @@ async page => {
     check(await page.locator('thead [data-column="time"]').count() === 0 && await page.locator('thead [data-column="quality"]').count() === 0, 'Time and quality columns are optional by default');
     for (const id of ['history7d', 'history30d']) {
       check(await rowFor('BTC').locator(`[data-column="${id}"] strong`).innerText() === '—', `${id} has no fabricated value`);
-      check((await rowFor('BTC').locator(`[data-column="${id}"]`).innerText()).includes('未接入'), `${id} clearly states missing coverage`);
+      check((await rowFor('BTC').locator(`[data-column="${id}"]`).innerText()).includes('采集中'), `${id} states backfill is still running`);
     }
+    await tick(3000);
+    check(await rowFor('BTC').locator('[data-column="history7d"] strong').innerText() === '+0.1500%', 'Seven days uses its settled window after older coverage arrives');
+    check(await rowFor('BTC').locator('[data-column="history30d"] strong').innerText() === '+0.8400%', 'Thirty days uses its own settled window, without extrapolating recent rates');
+    check((await rowFor('ETH').locator('[data-column="history7d"]').innerText()).includes('历史不足'), 'Complete backfill with insufficient listing history remains explicitly missing');
+    const btcVolume = rowFor('BTC').locator('[data-column="volume"]');
+    const btcInterest = rowFor('BTC').locator('[data-column="openInterest"]');
+    check((await btcVolume.locator('summary').nth(0).innerText()).includes('123.46M') && (await btcVolume.locator('summary').nth(1).innerText()).includes('USDC'), 'Volume has compact money amounts and retains each leg currency');
+    check((await btcInterest.locator('summary').nth(0).innerText()).includes('0') && !(await btcInterest.locator('summary').nth(0).innerText()).includes('—'), 'True zero open interest is not missing');
+    check((await btcInterest.locator('summary').nth(1).innerText()).includes('USD'), 'USD stays distinct from USDT and USDC');
+    await btcVolume.locator('summary').nth(0).click();
+    check((await btcVolume.locator('.scanner-metric-evidence').nth(0).innerText()).includes('official fixture ticker'), 'Clicking a money amount exposes its source');
+    check(await btcVolume.locator('time').nth(0).getAttribute('datetime') === new Date(anchor).toISOString(), 'Money evidence exposes the unchanged source timestamp');
+    await btcVolume.locator('summary').nth(0).click();
+    check((await rowFor('SOL').locator('[data-column="volume"] summary').first().innerText()).includes('已过期'), 'Stale money amounts keep the stale label');
+    check((await rowFor('SOL').locator('[data-column="openInterest"] summary').first().innerText()).includes('更新失败'), 'A failed metric retains its amount and failure label');
+    check((await rowFor('ADA').locator('[data-column="volume"] summary').first().innerText()).includes('不支持'), 'Unsupported money data is explicit');
+    check((await rowFor('ETH').locator('[data-column="openInterest"] summary').first().innerText()).includes('暂无数据'), 'A successful source without verified open-interest money is marked unavailable rather than a failed refresh');
+    const readyHistoryReads = historyRequests.length, readyMetricReads = metricRequests.length;
     await page.getByLabel('最低毛价差 / %', { exact: true }).fill('1.5');
     await waitBases(['BTC']);
     await fundingView.click();
@@ -130,13 +164,10 @@ async page => {
     check(fundingText.includes('−3.883%'), 'A negative gross spread remains eligible in the receiving-funding direction');
     check(fundingText.includes('+0.0600%'), 'Eight-hour funding spread uses each leg\'s actual period');
     await tick(1500);
-    for (let attempt = 0; attempt < 100; attempt++) {
-      if ((await history24('BTC').innerText()) === '+0.0300%' && historyRequests.at(-1).every(pair => pair.longKey.startsWith('gate:') && pair.shortKey.startsWith('binance:'))) break;
-      await tick(100);
-    }
-    check(historyRequests.at(-1).every(pair => pair.longKey.startsWith('gate:') && pair.shortKey.startsWith('binance:')), 'History requests preserve each funding opportunity direction');
+    check(historyRequests.length === readyHistoryReads && metricRequests.length === readyMetricReads, 'Reversing a cached direction reuses both history and metrics without another HTTP read');
     check(await history24('BTC').innerText() === '+0.0300%', 'Past 1 day sums settled short-minus-long funding in the displayed direction');
     check(await history24('ETH').innerText() === '0.0000%', 'Complete true-zero settlements display zero');
+    check(await rowFor('BTC').locator('[data-column="history7d"] strong').innerText() === '−0.1500%' && await rowFor('BTC').locator('[data-column="history30d"] strong').innerText() === '−0.8400%', 'Seven and thirty day net cashflows reverse with the displayed legs');
     const schedules = rowFor('BTC').locator('[data-column="funding"] .scanner-funding-rate');
     check((await schedules.nth(0).innerText()).includes('+0.0200%') && (await schedules.nth(0).innerText()).includes('8h'), 'Funding row shows the long leg original rate and period');
     check((await schedules.nth(1).innerText()).includes('+0.0400%') && (await schedules.nth(1).innerText()).includes('4h'), 'Funding row shows the short leg original rate and period');
@@ -200,6 +231,14 @@ async page => {
     check(await history24('BTC').innerText() === '+0.0300%', 'Mobile keeps the settled 24h column in the horizontal table');
     check(await page.locator('.scanner-table-wrap').evaluate(element => element.scrollWidth > element.clientWidth), '390px scanner table scrolls horizontally within its container');
     await checkDirection('BTC', 'Gate', 'Binance');
+    const mobileMetric = rowFor('BTC').locator('[data-column="volume"] details').first();
+    await mobileMetric.locator('summary').click();
+    const mobileEvidence = mobileMetric.locator('.scanner-metric-evidence');
+    const evidenceBounds = await mobileEvidence.boundingBox();
+    check(Boolean(evidenceBounds && evidenceBounds.x >= 0 && evidenceBounds.x + evidenceBounds.width <= 391), 'Metric source evidence remains inside the mobile viewport');
+    check((await mobileEvidence.innerText()).includes('official fixture ticker'), 'Mobile tap exposes the metric source');
+    await mobileMetric.getByRole('button', { name: '收起指标来源', exact: true }).click();
+    check(await mobileMetric.getAttribute('open') === null, 'Mobile metric evidence has an explicit close action');
     await rowFor('BTC').getByRole('button', { name: /^展开 BTC，/ }).click();
     await page.getByRole('tab', { name: '各平台报价', exact: true }).click();
     await detailEvidence.locator('.perp-funding-history summary').click();
@@ -214,11 +253,21 @@ async page => {
     check(await history24('BTC').innerText() === '−0.0300%', 'Returning to price mode reverses the historical cashflow with the row direction');
     let columns = await openMenu(/^显示列/);
     await columns.getByRole('checkbox', { name: '24h · 实际', exact: true }).uncheck();
+    await columns.getByRole('checkbox', { name: '30天 · 实际', exact: true }).uncheck();
     await columns.locator('summary').press('Escape');
     check(await page.locator('[data-column="history24h"]').count() === 0, 'A hidden history column is removed from both header and rows');
+    const onlySevenDayReads = historyRequests.length;
+    await tick(300000);
+    check(historyRequests.length > onlySevenDayReads, 'The visible seven-day column keeps the shared historical cache active');
+    columns = await openMenu(/^显示列/);
+    await columns.getByRole('checkbox', { name: '7天 · 实际', exact: true }).uncheck();
+    await columns.getByRole('checkbox', { name: '24h 成交额', exact: true }).uncheck();
+    await columns.getByRole('checkbox', { name: '持仓量', exact: true }).uncheck();
+    await columns.locator('summary').press('Escape');
     const historyBeforePause = historyRequests.length;
-    await tick(60000);
-    check(historyRequests.length === historyBeforePause, 'Hiding the only visible history column pauses history polling');
+    const metricsBeforePause = metricRequests.length;
+    await tick(300000);
+    check(historyRequests.length === historyBeforePause && metricRequests.length === metricsBeforePause, 'Hiding all related columns pauses both cache polls');
     await page.reload(); await waitBases(['BTC']);
     check(await page.locator('[data-column="history24h"]').count() === 0, 'Column preferences survive reload');
     await checkDirection('BTC', 'Binance', 'Gate');
@@ -271,7 +320,7 @@ async page => {
     await page.locator('.perp-scanner:visible').screenshot({ path: '.sites-runtime/perpetual-scanner-wide.png' });
     check(errors.length === 0, `Unexpected page errors: ${errors.join('; ')}`);
     check(externalRequests.length === 0, `Unexpected external requests were blocked: ${externalRequests.join(', ')}`);
-    return { passed: true, checks: ['opposite funding direction', '8h normalization and order', '24h cost estimate', 'settled 1-day/3-day direction and distinct windows', 'true zero versus incomplete history', 'pending polling and hidden-column pause', 'leg settlement evidence', 'independent threshold', 'missing and stale funding excluded', 'directional favorites', 'future settlements and periods', 'gross restoration', 'official categories and unknown evidence', 'empty category persistence', 'column persistence and reset', '7d/30d missing data', '1280px desktop and 390px horizontal table'], requests: Object.fromEntries(counts) };
+    return { passed: true, checks: ['opposite funding direction', '8h normalization and order', '24h cost estimate', 'settled 1-day/3-day/7-day/30-day distinct windows', 'same-cutoff backfill expansion', 'true zero versus incomplete history', 'five-minute cache refresh and hidden-column pause', 'cached direction reversal without fetch', 'compact amounts and independent currencies', 'metric source timestamps and stale/error/unsupported labels', 'leg settlement evidence', 'independent threshold', 'missing and stale funding excluded', 'directional favorites', 'future settlements and periods', 'gross restoration', 'official categories and unknown evidence', 'empty category persistence', 'column persistence and reset', '1280px desktop and 390px horizontal table'], requests: Object.fromEntries(counts) };
   } finally {
     page.off('pageerror', onPageError);
     await page.clock.resume();
