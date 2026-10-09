@@ -25,17 +25,23 @@ for (const item of Object.values(manifest.artifacts)) {
   if (createHash('sha256').update(content).digest('hex') !== item.sha256) throw new Error(`Artifact checksum mismatch: ${item.file}`);
   files.set(item.file, content);
 }
-async function currentMain() { return (await api('/commits/main'))?.sha === commit; }
-if (!await currentMain()) {
-  console.log('A newer main commit exists; this run will not change the deployment release.');
-  process.exit(0);
-}
 let release = await api(`/releases/tags/${manifest.tag}`);
+// Unpublished tag references are not reliably exposed by the by-tag endpoint.
+// Discover an interrupted draft through the authenticated release collection.
+if (!release) {
+  for (let page = 1; ; page++) {
+    const releases = await api(`/releases?per_page=100&page=${page}`);
+    if (!Array.isArray(releases)) throw new Error('Cannot list existing deployment drafts');
+    release = releases.find(item => item.tag_name === manifest.tag);
+    if (release || releases.length < 100) break;
+  }
+}
 if (release && !release.draft) {
   if ((await api(`/commits/${manifest.tag}`))?.sha !== commit || [...files.keys()].some(name => !release.assets.some(asset => asset.name === name))) throw new Error('Published immutable release is incomplete or targets another commit');
   console.log(`Immutable release ${manifest.tag} already exists; skipped publication.`);
   process.exit(0);
 }
+if (release && release.target_commitish !== commit) throw new Error('Existing draft targets a different immutable commit');
 release ??= await api('/releases', { method: 'POST', body: JSON.stringify({ tag_name: manifest.tag, target_commitish: commit, name: `Deploy ${commit.slice(0, 12)}`, draft: true, prerelease: false, make_latest: 'false', body: 'Verified Linux deployment artifacts. Installers retain configuration and data.' }) });
 for (const [name, content] of files) {
   const existing = release.assets.find(asset => asset.name === name);
@@ -48,11 +54,16 @@ for (const [name, content] of files) {
   const response = await fetch(upload, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/octet-stream' }, body: content, signal: AbortSignal.timeout(300_000) });
   if (!response.ok) throw new Error(`Upload failed (${response.status} ${name}); release remains draft`);
 }
-// The serialized publishing job rechecks main after all uploads. An older run
-// can leave a draft, but can never replace latest after a newer main commit.
-if (!await currentMain()) {
-  console.log('Main advanced during upload; complete assets remain draft.');
-  process.exit(0);
+// The publishing job holds one repository-wide concurrency lock. Every passing
+// main commit gets a complete immutable release, even if a later build fails.
+// Compare against the last published deployment so a delayed run cannot roll
+// latest backwards. Unknown non-deployment releases keep their latest status.
+const latest = await api('/releases/latest');
+let promote = latest === null;
+if (latest && /^deploy-[a-f0-9]{40}$/.test(latest.tag_name)) {
+  const comparison = await api(`/compare/${latest.tag_name.slice(7)}...${commit}`);
+  if (!comparison || !['ahead', 'identical', 'behind', 'diverged'].includes(comparison.status)) throw new Error('Cannot establish deployment ancestry; release remains draft');
+  promote = ['ahead', 'identical'].includes(comparison.status);
 }
-await api(`/releases/${release.id}`, { method: 'PATCH', body: JSON.stringify({ draft: false, prerelease: false, make_latest: 'true' }) });
-console.log(`Published complete immutable deployment ${manifest.tag}.`);
+await api(`/releases/${release.id}`, { method: 'PATCH', body: JSON.stringify({ draft: false, prerelease: false, make_latest: String(promote) }) });
+console.log(`Published complete immutable deployment ${manifest.tag}; latest promotion: ${promote}.`);

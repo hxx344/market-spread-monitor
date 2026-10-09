@@ -200,7 +200,15 @@ ci_release_resolve() {
   CI_RELEASE_WORK=$workspace
   mkdir -p -- "$workspace" || return 1
   manifest="$workspace/release-manifest.json"
-  if ! curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+  if [[ -n ${PROJECT_DEPLOY_MANIFEST_FILE:-} ]]; then
+    [[ -f "$PROJECT_DEPLOY_MANIFEST_FILE" && ! -L "$PROJECT_DEPLOY_MANIFEST_FILE" &&
+       $(stat -c %u "$PROJECT_DEPLOY_MANIFEST_FILE") == "$EUID" ]] || {
+      printf '[CI] 预检清单不存在或不属于当前安装用户。\n' >&2; return 1;
+    }
+    if [[ "$PROJECT_DEPLOY_MANIFEST_FILE" != "$manifest" ]]; then
+      cp -- "$PROJECT_DEPLOY_MANIFEST_FILE" "$manifest" || return 1
+    fi
+  elif ! curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
     --retry 3 --connect-timeout 15 --max-time 90 --max-filesize 1048576 \
     "https://github.com/$repository/releases/latest/download/release-manifest.json" -o "$manifest"; then
     printf '[CI] %s 暂无可用部署清单或下载失败；现有服务保持原样。\n' "$repository" >&2
@@ -630,7 +638,7 @@ main() {
   base=/opt/market-spread-monitor
   config=/etc/market-spread-monitor.env
   unit=/etc/systemd/system/market-spread-monitor.service
-  local deploy_mode=${PROJECT_DEPLOY_MODE:-source}
+  local deploy_mode=${PROJECT_DEPLOY_MODE:-ci}
   local source_dir='' requested_port='' architecture node_name runtime release_id first_install=0 rebuild=0 cleanup_only=0 profile_requested=0 dependency_key='' candidate='' reused=0
   local input_dir='' runtime_key='' build_key='' build_source='' reused_build=0 candidate_sizes='' candidate_valid=0 candidate_dependencies_valid=0 candidate_source_valid=1 install_described=0 npm_version unit_changed=0 phase
   scratch='' release='' new_release='' building_release='' switching=0 old_current='' was_active=0
@@ -1020,7 +1028,7 @@ main() {
 if (( EUID != 0 )); then
   command -v sudo >/dev/null || die '请使用 root 运行，或先安装 sudo'
   # Pass the fully parsed functions, not stdin or $0: both differ under curl | bash.
-  sudo env PROJECT_DEPLOY_MODE="${PROJECT_DEPLOY_MODE:-source}" bash -c "$(declare -f)"$'\nmain "$@"' -- "$@"
+  sudo env PROJECT_DEPLOY_MODE="${PROJECT_DEPLOY_MODE:-ci}" PROJECT_DEPLOY_MANIFEST_FILE="${PROJECT_DEPLOY_MANIFEST_FILE:-}" bash -c "$(declare -f)"$'\nmain "$@"' -- "$@"
 else
   main "$@"
 fi

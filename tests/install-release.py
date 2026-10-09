@@ -53,7 +53,9 @@ with tempfile.TemporaryDirectory(prefix=name + '-ci-fixture-') as temporary:
   else command curl "$@"; fi
 }
 ''' + installer.read_text())
-    environment = {**os.environ, 'PROJECT_DEPLOY_MODE': 'ci', 'RELEASE_FIXTURE': str(fixture)}
+    environment = {**os.environ, 'RELEASE_FIXTURE': str(fixture)}
+    environment.pop('PROJECT_DEPLOY_MODE', None)
+    environment.pop('PROJECT_DEPLOY_MANIFEST_FILE', None)
     def install(success=True):
         result = subprocess.run(['bash', str(wrapper), '--port', '31877' if kind == 'monitor' else '3179'], env=environment, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         print(result.stdout, flush=True)
@@ -72,6 +74,9 @@ with tempfile.TemporaryDirectory(prefix=name + '-ci-fixture-') as temporary:
     original_pid = pid()
     assert int(original_pid) > 0
     downloads = (fixture / 'downloads').read_text().count('.tar.gz')
+    # The hub preflight hands its exact root-owned manifest to the installer.
+    environment['PROJECT_DEPLOY_MANIFEST_FILE'] = str(manifest_path)
+    manifest_downloads = (fixture / 'downloads').read_text().count('release-manifest.json')
     install()
     assert pid() == original_pid and (root / 'current').resolve() == current
     assert (fixture / 'downloads').read_text().count('.tar.gz') == downloads
@@ -115,5 +120,12 @@ with tempfile.TemporaryDirectory(prefix=name + '-ci-fixture-') as temporary:
     run('systemctl', 'is-active', '--quiet', name)
     assert digest(config) == configuration
     assert sentinel.read_text() == 'preserve-data'
+    assert (fixture / 'downloads').read_text().count('release-manifest.json') == manifest_downloads
+    if kind == 'monitor':
+        runtime = current / '.runtime/bin/node'
+        run('systemd-run', '--quiet', '--wait', '--pipe', '--collect', '--property=EnvironmentFile=' + str(config), str(runtime), str(current / 'deploy/check-install.mjs'), '--quiet')
+    else:
+        health = run('curl', '--fail', '--silent', '--retry', '10', '--retry-connrefused', '--retry-delay', '1', 'http://127.0.0.1:3179/api/health')
+        assert json.loads(health)['release'] == manifest['commit']
     sentinel.unlink()
     print('CI installation passed: migration/fresh install, no-op, same-content commit, checksum rejection, startup rollback and data/config preservation.')
