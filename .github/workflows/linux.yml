@@ -32,6 +32,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24.15.0"
-      - run: bash -n deploy/install.sh
-      - run: shellcheck deploy/install.sh server/entrypoint.sh
+      - run: bash -n deploy/install.sh && bash -n deploy/profile-install.sh
+      - run: shellcheck deploy/install.sh deploy/profile-install.sh server/entrypoint.sh
       - run: node tests/install-smoke.mjs

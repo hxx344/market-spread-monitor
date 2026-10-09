@@ -27,6 +27,26 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/market-spread-monitor/main/d
 
 账号密码、告警配置和数据目录始终保留。配置校验不通过时，正在运行的旧服务不会被停止。
 
+### 测量部署耗时
+
+在目标服务器运行以下脚本，实际执行一次正常增量部署，并按耗时从高到低汇总各阶段：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hxx344/market-spread-monitor/main/deploy/profile-install.sh | bash
+```
+
+如果当前版本没有变化，依赖安装和构建会显示“已复用”。需要测量完整的依赖重装与构建时，显式加入 `--rebuild`：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hxx344/market-spread-monitor/main/deploy/profile-install.sh | bash -s -- --rebuild
+```
+
+`--rebuild` 保留已有配置、数据及 npm 下载缓存，完成后会切换并重启服务；它不等于一台全新服务器的首次安装。也可在原 `install.sh` 命令后直接添加 `--profile`，与 `--source-dir`、`--port`、`--cleanup` 配合使用。
+
+报告列出总耗时、退出码，以及每阶段的秒数、占比和状态，覆盖版本查询、源码下载、Node 准备、依赖安装或复制、编译缓存、Next 构建（含类型检查）、权限处理、服务切换、健康检查、容量统计和清理/回滚。同一阶段多次执行时累加，阶段时间互不重叠；未执行和明确跳过分别显示，失败时仍输出已经测得的结果并保留原退出码。
+
+下载部署脚本单独计时；阶段总耗时从提权后的安装前置检查开始，不包含下载诊断入口和等待输入 sudo 密码的时间。报告保存在输出指示的 `/tmp/market-spread-profile.XXXXXXXX/summary.txt`，目录和文件仅当前执行用户（正常为 root）可读，可用 `sudo cat` 查看。报告只含固定阶段、耗时及状态，不保存安装输出、登录密码或环境配置；排查时粘贴末尾耗时汇总即可。
+
 ### 构建优化
 
 服务器只安装全部运行依赖，以及 Next 构建需要的 TypeScript、类型声明和 Tailwind 工具；不安装 Vite、Vinext、Wrangler、ESLint、Drizzle Kit 等当前 Linux 路径未使用的开发工具。`tsconfig.linux.json` 保留应用类型检查，排除未使用的 Cloudflare、Vite 和数据库生成配置；被应用实际导入的文件仍参与检查和构建内容判断。仓库的完整开发依赖保留。

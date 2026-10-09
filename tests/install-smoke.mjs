@@ -21,17 +21,101 @@ const buildWorkspace = "/opt/market-spread-monitor/build";
 const unitPath = "/etc/systemd/system/market-spread-monitor.service";
 let headers;
 const timings = [];
+const profileDirectories = new Set();
+const profiles = new Map();
+const profilePhases = new Set([
+  "preflight", "startup_cleanup", "system_packages", "source_identity", "node_runtime", "source_download",
+  "fingerprints", "fast_probe", "service_setup", "space_check", "source_copy", "config_check", "deps_copy",
+  "artifact_copy", "compiler_cache", "build_workspace", "deps_install", "next_build", "build_validate",
+  "permissions", "unit_prepare", "service_switch", "health_check", "success_record", "final_cleanup",
+  "describe", "rollback", "exit_cleanup",
+]);
+const profileSkipReasons = new Set(["unchanged", "reused", "not_needed", "cache_unavailable", "space_low"]);
 async function run(command, args) {
   return exec(command, args, { timeout: 600_000, maxBuffer: 8_000_000 });
 }
-async function install(source, succeeds = true, { script = installer, cleanup = false } = {}) {
+async function readProfile(output, exitCode) {
+  const matches = [...output.matchAll(/^计时报告：(\/tmp\/market-spread-profile\.[A-Za-z0-9]{8}\/summary\.txt)\s*$/gm)];
+  assert.equal(matches.length, 1, "Profile mode must print exactly one report path");
+  const summaryPath = matches[0][1];
+  const directory = summaryPath.slice(0, -"/summary.txt".length);
+  profileDirectories.add(directory);
+  const eventsPath = join(directory, "events.tsv");
+  const permissions = (await run("sudo", ["stat", "-c", "%a:%u:%F", "--", directory, summaryPath, eventsPath])).stdout.trim().split("\n");
+  assert.deepEqual(permissions, ["700:0:directory", "600:0:regular file", "600:0:regular file"], "Reports must be private root-owned regular files in a private directory");
+  const summary = (await run("sudo", ["cat", "--", summaryPath])).stdout;
+  const eventsText = (await run("sudo", ["cat", "--", eventsPath])).stdout;
+  const reportText = summary + eventsText;
+  const password = (await config()).match(/^APP_PASSWORD=(.*)$/m)?.[1];
+  assert.ok(password, "The installed password must be available for report redaction verification");
+  const secrets = [password, "install-storage-only-secret", ...Object.entries(process.env)
+    .filter(([key, value]) => /TOKEN|PASSWORD|SECRET/i.test(key) && value && value.length >= 8)
+    .map(([, value]) => value)];
+  for (const secret of secrets) assert.equal(reportText.includes(secret), false, "A deployment report must not contain configuration passwords or environment secrets");
+  assert.ok(summary.includes(`部署退出码：${exitCode}\n`), "The summary must preserve the installer exit code");
+  assert.ok(/^总耗时：\d+\.\d{3} 秒$/m.test(summary), "The summary must include total elapsed time");
+  const phaseRows = new Map();
+  const table = summary.trim().split("\n").filter(line => line.includes("\t"));
+  assert.equal(table.shift(), "秒数\t占比\t状态\t阶段");
+  for (const line of table) {
+    const fields = line.split("\t");
+    assert.equal(fields.length, 4, "Each summary phase must have exactly four fields");
+    const [seconds, share, status, label] = fields;
+    assert.ok(/^\d+\.\d{3}$/.test(seconds), "Summary duration must be seconds with millisecond precision");
+    assert.ok(/^\d+(?:\.\d+)?%$/.test(share), "Summary share must be a percentage");
+    const id = label.match(/ \[([a-z_]+)\]$/)?.[1];
+    assert.ok(profilePhases.has(id), "Summary phase identifiers must come from the fixed allowlist");
+    assert.equal(phaseRows.has(id), false, "Summary phases must not be duplicated");
+    phaseRows.set(id, { seconds: Number(seconds), status });
+  }
+  assert.deepEqual(new Set(phaseRows.keys()), profilePhases, "The summary must distinguish all executed and skipped phases");
+  const events = eventsText.trim().split("\n").map(line => {
+    const fields = line.split("\t");
+    assert.equal(fields.length, 4, "Profile events must contain only four fixed fields");
+    const [type, milliseconds, id, status] = fields;
+    assert.ok(/^\d+$/.test(milliseconds), "Event times must be integer milliseconds");
+    if (type === "phase") {
+      assert.ok(profilePhases.has(id), "Event phases must come from the fixed allowlist");
+      assert.ok(/^\d+$/.test(status), "Phase status must be an exit code");
+    } else if (type === "skip") {
+      assert.ok(profilePhases.has(id), "Skipped phases must come from the fixed allowlist");
+      assert.ok(profileSkipReasons.has(status), "Skip reasons must come from the fixed allowlist");
+    } else {
+      assert.equal(type, "end", "Profile events must never contain command output or arbitrary metadata");
+      assert.equal(id, String(exitCode), "The final event must preserve the installer exit code");
+      assert.equal(status, "0");
+    }
+    return { type, milliseconds: Number(milliseconds), id, status };
+  });
+  assert.equal(events.filter(event => event.type === "end").length, 1);
+  assert.equal(events.at(-1).type, "end", "Reporting must finish after installer cleanup");
+  for (let index = 1; index < events.length; index++) assert.ok(events[index].milliseconds >= events[index - 1].milliseconds, "Profile event times must never run backwards");
+  assert.equal(events.filter(event => event.type === "phase").at(-1)?.id, "exit_cleanup", "The report must include exit cleanup");
+  return { events, phases: phaseRows };
+}
+function assertProfilePhases(output, { completed = [], failed = [], skipped = {} }) {
+  const profile = profiles.get(output);
+  assert.ok(profile, "Expected a verified deployment report");
+  for (const id of [...completed, ...failed]) assert.ok(profile.events.some(event => event.type === "phase" && event.id === id), `Expected execution of profile phase ${id}`);
+  for (const id of completed) assert.equal(profile.phases.get(id).status, "完成", `Expected successful profile phase ${id}`);
+  for (const id of failed) assert.ok(/^失败（退出码 [1-9]\d*）$/.test(profile.phases.get(id).status), `Expected failed profile phase ${id}`);
+  for (const [id, reason] of Object.entries(skipped)) {
+    assert.ok(profile.events.some(event => event.type === "skip" && event.id === id && event.status === reason), `Expected profile phase ${id} skipped because ${reason}`);
+    assert.equal(profile.events.some(event => event.type === "phase" && event.id === id), false, `Skipped profile phase ${id} must not be reported as executed`);
+    assert.ok(/^(?:跳过|已复用)（.+）$/.test(profile.phases.get(id).status), `Expected skipped status for profile phase ${id}`);
+    assert.equal(profile.phases.get(id).seconds, 0, `Skipped profile phase ${id} must not claim execution time`);
+  }
+}
+async function install(source, succeeds = true, { script = installer, cleanup = false, profile = false } = {}) {
   const started = Date.now();
   let result, failed = false;
   try {
     // Exercise the documented pipe form and automatic sudo elevation, not just bash file.sh.
-    result = await run("bash", ["-o", "pipefail", "-c", 'cat "$1" | bash -s -- --source-dir "$2" --port 31877 "${@:3}"', "installer-test", script, source, ...(cleanup ? ["--cleanup"] : [])]);
+    result = await run("bash", ["-o", "pipefail", "-c", 'cat "$1" | bash -s -- --source-dir "$2" --port 31877 "${@:3}"', "installer-test", script, source, ...(cleanup ? ["--cleanup"] : []), ...(profile ? ["--profile"] : [])]);
   } catch (error) { result = error; failed = true; }
   const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.replace(/登录密码：[^\r\n]*/g, "登录密码：[redacted]");
+  if (profile) profiles.set(output, await readProfile(output, failed ? result.code : 0));
+  else assert.equal(output.includes("计时报告："), false, "Ordinary installation must not create a timing report");
   assert.equal(failed, !succeeds, output.slice(-6000));
   assert.equal(existsSync(buildWorkspace), false, "Completed or failed installation must not leave a third dependency/build workspace");
   timings.push({ source: source.split("/").at(-1), seconds: Number(((Date.now() - started) / 1000).toFixed(2)), success: !failed });
@@ -170,7 +254,8 @@ else {
 }
 `);
   console.log("Installer: fresh install through stdin and sudo");
-  const coldBuild = await install(baseline);
+  const coldBuild = await install(baseline, true, { profile: true });
+  assertProfilePhases(coldBuild, { completed: ["deps_install", "next_build", "permissions", "health_check", "success_record", "exit_cleanup"] });
   logBuildEvidence("cold", coldBuild);
   await active();
   const originalConfig = await config();
@@ -213,7 +298,8 @@ else {
 
   console.log("Installer: unchanged source (even after touch) performs no build, install, release switch or restart");
   await utimes(join(baseline, "README.md"), new Date(), new Date());
-  const unchanged = await install(baseline);
+  const unchanged = await install(baseline, true, { profile: true });
+  assertProfilePhases(unchanged, { completed: ["exit_cleanup"], skipped: { deps_install: "reused", next_build: "reused" } });
   await active();
   assert.equal(firstRelease, await current());
   assert.equal(firstPid, await pid());
@@ -301,7 +387,8 @@ else {
   await writeFile(join(baseline, "install-fixture-mode"), "check-build-cache");
   await writeFile(routePath, routeSource("upgraded-compiled-route"));
   await writeFile(join(baseline, "public/install-version-marker.txt"), "upgraded-source");
-  const upgraded = await install(baseline);
+  const upgraded = await install(baseline, true, { profile: true });
+  assertProfilePhases(upgraded, { completed: ["deps_copy", "compiler_cache", "next_build", "health_check", "success_record", "exit_cleanup"], skipped: { deps_install: "reused" } });
   assert.match(upgraded, /Installer cache: independent Webpack packs, \.rscinfo and \.tsbuildinfo preserved before compilation/);
   assert.match(upgraded.replace(/\u001b\[[0-9;]*m/g, ""), /\bcached modules\b[^\r\n]*\b[1-9][0-9]* modules?\b/, "The warm compilation must report actual cached modules, not merely copied cache files");
   logBuildEvidence("warm", upgraded);
@@ -363,7 +450,8 @@ else {
   console.log("Installer: build failure keeps the old process running");
   await writeFile(join(baseline, "install-fixture-mode"), "fail-build");
   const pidBefore = await pid();
-  const failedBuildOutput = await install(baseline, false);
+  const failedBuildOutput = await install(baseline, false, { profile: true });
+  assertProfilePhases(failedBuildOutput, { completed: ["deps_copy", "exit_cleanup"], failed: ["next_build"], skipped: { deps_install: "reused" } });
   assert.ok(!failedBuildOutput.includes("正在安装依赖"));
   assert.equal(await current(), secondRelease);
   assert.equal(await pid(), pidBefore);
@@ -418,7 +506,8 @@ else {
   const compiledSource = await readFile(join(thirdRelease, ".install-build-source"), "utf8");
   const buildBeforeBackend = await buildCount();
   await writeFile(join(baseline, "server/linux.mjs"), originalServer + "\n// Independent server entry update.\n");
-  const backendOnly = await install(baseline);
+  const backendOnly = await install(baseline, true, { profile: true });
+  assertProfilePhases(backendOnly, { completed: ["deps_copy", "artifact_copy", "health_check", "success_record", "exit_cleanup"], skipped: { deps_install: "reused", next_build: "reused" } });
   const backendRelease = await current();
   assert.notEqual(backendRelease, thirdRelease);
   assert.match(backendOnly, /Next 构建输入未变/);
@@ -492,9 +581,13 @@ else {
   assert.ok(buildRecords.length >= 2);
   assert.ok(buildRecords.every(record => record.cwd === buildWorkspace), "All build attempts, including failed ones, use the stable workspace path");
   console.log("Complete installer timings:", JSON.stringify(timings));
-  console.log("Installer smoke passed: Linux dependency profile, no-op updates, unchanged service unit, cache reuse, storage reclamation, space/inode preflight, config-only restart, recovery, rollback, schema migration and shared Feishu persistence; no Feishu messages sent.");
+  console.log("Installer smoke passed: private timing reports, Linux dependency profile, no-op updates, unchanged service unit, cache reuse, storage reclamation, space/inode preflight, config-only restart, recovery, rollback, schema migration and shared Feishu persistence; no Feishu messages sent.");
 } finally {
   await run("sudo", ["systemctl", "stop", "market-spread-monitor.service"]).catch(() => {});
+  for (const directory of profileDirectories) {
+    assert.ok(/^\/tmp\/market-spread-profile\.[A-Za-z0-9]{8}$/.test(directory), "Only reports created by this smoke test may be removed");
+    await run("sudo", ["rm", "-rf", "--one-file-system", "--", directory]);
+  }
   assert.ok(resolve(scratch).startsWith(resolve(tmpdir()) + "/market-spread-installer-test-"));
   await rm(scratch, { recursive: true, force: true });
 }
