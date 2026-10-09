@@ -3,11 +3,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -20,9 +21,37 @@ jobs:
       - run: npm test
       # build:linux runs the explicit TypeScript check before both Vite builds.
       - run: npm run build:linux
-      - run: node tests/linux-smoke.mjs
+      - run: node scripts/pack-release.mjs
+      - name: Exercise the extracted production runtime
+        run: |
+          mkdir "$RUNNER_TEMP/monitor-package"
+          tar -xzf release-output/*.tar.gz -C "$RUNNER_TEMP/monitor-package"
+          MONITOR_RELEASE_ROOT="$RUNNER_TEMP/monitor-package" node tests/linux-smoke.mjs
       - run: systemd-analyze verify deploy/market-spread-monitor.service
+      - uses: actions/upload-artifact@v4
+        with:
+          name: monitor-release
+          path: release-output/
+          retention-days: 7
+  arm-runtime:
+    needs: verify
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.15.0"
+      - uses: actions/download-artifact@v4
+        with:
+          name: monitor-release
+          path: release-output/
+      - run: |
+          mkdir "$RUNNER_TEMP/monitor-package"
+          tar -xzf release-output/*.tar.gz -C "$RUNNER_TEMP/monitor-package"
+          MONITOR_RELEASE_ROOT="$RUNNER_TEMP/monitor-package" node tests/linux-smoke.mjs
   one-click-install:
+    needs: verify
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -32,4 +61,42 @@ jobs:
           node-version: "24.15.0"
       - run: bash -n deploy/install.sh && bash -n deploy/profile-install.sh
       - run: shellcheck deploy/install.sh deploy/profile-install.sh server/entrypoint.sh
+      - run: python3 deploy/test-release.py -v
       - run: node tests/install-smoke.mjs
+      - uses: actions/download-artifact@v4
+        with:
+          name: monitor-release
+          path: release-output/
+      - run: sudo --preserve-env=GITHUB_ACTIONS python3 tests/install-release.py monitor
+  fresh-ci-install:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: monitor-release
+          path: release-output/
+      - run: sudo --preserve-env=GITHUB_ACTIONS python3 tests/install-release.py monitor
+  publish:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: [verify, arm-runtime, one-click-install, fresh-ci-install]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: deployment-release-main
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.15.0"
+      - uses: actions/download-artifact@v4
+        with:
+          name: monitor-release
+          path: release-output/
+      - run: node scripts/publish-release.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

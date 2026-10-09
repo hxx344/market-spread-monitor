@@ -17,7 +17,7 @@ const base = `http://127.0.0.1:${port}`;
 const headers = { Authorization: `Basic ${Buffer.from("admin:smoke-test-password").toString("base64")}` };
 let child, exited, output = "";
 function start() {
-  child = spawn(process.platform === "linux" ? "bash" : process.execPath, process.platform === "linux" ? ["server/entrypoint.sh"] : ["--experimental-strip-types", "server/linux.mjs"], { cwd: process.cwd(), env: { ...process.env, MONITOR_NODE: process.execPath, NODE_ENV: "production", HOST: "127.0.0.1", PORT: String(port), APP_USERNAME: "admin", APP_PASSWORD: "smoke-test-password", ALERT_DATA_DIR: directory, OIL_FEISHU_WEBHOOK_URL: "", OIL_FEISHU_WEBHOOK_SECRET: "", OIL_POLL_INTERVAL_SECONDS: "10" }, stdio: process.platform === "win32" ? ["ignore", "pipe", "pipe", "ipc"] : ["ignore", "pipe", "pipe"] });
+  child = spawn(process.platform === "linux" ? "bash" : process.execPath, process.platform === "linux" ? ["server/entrypoint.sh"] : ["--experimental-strip-types", "server/linux.mjs"], { cwd: process.env.MONITOR_RELEASE_ROOT ?? process.cwd(), env: { ...process.env, MONITOR_NODE: process.execPath, NODE_ENV: "production", HOST: "127.0.0.1", PORT: String(port), APP_USERNAME: "admin", APP_PASSWORD: "smoke-test-password", ALERT_DATA_DIR: directory, OIL_FEISHU_WEBHOOK_URL: "", OIL_FEISHU_WEBHOOK_SECRET: "", OIL_POLL_INTERVAL_SECONDS: "10" }, stdio: process.platform === "win32" ? ["ignore", "pipe", "pipe", "ipc"] : ["ignore", "pipe", "pipe"] });
   for (const stream of [child.stdout, child.stderr]) stream.on("data", data => { output = (output + data.toString()).slice(-16000); });
   exited = new Promise(accept => child.once("exit", accept));
 }
@@ -142,7 +142,7 @@ try {
   const sharedRestarted = await fetch(sharedEndpoint, { headers }).then(response => response.json());
   assert.equal(sharedRestarted.revision, 1); assert.equal(sharedRestarted.webhookConfigured, true); assert.equal(sharedRestarted.signingSecretConfigured, true);
   if (process.platform === "linux") {
-    const contender=spawn("bash",["server/entrypoint.sh"],{ env:{...process.env, MONITOR_NODE:process.execPath, ALERT_DATA_DIR:directory, HOST:"127.0.0.1", PORT:String(port), APP_USERNAME:"admin", APP_PASSWORD:"smoke-test-password"}, stdio:"ignore" });
+    const contender=spawn("bash",["server/entrypoint.sh"],{ cwd:process.env.MONITOR_RELEASE_ROOT ?? process.cwd(), env:{...process.env, MONITOR_NODE:process.execPath, ALERT_DATA_DIR:directory, HOST:"127.0.0.1", PORT:String(port), APP_USERNAME:"admin", APP_PASSWORD:"smoke-test-password"}, stdio:"ignore" });
     assert.equal(await new Promise(resolve=>contender.once("exit",resolve)), 75, "Second process must fail specifically on the running directory lock");
     child.kill("SIGKILL"); await exited;
     start(); await ready();

@@ -48,3 +48,5 @@ next-env.d.ts
 /.codex/
 /outputs/
 /work/
+
+/release-output/
