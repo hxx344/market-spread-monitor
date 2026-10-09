@@ -28,7 +28,7 @@
 
 四张概览卡片各有独立的“运行监控”开关。关闭某个监控会停止该模块的后台行情采集、自动告警及前端刷新；关闭合约价差还会断开行情连接并暂停持仓跟踪。已保存配置、行情历史与持仓记录继续保留，重新开启后立即恢复采集。关闭会卸载对应详情面板，请先保存正在编辑的设置。
 
-开关保存在现有 `ALERT_DATA_DIR/monitor-control.json`，刷新页面、重启服务和升级后继续生效；旧安装默认全部开启。多页面每 10 秒同步状态，返回可见页面时立即补查。网页预览不具备常驻服务控制能力，会显示不可操作的“预览模式”。`GET /api/monitors` 返回各模块的 `runtime`；`PUT /api/monitors/{oil|cl-xau|hynix|perpetual}/runtime` 使用 `{ "enabled": false, "revision": 0 }` 修改对应开关，版本冲突返回 409，关闭模块的业务接口返回 423。
+开关保存在现有 `ALERT_DATA_DIR/monitor-control.json`，刷新页面、重启服务和升级后继续生效；旧安装默认全部开启。多页面每 10 秒同步状态，返回可见页面时立即补查。开发与正式模式均使用常驻后台控制监控。`GET /api/monitors` 返回各模块的 `runtime`；`PUT /api/monitors/{oil|cl-xau|hynix|perpetual}/runtime` 使用 `{ "enabled": false, "revision": 0 }` 修改对应开关，版本冲突返回 409，关闭模块的业务接口返回 423。
 
 ## Bybit / Binance 原油资金费四腿模拟
 
@@ -40,7 +40,7 @@
 
 曲线区分累计资金费、资金费减开仓费、预计往返 maker 成本和模拟平仓后总净额；后者为资金费加四腿价格盈亏，再减开仓费与该时点预计平仓费。收益率以初始四腿总名义为分母，不是保证金收益率。开仓点差同时列出两所各自的 BZ / CL 价差、组合差及同合约跨所点差，逐腿明细可核对方向、价格、名义、资金费和开平仓手续费。开仓点差是建仓价格关系，不作为额外收益再加一次。
 
-首次回填最近 60 天小时标记价，此后每 5 分钟重叠增量更新，复用现有原油监控开关和 SQLite 数据库。新增 `GET /api/monitors/oil/funding-hedge/prices` 在 Linux 只读已采集数据，Next / Sites 网页版按需读取并缓存；结算复用两所既有 `exchanges/{exchange}/funding-history`。缺开仓价时不建立模拟；缺估值小时则断开曲线，某次结算缺价时其后的完整累计资金费保持不可用。缺查询覆盖或无结算记录不填零，来源失败保留旧记录与原采集时间。查询覆盖只表示已查范围，不能独立证明上游没有遗漏记录。
+首次回填最近 60 天小时标记价，此后每 5 分钟重叠增量更新，复用现有原油监控开关和 SQLite 数据库。`GET /api/monitors/oil/funding-hedge/prices` 只读已采集数据；结算复用两所既有 `exchanges/{exchange}/funding-history`。缺开仓价时不建立模拟；缺估值小时则断开曲线，某次结算缺价时其后的完整累计资金费保持不可用。缺查询覆盖或无结算记录不填零，来源失败保留旧记录与原采集时间。查询覆盖只表示已查范围，不能独立证明上游没有遗漏记录。
 
 ## Linux 一键部署和升级
 
@@ -54,7 +54,7 @@ Binance 两种油及 Bybit CL 使用桶/盎司。Bybit BZ 使用“报价比”�
 
 金油比的“飞书告警梯度”位于概览卡片下方，使用统一飞书机器人。四种交易所与油种组合各自保存规则并由后台独立检查，切换页面不改变其他组告警；切换时也保留各自未保存草稿。新建告警默认关闭、没有预设阈值；每组可添加最多 50 档向上或向下规则，阈值与回差使用当前组合显示的比值单位，每档独立设置冷却与开关。后台每 30 秒检查，新报价落盘后立即判断；持续越线只发送一次，需越过完整回差且冷却结束才能再次提醒。Binance 配置继续保存在 `ALERT_DATA_DIR/cl-xau/monitor.json` 与 `ALERT_DATA_DIR/cl-xau/bz/monitor.json`，Bybit 则保存在 `cl-xau/bybit/monitor.json` 与 `cl-xau/bybit/bz/monitor.json`。配置、触发状态和最近 100 条发送记录独立保存，原有配置保留，重启继续生效；关闭金油比运行监控会同时暂停四种采集与告警，报价过期、来源不匹配或待发信号撤回时，排队中尚未发出的提醒会取消。通知显示交易所和油种，资金费缺失不影响金油比告警。
 
-Binance CL 保留 `/api/monitors/cl-xau/{quote,history,funding,status,config,events}`，BZ 保留 `/api/monitors/cl-xau/bz/{quote,history,funding,status,config,events}`。Bybit 对应为 `/api/monitors/cl-xau/bybit/{quote,history,funding,status,config,events}` 与 `/api/monitors/cl-xau/bybit/bz/{quote,history,funding,status,config,events}`。常驻服务支持读取与保存独立告警；网页预览仅提供行情，告警状态返回不可用。
+Binance CL 保留 `/api/monitors/cl-xau/{quote,history,funding,status,config,events}`，BZ 保留 `/api/monitors/cl-xau/bz/{quote,history,funding,status,config,events}`。Bybit 对应为 `/api/monitors/cl-xau/bybit/{quote,history,funding,status,config,events}` 与 `/api/monitors/cl-xau/bybit/bz/{quote,history,funding,status,config,events}`。常驻服务支持读取与保存独立告警。
 
 缺腿或异常时间不会生成有效比值，失败保留 SQLite 中的旧值及原时间，不跨交易所回退。界面展示北京时间和明确的过期状态。新增模块不改变原有监控开关，旧配置自动补入开启的 `cl-xau`。行情使用 [Binance 市场数据接口](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data)以及 Bybit 的[标记价 K 线](https://bybit-exchange.github.io/docs/v5/market/mark-kline)、[实时报价](https://bybit-exchange.github.io/docs/v5/market/tickers)和[已结算资金费](https://bybit-exchange.github.io/docs/v5/market/history-fund-rate)接口。
 
@@ -112,7 +112,7 @@ Linux 服务持续采集并写入 `ALERT_DATA_DIR/market.sqlite`：海力士报�
 
 “合约价差”模块在常驻 Node 后台自动发现各平台正在交易的线性永续合约，优先使用 WebSocket 汇总行情。Binance 使用 5 秒全市场盘口流；Kraken 使用公开 Futures ticker 流，接入 flexible linear USD 永续，保留完整买卖价与源时间，不把未确认的资金费金额当作费率；Lighter / RH-Lighter 使用汇总流并定期重取真实快照；Hyperliquid / Entropy 保留盘口推送并用 WS 请求补充确认。Bybit / Aster 使用 WS 加每 5 秒一次批量 REST 盘口快照；Bitget 的 BTC / ETH / SOL 使用 WS，全部合约每 5 秒读取一次批量 ticker 快照，避免高频全市场消息挤占小服务器资源。实际更新周期另含接口响应时间。REST 同时用于合约目录、计价单位与资金费周期。市场目录每 5 分钟刷新，连接失败或只有心跳而无有效行情时自动重连。仅接入公共行情，无需交易账户或钱包。
 
-浏览器通过同源、已有登录保护的 SSE 每秒接收变化字段，首次连接同时读取后台快照，避免代理缓冲推送时一直空白；推送和完整快照均支持 gzip。帧序号检测遗漏后立即重建数据基线，不再定时重传全市场；代理不支持 SSE 时降级为每 5 秒读取后台快照，不重复访问交易所。快照请求超过 12 秒会显示超时并释放请求，5 秒后自动重试；手动刷新也可重试，迟到响应不会覆盖恢复后的行情。登录失效、HTTP 错误或无效数据会显示具体原因。切换面板或隐藏页面暂停浏览器更新，后台采集继续运行。开发网页预览无常驻采集时明确显示未连接，请使用下方 Windows 完整后台命令，或 Linux 一键部署命令启动。
+浏览器通过同源、已有登录保护的 SSE 每秒接收变化字段，首次连接同时读取后台快照，避免代理缓冲推送时一直空白；推送和完整快照均支持 gzip。帧序号检测遗漏后立即重建数据基线，不再定时重传全市场；代理不支持 SSE 时降级为每 5 秒读取后台快照，不重复访问交易所。快照请求超过 12 秒会显示超时并释放请求，5 秒后自动重试；手动刷新也可重试，迟到响应不会覆盖恢复后的行情。登录失效、HTTP 错误或无效数据会显示具体原因。切换面板或隐藏页面暂停浏览器更新，后台采集继续运行。下方本地开发、正式启动和 Linux 一键部署命令均包含常驻采集。
 
 盘口毛价差为 `(卖出平台买一价 / 买入平台卖一价 − 1) × 100%`；标记价模式只反映估值差。报价按每一单位基础资产归一，明确支持的 `1000` 等倍数合约会换算。按官方元数据隔离同简称的股票、商品、Pre-IPO 和不同代币；已核实的 Bybit / Entropy 四只每股合约仍可配对，具体规则见 [标的身份说明](modules/perpetual/IDENTITY_RULES.md)。默认只比较相同计价币。开启跨计价币后，按现货买卖汇率将两腿换算至 USDT；USDC / USD1 / USDG 使用 Gate 现货盘口，USD 使用 Kraken USDT/USD 买卖价反向换算；缺失或超过 3 分钟的组合不参与排名，不假定任何外币兑价为 1。汇率在后台每分钟有界刷新并保留源时间。价格与资金费各自保留更新时间，资金费更新不会刷新旧盘口；超过 30 秒的价格、两腿时间差超过 5 秒的组合不参与有效排行，缺失字段显示 `—`。资金费差按每腿实际周期折算为 8 小时值，保留零费率，缺少周期时不估算。Bybit 的 WS 只推送变化字段；现有每 5 秒批量 ticker 请求同时确认资金费率、周期和下次结算时间，避免未变化的费率被误判过期，不增加请求。资金费率超过 5 分钟没有有效确认时仍显示 `—`。
 
@@ -173,11 +173,11 @@ npm run start:windows
 ## 扩展接口
 
 - `GET /api/monitors`：`schemaVersion: 1` 和模块清单。
-- `GET /api/monitors/{id}/quote`：Linux 返回数据库最新报价及 `collection` 采集状态，过期数据标记 `status: "snapshot"`，从未收到数据时返回 503；原油网页预览获取失败时保留 Binance 最近成功报价或真实备用快照并标明状态。
+- `GET /api/monitors/{id}/quote`：返回数据库最新报价及 `collection` 采集状态，过期数据标记 `status: "snapshot"`，从未收到数据时返回 503。
 - `GET /api/monitors/{id}/history`：历史与采集时间，失败保留真实快照并标明状态。
 - `GET /api/monitors/oil/candles/15m`：原油同一 UTC 时段已收盘的 15 分钟 K 线。Linux 只读 Binance 独立数据集 `oil/binance/candles/15m`；原 Hyperliquid 库记录保留，不混入新曲线。
 - `GET /api/monitors/{id}/exchanges/{exchange}/quote`：同一平台内两腿实时报价及可取得的资金费率、结算周期和下次结算时间；原油支持 `hyperliquid`、`bybit`、`binance`、`lighter`、`variational`、`okx`、`bitget`，海力士支持 `bybit`、`binance`。Linux 只读数据库，首次无数据返回 503，更新失败保留上次报价及原时间并标明过期。
-- `GET / PUT /api/monitors/oil/exchanges/variational/session`：常驻后台的 Var token 状态与更新。PUT 使用 `{ token, revision }`，先验证会话再原子保存；GET 只返回是否配置、声明到期时间、最近保存时间及采集状态，不返回凭据、不访问交易所。过期版本返回 409，无常驻后台的网页预览不能保存。
+- `GET / PUT /api/monitors/oil/exchanges/variational/session`：常驻后台的 Var token 状态与更新。PUT 使用 `{ token, revision }`，先验证会话再原子保存；GET 只返回是否配置、声明到期时间、最近保存时间及采集状态，不返回凭据、不访问交易所。过期版本返回 409。
 - `GET /api/monitors/oil/exchanges/{exchange}/funding-history`：点击原油比较表的做空／做多价差年化，展开最近两个月（60 天）的实际结算历史，每个合约明细独立分页，每页 200 次。支持最近 7／30／60 天及自选北京时间区间，包含开始、不含结束；每腿原始费率累计和本方向收付累计使用区间内全部记录简单求和，翻页不影响累计，未取得记录显示“—”，真实零费率仍显示零。快捷区间按分钟向内取整，实际起止时间显示在面板中。后台首次分页回补完整 60 天，此后每 5 分钟重取最近一天并合并，GET 只读数据库；各腿保留独立采集时间及查询覆盖范围，失败保留旧记录，旧版 20 条快照会自动回补。范围未覆盖或旧快照覆盖未知时明确标注，不将缺失值补零。收付累计正值收款、负值付款；没有历史计费价格，不将单腿费率累计解释为等桶数价差组合收益或历史年化。OKX 使用 `realizedRate`，Lighter 按 `direction` 还原符号、将百分数转为小数并用重叠时间窗防止结算边界漏数，Hyperliquid 保留原始毫秒时间。Variational 公开接口尚无可核实的历史结算记录，显示原因。
 - `GET /api/monitors/oil/funding`：原油已结算资金费历史。
 - `POST /api/monitors/perpetual/funding-history`：Linux 常驻服务按 `{ pairs: [{ base, longKey, shortKey }] }` 读取当前可见组合（最多 30 个）的实际结算历史缓存，返回各合约的记录、成功查询覆盖及状态；首次返回采集中并在后台补齐，无需交易账户密钥。
@@ -217,7 +217,7 @@ npm run data:archive  # 更新海力士小时档案
 npm run data:oil      # 更新原油价格和资金费快照
 ```
 
-这些命令更新的是源码备用档案，更新后需要提交并重新部署。Linux 常驻采集会自动把新历史保存在数据库，无需定期更新源码档案；网页预览仍使用源码档案和运行期缓存。原油 15 分钟与资金费历史可继续跨年积累；日线兼容接口仍沿用原有年份校验。
+这些命令更新的是源码备用档案，更新后需要提交并重新部署。常驻采集会自动把新历史保存在数据库，无需定期更新源码档案。原油 15 分钟与资金费历史可继续跨年积累；日线兼容接口仍沿用原有年份校验。
 
 ## 验证
 
@@ -235,7 +235,7 @@ GitHub Actions 检查计算、告警、认证、缓存隔离、配置重启保�
 
 ## 工作台摘要与 CrossEx 联动
 
-工作台使用 `GET /api/hub/summary?schemaVersion=2` 读取所选模块的采集缓存，返回源时间、`health.state/message/staleAfterSeconds` 和紧凑指标；使用 `monitor=oil|hynix|perpetual` 选择模块，默认原油，保留原工作台指标 key、单位和时间口径，各模块故障独立显示。读取摘要不触发公网行情请求、不读取完整历史。无参数仍返回 v1；无常驻采集器的网页预览明确返回 offline。
+工作台使用 `GET /api/hub/summary?schemaVersion=2` 读取所选模块的采集缓存，返回源时间、`health.state/message/staleAfterSeconds` 和紧凑指标；使用 `monitor=oil|hynix|perpetual` 选择模块，默认原油，保留原工作台指标 key、单位和时间口径，各模块故障独立显示。读取摘要不触发公网行情请求、不读取完整历史。无参数仍返回 v1。
 
 合约价差的“CrossEx 推送筛选”可选择仅显示并推送双方都有可交易现货、且至少一条共同网络双向充提正常的机会。默认关闭，保存到服务器后页面关闭仍生效；代币地址须匹配，未知或过期资料不参与排名或推送。Monitor 在统计和分页前使用服务器提供的完整合格平台组合清单，不受 200 条信号上限影响；暂停详情时资格仍更新和到期，失效组合移出排名。每行显示双边现货、共同网络、双向充提与核验/到期时间。当前已接入 Binance、Gate 的公开数据，其他平台暂时无法核验，开启后排除。“全部报价”和持仓退出继续保留原始数据。v1/v2 均返回同一策略版本及通过后的三字段 `spotTransfer` 证据。[数据覆盖与筛选口径](docs/CROSSEX_SIGNALS.md#可选的双边现货与充提筛选)。
 
