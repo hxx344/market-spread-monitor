@@ -1,5 +1,6 @@
 import type { PerpetualQualityReport } from "./perpetual-quality.ts";
 import { createPerpetualQualityCache } from "./perpetual-quality-cache.ts";
+import { backgroundReadDelay } from './read-activity.ts';
 
 export interface QualityPairRequest { base: string; longKey: string; shortKey: string; includeSeries?: boolean }
 
@@ -31,6 +32,7 @@ export function startPerpetualQualityFeed(options: QualityFeedOptions) {
   let active = false, stopped = false, wanted = false;
   let pairs: QualityPairRequest[] = [], key = "[]";
   let request: AbortController | null = null;
+  let lastReadAt = -Infinity;
   const cache = createPerpetualQualityCache();
   let refreshTimer: unknown, debounceTimer: unknown, deadlineTimer: unknown, timeoutTimer: unknown;
   const clear = (timer: unknown) => { if (timer !== undefined) cancel(timer); };
@@ -42,6 +44,9 @@ export function startPerpetualQualityFeed(options: QualityFeedOptions) {
   function abortRequest() { clear(timeoutTimer); timeoutTimer = undefined; request?.abort(); }
   async function load() {
     if (stopped || !active || !pairs.length || request) return;
+    const wait = lastReadAt + backgroundReadDelay(0) - Date.now();
+    if (wait > 0) { clear(refreshTimer); refreshTimer = schedule(() => { void load(); }, wait); return; }
+    lastReadAt = Date.now();
     clearTimers(); wanted = false;
     const requestedKey = key, requestedPairs = pairs, controller = new AbortController();
     request = controller;
@@ -64,6 +69,7 @@ export function startPerpetualQualityFeed(options: QualityFeedOptions) {
   }
   function requestLatest() { clearSelectionTimers(); wanted = true; void load(); }
   return {
+    refresh() { if (!request) requestLatest(); },
     setPairs(next: QualityPairRequest[]) {
       const nextKey = qualityRequestKey(next);
       if (nextKey === key || stopped) return;

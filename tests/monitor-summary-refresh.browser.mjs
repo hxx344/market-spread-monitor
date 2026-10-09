@@ -82,13 +82,13 @@ async page => {
     await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, value: true }); document.dispatchEvent(new Event('visibilitychange')); });
     const beforeHidden = count('quote');
     await tick(); await tick(); await tick();
-    check(count('quote') === beforeHidden, 'Hidden pages must pause the card feed');
+    check(count('quote') === beforeHidden + 1, 'Hidden pages must retain one card read per 30 seconds');
     await page.evaluate(() => { delete document.hidden; document.dispatchEvent(new Event('visibilitychange')); });
-    await waitReading('+34.00%');
-    check(count('quote') === beforeHidden + 1, 'Showing the page must refresh immediately');
+    await waitReading('+35.00%');
+    check(count('quote') === beforeHidden + 2, 'Showing the page must refresh immediately');
 
     await page.setViewportSize({ width: 390, height: 844 });
-    await tick(); await waitReading('+35.00%');
+    await tick(); await waitReading('+36.00%');
     check(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'Mobile overview must fit its viewport');
     return { passed: true, requests: Object.fromEntries(counts), lastQuoteTime: await stamp(), value: await reading() };
   } finally {

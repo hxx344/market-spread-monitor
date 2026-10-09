@@ -45,8 +45,10 @@ test("inactive panels create no reads; restoring activity immediately resumes wi
   poll.setActive(false); t.mock.timers.tick(60000); await flush(); assert.equal(calls, 1); assert.equal(retained, 1);
   poll.setActive(true); await flush(); assert.equal(calls, 2);
   page.hidden = true; page.dispatchEvent(new Event("visibilitychange"));
-  t.mock.timers.tick(60000); await flush(); assert.equal(calls, 2);
-  page.hidden = false; page.dispatchEvent(new Event("visibilitychange")); await flush(); assert.equal(calls, 3);
+  t.mock.timers.tick(29_999); await flush(); assert.equal(calls, 2);
+  t.mock.timers.tick(1); await flush(); assert.equal(calls, 3);
+  t.mock.timers.tick(30_000); await flush(); assert.equal(calls, 4);
+  page.hidden = false; page.dispatchEvent(new Event("visibilitychange")); await flush(); assert.equal(calls, 5);
 });
 
 test("pausing aborts the panel read, suppresses late results and leaves unrelated save operations alive", async t => {

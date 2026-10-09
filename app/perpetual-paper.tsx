@@ -28,7 +28,7 @@ const draftFields = (position: PerpetualPaperPosition): Fields => ({ settledFund
   maxHoldingHours: display(position.maxHoldingHours), note: position.note, exitLongPrice: '', exitShortPrice: '', closeFeePaid: '', closedAt: '' });
 const editorTitle: Record<EditorKind, string> = { update: '更新持仓参数', close: '登记两腿平仓', stop: '停止跟踪', delete: '删除已结束记录' };
 
-function PaperWorkspace({ active }: { active: boolean }) {
+function PaperWorkspace({ active, readActive = active }: { active: boolean; readActive?: boolean }) {
   const id = useId(), [view, setView] = useState<PerpetualPaperView | null>(null), [now, setNow] = useState(0);
   const [error, setError] = useState(''), [message, setMessage] = useState(''), [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState('');
@@ -51,13 +51,13 @@ function PaperWorkspace({ active }: { active: boolean }) {
   }
   useEffect(() => { editorHeading.current?.focus(); }, [editor?.id, editor?.kind]);
   useEffect(() => {
-    const hide = () => { if (document.hidden) { read.current?.abort(); mutation.current?.abort(); } };
+    const hide = () => { if (document.hidden) mutation.current?.abort(); };
     const protect = (event: BeforeUnloadEvent) => { if (editorRef.current) { event.preventDefault(); event.returnValue = ''; } };
     document.addEventListener('visibilitychange', hide); window.addEventListener('beforeunload', protect);
     return () => { read.current?.abort(); mutation.current?.abort(); document.removeEventListener('visibilitychange', hide); window.removeEventListener('beforeunload', protect); };
   }, []);
   useEffect(() => {
-    if (!active || unavailable) { read.current?.abort(); mutation.current?.abort(); return; }
+    if (!readActive || unavailable) { read.current?.abort(); return; }
     const polling = startActivityPolling({ intervalMs: 5_000, load: async signal => {
       if (busyRef.current) return null;
       const controller = new AbortController(), version = generation.current; read.current = controller;
@@ -74,7 +74,8 @@ function PaperWorkspace({ active }: { active: boolean }) {
       onData: value => setNow(value), onError: () => {} });
     refresh.current = polling.refresh;
     return () => { polling.stop(); clock.stop(); refresh.current = async () => {}; };
-  }, [active, unavailable]);
+  }, [readActive, unavailable]);
+  useEffect(() => { if (!active || unavailable) mutation.current?.abort(); }, [active, unavailable]);
 
   function begin(position: PerpetualPaperPosition, kind: EditorKind) {
     if (!view || busyRef.current || editorRef.current) return;

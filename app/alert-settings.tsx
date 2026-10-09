@@ -33,7 +33,7 @@ function AlertSettings({ monitorId, title, adapter, active = true }: { monitorId
   useEffect(() => {
     const controller = new AbortController();
     const load = async (signal: AbortSignal) => {
-      if (busyRef.current || document.hidden) return;
+      if (busyRef.current) return;
       const requestGeneration = generation.current;
       try {
         const next = await adapter.load(AbortSignal.any([controller.signal, signal, AbortSignal.timeout(15_000)]));

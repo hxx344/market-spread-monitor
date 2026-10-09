@@ -1,5 +1,7 @@
 "use client";
 
+import { backgroundReadDelay, observeReadActivity, readsAllowed } from "../lib/read-activity";
+
 import { useEffect, useState } from "react";
 import type { PerpetualFxSnapshot } from "../lib/perpetual-fx";
 
@@ -11,7 +13,7 @@ export function usePerpetualFx(active: boolean) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let controller: AbortController | null = null;
     let stopped = false;
-    const eligible = () => active && !stopped && !document.hidden && navigator.onLine;
+    const eligible = () => !stopped && readsAllowed(active);
     async function read() {
       if (!eligible() || controller) return;
       const current = new AbortController(); controller = current;
@@ -26,8 +28,7 @@ export function usePerpetualFx(active: boolean) {
       } catch { if (eligible() && (timedOut || !current.signal.aborted)) setError("换汇行情暂不可用，缺失或过期汇率的组合暂不参与排名。"); }
       finally {
         clearTimeout(timeout);
-        if (controller === current) controller = null;
-        if (eligible()) timer = setTimeout(read, 60_000);
+        if (controller === current) { controller = null; if (eligible()) timer = setTimeout(read, backgroundReadDelay(60_000)); }
       }
     }
     function synchronize() {
@@ -35,16 +36,9 @@ export function usePerpetualFx(active: boolean) {
       if (!eligible()) { controller?.abort(); return; }
       void read();
     }
-    synchronize();
-    document.addEventListener("visibilitychange", synchronize);
-    window.addEventListener("online", synchronize);
-    window.addEventListener("offline", synchronize);
-    return () => {
-      stopped = true; clearTimeout(timer); controller?.abort();
-      document.removeEventListener("visibilitychange", synchronize);
-      window.removeEventListener("online", synchronize);
-      window.removeEventListener("offline", synchronize);
-    };
+    const restart = () => { clearTimeout(timer); controller?.abort(); controller = null; void read(); };
+    const stop = observeReadActivity(synchronize, restart);
+    return () => { stopped = true; stop(); clearTimeout(timer); controller?.abort(); };
   }, [active]);
   return { data, error };
 }

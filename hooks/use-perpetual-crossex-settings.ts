@@ -1,5 +1,7 @@
 "use client";
 
+import { backgroundReadDelay, observeReadActivity, readsAllowed } from "../lib/read-activity";
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import { normalizeCrossExBlockedBases, type CrossExFilterConfig } from "../lib/perpetual-crossex-config";
 import { indexSpotTransferPairs, parseCrossExSettings, type CrossExSettings } from "../lib/perpetual-crossex-eligibility";
@@ -21,7 +23,7 @@ export function usePerpetualCrossExSettings(active: boolean) {
   const spotTransferPairs = useMemo(() => indexSpotTransferPairs(data?.spotTransferPairs), [data?.spotTransferPairs]);
   useEffect(() => {
     let stopped = false, timer: ReturnType<typeof setTimeout> | undefined, controller: AbortController | null = null;
-    const eligible = () => active && !stopped && !document.hidden && navigator.onLine;
+    const eligible = () => !stopped && readsAllowed(active);
     async function read() {
       clearTimeout(timer);
       if (!eligible() || controller || savingRef.current) return;
@@ -30,12 +32,12 @@ export function usePerpetualCrossExSettings(active: boolean) {
         const next = await request(AbortSignal.any([current.signal, AbortSignal.timeout(10_000)]));
         if (!stopped && !current.signal.aborted && generation.current === version) { setData(next); setError(""); }
       } catch (cause) { if (!stopped && !current.signal.aborted && generation.current === version) setError(cause instanceof Error ? cause.message : "读取失败"); }
-      finally { controller = null; if (eligible()) timer = setTimeout(read, 15_000); }
+      finally { if (controller === current) { controller = null; if (eligible()) timer = setTimeout(read, backgroundReadDelay(15_000)); } }
     }
     const resume = () => { if (eligible()) void read(); else { clearTimeout(timer); controller?.abort(); } };
-    void read();
-    document.addEventListener("visibilitychange", resume); window.addEventListener("online", resume); window.addEventListener("offline", resume);
-    return () => { stopped = true; controller?.abort(); clearTimeout(timer); document.removeEventListener("visibilitychange", resume); window.removeEventListener("online", resume); window.removeEventListener("offline", resume); };
+    const restart = () => { clearTimeout(timer); controller?.abort(); controller = null; void read(); };
+    const stop = observeReadActivity(resume, restart);
+    return () => { stopped = true; stop(); controller?.abort(); clearTimeout(timer); };
   }, [active, saving]);
   function reportError(message: string, base = "") { setSaveError(message); setActionBase(base); setSaved(false); }
   const disabled = !data?.available || saving || Boolean(error);

@@ -1,5 +1,7 @@
 "use client";
 
+import { observeReadActivity, readsAllowed } from "../lib/read-activity";
+
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { startPerpetualScannerDataFeed } from '../lib/perpetual-scanner-data-feed';
 import { scannerDataRequirementsKey, scannerDataSelectionKey, type PerpetualScannerDataReport, type ScannerDataPair, type ScannerDataRequirements } from '../lib/perpetual-scanner-data';
@@ -24,14 +26,9 @@ export function usePerpetualScannerData(pairs: ScannerDataPair[], requirements: 
   }, []);
   useEffect(() => { controls.current?.setSelection(JSON.parse(selectionKey) as ScannerDataPair[], JSON.parse(requirementsKey) as ScannerDataRequirements); }, [selectionKey, requirementsKey]);
   useEffect(() => {
-    const synchronize = () => controls.current?.setActive(active && !document.hidden && navigator.onLine);
-    const restore = (event: PageTransitionEvent) => { if (event.persisted) { controls.current?.setActive(false); synchronize(); } };
-    synchronize();
-    document.addEventListener('visibilitychange', synchronize); window.addEventListener('online', synchronize); window.addEventListener('offline', synchronize); window.addEventListener('pageshow', restore);
-    return () => {
-      controls.current?.setActive(false);
-      document.removeEventListener('visibilitychange', synchronize); window.removeEventListener('online', synchronize); window.removeEventListener('offline', synchronize); window.removeEventListener('pageshow', restore);
-    };
+    const synchronize = () => controls.current?.setActive(readsAllowed(active));
+    const stop = observeReadActivity(synchronize, () => { synchronize(); if (readsAllowed(active)) controls.current?.refresh(); });
+    return () => { stop(); controls.current?.setActive(false); };
   }, [active]);
   return { report, loading, error: [error, report?.storageError].filter(Boolean).join(' ') };
 }

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPerpetualClock, readPerpetualSnapshot, startPerpetualFeed, type PerpetualConnection } from "../lib/perpetual-feed";
 import type { PerpetualSnapshot } from "../lib/perpetual-types";
+import { backgroundReadDelay, readActivity } from "../lib/read-activity";
 
 export function usePerpetualFeed(active: boolean, paused = false) {
   const [data, setData] = useState<PerpetualSnapshot | null>(null);
@@ -14,26 +15,36 @@ export function usePerpetualFeed(active: boolean, paused = false) {
 
   useEffect(() => {
     let clock: ReturnType<typeof setInterval> | undefined;
-    function synchronizeVisibility() {
-      controls.current?.stop(); controls.current = null;
+    let background = readActivity.background(document.hidden);
+    function synchronizeVisibility(event?: Event) {
+      if (event && ['focus', 'pageshow', 'online'].includes(event.type)) { controls.current?.stop(); controls.current = null; }
       clearInterval(clock);
-      if (!active || document.hidden) { setConnection("paused"); return; }
+      if (!active || !readActivity.allowed(document.hidden)) { controls.current?.stop(); controls.current = null; setConnection("paused"); return; }
+      const previousBackground = background;
+      background = readActivity.background(document.hidden);
+      if (previousBackground && !background) { controls.current?.stop(); controls.current = null; }
       const updateClock = () => {
         // Incoming frames advance time already. Run the clock only while the stream is quiet.
         if (sourceClock.quietFor() >= 1_500) setNow(sourceClock.read());
       };
       updateClock();
-      clock = setInterval(updateClock, 1_000);
+      clock = setInterval(updateClock, backgroundReadDelay(1_000));
       // Inspection stops network work, but source time must still age so a
       // retained quote cannot stay "fresh" indefinitely while the user reads it.
-      if (paused) { setConnection("paused"); return; }
+      if (paused) { controls.current?.stop(); controls.current = null; setConnection("paused"); return; }
       if (!navigator.onLine) {
+        controls.current?.stop(); controls.current = null;
         setConnection("error");
         setError("网络已断开，恢复连接后自动更新。");
         return;
       }
+      if (controls.current) {
+        if (!background && (previousBackground || event?.type === 'focus' || event?.type === 'pageshow')) controls.current.refresh();
+        return;
+      }
       controls.current = startPerpetualFeed({
         fetchSnapshot: readPerpetualSnapshot,
+        pollIntervalMs: () => backgroundReadDelay(5_000),
         createStream: () => {
           const source = new EventSource("/api/monitors/perpetual/stream");
           const adapter: { onmessage: ((event: { data: string }) => void) | null; onerror: (() => void) | null; close: () => void } = { onmessage: null, onerror: null, close: () => source.close() };
@@ -48,16 +59,19 @@ export function usePerpetualFeed(active: boolean, paused = false) {
       });
     }
     synchronizeVisibility();
+    const unsubscribe = readActivity.subscribe(synchronizeVisibility);
     document.addEventListener("visibilitychange", synchronizeVisibility);
     window.addEventListener("online", synchronizeVisibility);
     window.addEventListener("offline", synchronizeVisibility);
-    const restorePage = (event: PageTransitionEvent) => { if (event.persisted) synchronizeVisibility(); };
-    window.addEventListener("pageshow", restorePage);
+    window.addEventListener("focus", synchronizeVisibility);
+    window.addEventListener("pageshow", synchronizeVisibility);
     return () => {
+      unsubscribe();
       document.removeEventListener("visibilitychange", synchronizeVisibility);
       window.removeEventListener("online", synchronizeVisibility);
       window.removeEventListener("offline", synchronizeVisibility);
-      window.removeEventListener("pageshow", restorePage);
+      window.removeEventListener("focus", synchronizeVisibility);
+      window.removeEventListener("pageshow", synchronizeVisibility);
       clearInterval(clock);
       controls.current?.stop(); controls.current = null;
     };

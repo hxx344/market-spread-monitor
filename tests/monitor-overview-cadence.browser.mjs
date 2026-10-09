@@ -167,9 +167,10 @@ async page => {
     await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, value: true }); document.dispatchEvent(new Event('visibilitychange')); });
     const hiddenCounts = readCounts();
     await advance(60_000);
-    check(sameCounts(hiddenCounts), 'Hidden pages must suspend every overview feed');
+    check(readCounts().every((value, index) => value > hiddenCounts[index] && value <= hiddenCounts[index] + 2), 'Hidden overview feeds must keep reading at most twice per minute');
+    const beforeVisible = readCounts();
     await page.evaluate(() => { delete document.hidden; document.dispatchEvent(new Event('visibilitychange')); });
-    await verifyResume(hiddenCounts, 'Showing the page');
+    await verifyResume(beforeVisible, 'Showing the page');
     await page.context().setOffline(true);
     const offlineCounts = readCounts();
     await advance(60_000);
@@ -177,7 +178,7 @@ async page => {
     await page.context().setOffline(false);
     await verifyResume(offlineCounts, 'Reconnection');
     check(count('perpetual/quote') === 0 && count('perpetual/stream') === 0, 'No detail quote or SSE request is allowed while the perpetual detail remains unopened');
-    scenarios.push('Hidden/offline overview feeds pause and each resumes with one immediate read');
+    scenarios.push('Hidden overview feeds retain bounded polling; offline feeds pause and each resumes immediately');
 
     check(errors.length === 0, `Unexpected browser errors: ${errors.join('; ')}`);
     await page.screenshot({ path: 'output/playwright/overview-cadence.png', fullPage: false });

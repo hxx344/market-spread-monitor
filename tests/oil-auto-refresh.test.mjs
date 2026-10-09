@@ -15,32 +15,33 @@ test('oil history polls every minute even when server timestamps are ahead; fund
   assert.equal(funding, 1);
 });
 
-test('returning to a visible page refreshes both datasets immediately and hidden pages do not poll', async t => {
+test('hidden pages keep their minute/five-minute cadence and foreground return refreshes both datasets', async t => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   const target = targets(); let prices = 0, funding = 0;
   const stop = startOilAutoRefresh({ ...target, prices: async () => prices++, funding: async () => funding++ });
   t.after(stop);
   target.page.hidden = true; target.page.dispatchEvent(new Event('visibilitychange'));
   t.mock.timers.tick(300_000); await flush();
-  assert.deepEqual([prices, funding], [0, 0]);
-  target.page.hidden = false; target.page.dispatchEvent(new Event('visibilitychange')); await flush();
   assert.deepEqual([prices, funding], [1, 1]);
-  t.mock.timers.tick(60_000); await flush(); assert.equal(prices, 2);
+  target.page.hidden = false; target.page.dispatchEvent(new Event('visibilitychange')); await flush();
+  assert.deepEqual([prices, funding], [2, 2]);
+  t.mock.timers.tick(60_000); await flush(); assert.equal(prices, 3);
 });
 
-test('network and back-forward restoration resume once without overlapping an in-flight update', async t => {
+test('network restoration replaces the old read and ordinary ticks share the recovered request', async t => {
   t.mock.timers.enable({ apis: ['setInterval'] });
-  const target = targets(); let prices = 0, funding = 0, release;
+  const target = targets(), signals = []; let prices = 0, funding = 0, release;
   const gate = new Promise(resolve => { release = resolve; });
-  const stop = startOilAutoRefresh({ ...target, prices: async () => { prices++; await gate; }, funding: async () => { funding++; await gate; } });
+  const stop = startOilAutoRefresh({ ...target, prices: async signal => { signals.push(signal); prices++; await gate; }, funding: async () => { funding++; await gate; } });
   t.after(stop);
   target.view.dispatchEvent(new Event('pageshow')); await flush(); assert.equal(prices, 0);
   target.view.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true })); await flush();
   target.view.dispatchEvent(new Event('online')); t.mock.timers.tick(300_000); await flush();
-  assert.deepEqual([prices, funding], [1, 1]);
+  assert.deepEqual([prices, funding], [2, 2]);
+  assert.equal(signals[0].aborted, true); assert.equal(signals[1].aborted, false);
   release(); await flush();
   target.view.dispatchEvent(new Event('online')); await flush();
-  assert.deepEqual([prices, funding], [2, 2]);
+  assert.deepEqual([prices, funding], [3, 3]);
 });
 
 test('a failed price refresh does not stop subsequent polls or the funding schedule', async t => {
@@ -98,7 +99,7 @@ test('the visible oil overview refreshes quotes while hidden history and funding
   assert.deepEqual(calls, { quote: 8, history: 1, funding: 1 });
 });
 
-test('quote polling pauses with the host, visibility and network then resumes exactly once', async t => {
+test('quote polling slows while hidden, pauses with the host/network and resumes once', async t => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   const target = targets(); target.view.navigator = { onLine: true };
   let quotes = 0, histories = 0;
@@ -107,15 +108,16 @@ test('quote polling pauses with the host, visibility and network then resumes ex
   t.after(stop);
   await stop.refreshQuote(); assert.equal(quotes, 1);
   target.page.hidden = true; target.page.dispatchEvent(new Event('visibilitychange'));
-  t.mock.timers.tick(60_000); await flush(); assert.equal(quotes, 1);
+  t.mock.timers.tick(29_999); await flush(); assert.equal(quotes, 1);
+  t.mock.timers.tick(1); await flush(); assert.equal(quotes, 2);
   target.page.hidden = false; target.page.dispatchEvent(new Event('visibilitychange'));
-  await flush(); assert.equal(quotes, 2);
+  await flush(); assert.equal(quotes, 3);
   target.view.navigator.onLine = false; target.view.dispatchEvent(new Event('offline'));
-  t.mock.timers.tick(60_000); await flush(); assert.equal(quotes, 2);
+  t.mock.timers.tick(60_000); await flush(); assert.equal(quotes, 3);
   target.view.navigator.onLine = true; target.view.dispatchEvent(new Event('online'));
-  await flush(); assert.equal(quotes, 3, 'Online listeners share one in-flight refresh');
-  stop.setSummaryActive(false); t.mock.timers.tick(60_000); await flush(); assert.equal(quotes, 3);
-  stop.setSummaryActive(true); await flush(); assert.equal(quotes, 4);
+  await flush(); assert.equal(quotes, 4, 'Online listeners share one in-flight refresh');
+  stop.setSummaryActive(false); t.mock.timers.tick(60_000); await flush(); assert.equal(quotes, 4);
+  stop.setSummaryActive(true); await flush(); assert.equal(quotes, 5);
   assert.equal(histories, 0);
 });
 

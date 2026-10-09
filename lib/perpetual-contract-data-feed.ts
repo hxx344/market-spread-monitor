@@ -1,4 +1,5 @@
 import type { FundingHistoryPairRequest } from "./perpetual-funding-history.ts";
+import { backgroundReadDelay } from './read-activity.ts';
 
 interface ContractLeg { key: string; identity: string; status: string; error: string }
 interface ContractReport<Leg> { schemaVersion: 1; generatedAt: number; legs: Record<string, Leg>; storageError?: string }
@@ -12,11 +13,12 @@ export interface PerpetualContractDataCache<Leg> {
   listeners: Set<() => void>;
   active: Set<object>;
   failure: { keys: Set<string>; message: string } | null;
+  lastReadAt: number;
 }
 
 /** A factory allows isolated server/test instances; only the browser opts into sharing. */
 export function createPerpetualContractDataCache<Leg>(): PerpetualContractDataCache<Leg> {
-  return { entries: new Map(), report: null, request: null, listeners: new Set(), active: new Set(), failure: null };
+  return { entries: new Map(), report: null, request: null, listeners: new Set(), active: new Set(), failure: null, lastReadAt: -Infinity };
 }
 
 /** Prices, quote times and ranking order do not change the requested contracts. */
@@ -90,8 +92,11 @@ export function startPerpetualContractDataFeed<Leg extends ContractLeg>(options:
   }
   async function load() {
     if (stopped || !active || selecting || cache.request) return;
+    const wait = cache.lastReadAt + backgroundReadDelay(0) - now();
+    if (wait > 0) { clear(refreshTimer); refreshTimer = schedule(() => { void load(); }, wait); return; }
     const requested = pairs.filter(pair => [pair.longKey, pair.shortKey].some(key => (cache.entries.get(key)?.nextReadAt ?? 0) <= now()));
     if (!requested.length) { synchronize(); return; }
+    cache.lastReadAt = now();
     const keys = new Set(requested.flatMap(pair => [pair.longKey, pair.shortKey]));
     const controller = new AbortController();
     let timedOut = false;
@@ -131,6 +136,7 @@ export function startPerpetualContractDataFeed<Leg extends ContractLeg>(options:
   function requestLatest() { clearSelectionTimers(); synchronize(); }
   cache.listeners.add(synchronize);
   return {
+    refresh: requestLatest,
     setPairs(next: FundingHistoryPairRequest[]) {
       const nextKey = perpetualContractRequestKey(next);
       if (nextKey === key || stopped) return;

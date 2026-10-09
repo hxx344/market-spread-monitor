@@ -15,7 +15,6 @@ export function useExchangeQuotes(monitorId: SpreadMarket, initial?: ExternalQuo
     const controls = comparisonExchanges(monitorId).map(exchange => startActivityPolling({
       intervalMs: EXCHANGE_REFRESH_MS,
       async load(signal) {
-        if (document.hidden) return null;
         const response = await fetch(`/api/monitors/${monitorId}/${exchangeAction(exchange)}`, { cache: "no-store", signal: AbortSignal.any([signal, AbortSignal.timeout(12_000)]) });
         if (!response.ok) throw new Error("本轮更新失败，保留上次数据");
         return validateComparisonQuote(await response.json(), exchange, monitorId);

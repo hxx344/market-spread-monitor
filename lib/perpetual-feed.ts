@@ -15,6 +15,7 @@ interface FeedOptions {
   schedule?: (callback: () => void, delay: number) => unknown;
   cancel?: (timer: unknown) => void;
   monotonic?: () => number;
+  pollIntervalMs?: () => number;
 }
 
 export class PerpetualRequestError extends Error {}
@@ -196,7 +197,7 @@ export function startPerpetualFeed(options: FeedOptions) {
       if (request === controller) request = null;
       if (!stopped && fallback) {
         clear(pollingTimer);
-        pollingTimer = schedule(() => { void loadSnapshot(); }, 5_000);
+        pollingTimer = schedule(() => { void loadSnapshot(); }, options.pollIntervalMs?.() ?? 5_000);
       }
     }
   }

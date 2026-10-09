@@ -59,7 +59,7 @@ export function useOilHedgeHistory(active: boolean) {
   }, [active]);
 
   async function refresh() {
-    if (!active || !online || document.hidden) return;
+    if (!active || !online) return;
     setPending({ bybit: true, binance: true, prices: true });
     await Promise.all(sources.map(async source => {
       try { await controls.current[source]?.refresh(); }

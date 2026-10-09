@@ -32,7 +32,7 @@ export default function NotificationSettings({ active = true }: { active?: boole
   useEffect(() => {
     const controller = new AbortController();
     const load = async (signal: AbortSignal) => {
-      if (busyRef.current || document.hidden) return;
+      if (busyRef.current) return;
       const requestGeneration = generation.current;
       try {
         const response = await fetch(endpoint, { cache: "no-store", signal: AbortSignal.any([controller.signal, signal, AbortSignal.timeout(15_000)]) });

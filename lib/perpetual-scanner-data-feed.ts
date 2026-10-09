@@ -1,4 +1,5 @@
 import type { FundingWindowHours, FundingWindowTotal } from './perpetual-funding-history.ts';
+import { backgroundReadDelay } from './read-activity.ts';
 import { isPerpetualMarketMetricsReport } from './perpetual-market-metrics-feed.ts';
 import type { PerpetualMarketMetricsLeg } from './perpetual-market-metrics.ts';
 import { canonicalScannerDataPair, scannerDataPairKey, scannerDataRequirementsKey, scannerDataSelectionKey,
@@ -109,6 +110,7 @@ export class PerpetualScannerDataCache {
   private generatedAt = 0;
   private storageError = '';
   private failure = '';
+  private lastReadAt = -Infinity;
   private now = () => this.environment?.now?.() ?? Date.now();
   private schedule = (callback: () => void, delay: number) => this.environment?.schedule?.(callback, delay) ?? setTimeout(callback, delay);
   private cancel = (timer: unknown) => {
@@ -180,6 +182,8 @@ export class PerpetualScannerDataCache {
     this.cancel(this.timer); this.timer = undefined;
     if (this.pauseIfUnused()) { this.publish(); return; }
     if (this.request) { this.publish(); return; }
+    const wait = this.lastReadAt + backgroundReadDelay(0) - this.now();
+    if (wait > 0) { this.timer = this.schedule(this.pump, wait); this.publish(); return; }
     const demands = this.demands(true), now = this.now();
     if (this.batch) {
       for (const [key, item] of this.batch.items) {
@@ -211,6 +215,7 @@ export class PerpetualScannerDataCache {
   private async load(batch: Batch, demands: Map<string, Demand>) {
     const owner = [...this.subscribers].find(subscriber => subscriber.active && subscriber.pairs.size);
     if (!owner) return;
+    this.lastReadAt = this.now();
     let requirements = emptyRequirements();
     const pairs = [...batch.items.keys()].flatMap(key => {
       const demand = demands.get(key);
@@ -293,6 +298,7 @@ export class PerpetualScannerDataCache {
     this.subscribers.add(subscriber);
     let stopped = false, selectionKey = '[]', requirementsKey = scannerDataRequirementsKey(subscriber.requirements);
     return {
+      refresh: () => { if (!stopped) this.pump(); },
       setSelection: (pairs: ScannerDataPair[], requirements: ScannerDataRequirements) => {
         if (stopped) return;
         const nextSelection = scannerDataSelectionKey(pairs), nextRequirements = scannerDataRequirementsKey(requirements);

@@ -1,5 +1,7 @@
 "use client";
 
+import { observeReadActivity, readsAllowed } from "../lib/read-activity";
+
 import { useEffect, useRef, useState } from "react";
 import { fundingHistoryRequestKey, startPerpetualFundingHistoryFeed } from "../lib/perpetual-funding-history-feed";
 import type { FundingHistoryPairRequest, PerpetualFundingHistoryReport } from "../lib/perpetual-funding-history";
@@ -29,20 +31,9 @@ export function usePerpetualFundingHistory(pairs: FundingHistoryPairRequest[], a
 
   useEffect(() => { controls.current?.setPairs(JSON.parse(requestKey) as FundingHistoryPairRequest[]); }, [requestKey]);
   useEffect(() => {
-    const synchronize = () => controls.current?.setActive(active && !document.hidden && navigator.onLine);
-    const restore = (event: PageTransitionEvent) => { if (event.persisted) { controls.current?.setActive(false); synchronize(); } };
-    synchronize();
-    document.addEventListener("visibilitychange", synchronize);
-    window.addEventListener("online", synchronize);
-    window.addEventListener("offline", synchronize);
-    window.addEventListener("pageshow", restore);
-    return () => {
-      controls.current?.setActive(false);
-      document.removeEventListener("visibilitychange", synchronize);
-      window.removeEventListener("online", synchronize);
-      window.removeEventListener("offline", synchronize);
-      window.removeEventListener("pageshow", restore);
-    };
+    const synchronize = () => controls.current?.setActive(readsAllowed(active));
+    const stop = observeReadActivity(synchronize, () => { synchronize(); if (readsAllowed(active)) controls.current?.refresh(); });
+    return () => { stop(); controls.current?.setActive(false); };
   }, [active]);
   return { report, loading, error: [error, report?.storageError].filter(Boolean).join(" ") };
 }
