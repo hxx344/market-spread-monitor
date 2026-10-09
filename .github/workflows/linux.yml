@@ -15,9 +15,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: "24.15.0"
           cache: npm
       - run: npm ci
+      - run: node scripts/sync-linux-dependencies.mjs --check
       - run: npm test
       # next build includes the same TypeScript check; keep it enabled there.
       - run: npm run build:linux
@@ -30,7 +31,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: "24.15.0"
       - run: bash -n deploy/install.sh
       - run: shellcheck deploy/install.sh server/entrypoint.sh
       - run: node tests/install-smoke.mjs

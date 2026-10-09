@@ -8,6 +8,46 @@ download() { curl --fail --silent --show-error --location --retry 3 --connect-ti
 digest() { sha256sum "$1" | cut -d ' ' -f 1; }
 unit_fingerprint() { systemctl cat --no-pager market-spread-monitor.service | sha256sum | cut -d ' ' -f 1; }
 
+reload_service_definition() {
+  local changed=${1:-0}
+  if (( changed )) || [[ $(systemctl show --property=NeedDaemonReload --value market-spread-monitor.service 2>/dev/null || true) != no ]]; then
+    systemctl daemon-reload
+  fi
+}
+
+enable_service() {
+  # enabled-runtime also exits successfully, but does not survive a reboot.
+  [[ $(systemctl is-enabled market-spread-monitor.service 2>/dev/null || true) == enabled ]] || systemctl enable market-spread-monitor.service
+}
+
+install_project_dependencies() {
+  local profile=root-v1 status=0
+  if [[ -f "$release/deploy/linux-dependencies.mjs" ]]; then
+    profile=$("$runtime/bin/node" "$release/deploy/linux-dependencies.mjs" "$release" --kind)
+  fi
+  case "$profile" in
+    linux-v1)
+      log '安装 Linux 所需依赖；跳过其他平台的构建和开发工具。'
+      # Keep source manifests unchanged for fingerprints and the original build
+      # recipe. The reduced files exist at the project root only during npm ci.
+      cp -p -- "$release/package.json" "$release/.install-source-package.json"
+      cp -p -- "$release/package-lock.json" "$release/.install-source-package-lock.json"
+      cp -- "$release/deploy/linux/package.json" "$release/package.json"
+      cp -- "$release/deploy/linux/package-lock.json" "$release/package-lock.json"
+      ;;
+    root-v1) log '依赖包含完整安装要求，使用原项目依赖清单。' ;;
+    *) die '依赖安装方案无效' ;;
+  esac
+  if runuser -u spread-monitor -- env PATH="$runtime/bin:$PATH" NODE_ENV=development NEXT_TELEMETRY_DISABLED=1 npm_config_cache=/var/cache/market-spread-monitor npm ci --include=dev --include=optional --prefer-offline --no-audit --no-fund; then
+    status=0
+  else status=$?; fi
+  if [[ "$profile" == linux-v1 ]]; then
+    mv -f -- "$release/.install-source-package.json" "$release/package.json"
+    mv -f -- "$release/.install-source-package-lock.json" "$release/package-lock.json"
+  fi
+  return "$status"
+}
+
 # Next includes its absolute installation path in Webpack's cache version.
 # Build every candidate at the same path, then move it into its final release.
 # This is a temporary candidate, never a third persistent dependency tree.
@@ -262,7 +302,7 @@ main() {
   config=/etc/market-spread-monitor.env
   unit=/etc/systemd/system/market-spread-monitor.service
   local source_dir='' requested_port='' architecture node_name runtime release_id first_install=0 rebuild=0 cleanup_only=0 dependency_key='' candidate='' reused=0
-  local input_dir='' runtime_key='' build_key='' build_source='' reused_build=0 candidate_sizes='' candidate_valid=0 candidate_dependencies_valid=0 candidate_source_valid=1 install_described=0 npm_version
+  local input_dir='' runtime_key='' build_key='' build_source='' reused_build=0 candidate_sizes='' candidate_valid=0 candidate_dependencies_valid=0 candidate_source_valid=1 install_described=0 npm_version unit_changed=0
   scratch='' release='' new_release='' building_release='' switching=0 old_current='' was_active=0
   storage_current='' storage_running='' storage_data_dir='' storage_config_stamp='' storage_free_kb=0 storage_free_inodes=0
   build_required_kb=786432 build_required_inodes=15000
@@ -407,21 +447,21 @@ main() {
       $(cat "$candidate/.install-build" 2>/dev/null || true) == "$build_key" ]]; then
     release=$candidate; reused=1; reused_build=1
     if [[ $(cat "$release/.install-config") == "$(digest "$config")" && $(cat "$release/.install-unit") == "$(unit_fingerprint)" ]] && probe_running; then
-      systemctl is-enabled --quiet market-spread-monitor.service || systemctl enable market-spread-monitor.service
+      enable_service
       atomic_marker "$release/.install-checked-source" "$release_id"
       if [[ "$input_dir" == "$candidate" ]]; then log '当前已核对最新版本，服务健康；跳过源码下载、依赖安装、构建和重启。';
       else log '已核对新提交，运行和构建内容未变；跳过依赖安装、构建和重启。'; fi
     else
       check_config
       log '运行内容未变，仅应用配置或恢复服务；跳过依赖安装和构建。'
-      systemctl daemon-reload
+      reload_service_definition
       systemctl restart market-spread-monitor.service
       systemd-run --quiet --wait --pipe --collect --unit="market-spread-monitor-check-$$" --property="EnvironmentFile=$config" "$runtime/bin/node" "$release/deploy/check-install.mjs" --describe-after-check "$first_install"
       install_described=1
       local recovered_pid
       recovered_pid=$(systemctl show --property=MainPID --value market-spread-monitor.service)
       [[ "$recovered_pid" =~ ^[1-9][0-9]*$ && $(readlink -f "/proc/$recovered_pid/cwd") == "$release" ]] || die '服务恢复后版本目录不一致'
-      systemctl enable market-spread-monitor.service
+      enable_service
       record_success
     fi
     describe_install
@@ -501,9 +541,9 @@ main() {
   fi
   # Reused dependencies are already immutable and retain root ownership. Next
   # writes to the candidate/.next, not into an existing dependency installation.
-  find "$release" -path "$release/node_modules" -prune -o -exec chown -h spread-monitor:spread-monitor {} +
   require_space "$base/releases" "$build_required_kb" "$build_required_inodes"
   if (( ! reused || ! reused_build )); then
+    find "$release" -path "$release/node_modules" -prune -o -exec chown -h spread-monitor:spread-monitor {} +
     [[ ! -e "$base/build" && ! -L "$base/build" ]] || die '临时构建目录已被占用'
     read_storage_protection
     protects_path "$base/build" && die '临时构建路径与配置的数据或源码目录重合，原服务未切换'
@@ -517,7 +557,7 @@ main() {
     cd "$release"
     if (( ! reused )); then
       log '依赖发生变化或尚无缓存，正在安装依赖。'
-      runuser -u spread-monitor -- env PATH="$runtime/bin:$PATH" NODE_ENV=development NEXT_TELEMETRY_DISABLED=1 npm_config_cache=/var/cache/market-spread-monitor npm ci --include=dev --include=optional --prefer-offline --no-audit --no-fund
+      install_project_dependencies
     fi
     if (( ! reused_build )); then
       log '正在构建变更后的代码（包含 Next 类型检查）。'
@@ -525,23 +565,27 @@ main() {
     fi
   )
   restore_build_workspace || die '无法将构建结果移入版本目录'
-  "$runtime/bin/node" "$release/deploy/install-inputs.mjs" "$release" --valid-build || die '构建未生成完整可启动版本'
+  # A reused artifact was already checked after copying; only a new build needs
+  # verification here after moving back from the stable compilation directory.
+  if (( ! reused_build )); then
+    "$runtime/bin/node" "$release/deploy/install-inputs.mjs" "$release" --valid-build || die '构建未生成完整可启动版本'
+  fi
   build_source=$release_id
   if (( reused_build )); then build_source=$(cat "$candidate/.install-build-source"); fi
   # Source and dependencies are root-owned and read-only to the service. Only
   # Next's runtime cache remains writable. Avoid traversing copied dependencies.
-  find "$release" -path "$release/node_modules" -prune -o -exec chown -h root:root {} +
-  find "$release" -path "$release/node_modules" -prune -o -type f -exec chmod a+r,go-w {} +
-  find "$release" -path "$release/node_modules" -prune -o -type d -exec chmod a+rx,go-w {} +
+  find "$release" \( -path "$release/node_modules" -o -path "$release/.next/cache" \) -prune -o \
+    \( -exec chown -h root:root {} + \( -type f -exec chmod a+r,go-w {} + -o -type d -exec chmod a+rx,go-w {} + \) \)
   if (( ! reused )); then chown -R root:root "$release/node_modules"; chmod -R a+rX,go-w "$release/node_modules"; fi
   install -d -m 0700 -o spread-monitor -g spread-monitor "$release/.next/cache"
   chown -R spread-monitor:spread-monitor "$release/.next/cache"
   sed -e "s|^WorkingDirectory=.*|WorkingDirectory=$base/current|" -e "s|^ExecStart=.*|ExecStart=/bin/bash $base/current/server/entrypoint.sh|" "$release/deploy/market-spread-monitor.service" > "$scratch/market-spread-monitor.service"
-  systemd-analyze verify "$scratch/market-spread-monitor.service" 2> "$scratch/unit-check.log" || {
-    # The current symlink is intentionally not switched yet. Verify using the prepared release.
+  if ! cmp -s -- "$scratch/market-spread-monitor.service" "$unit"; then
+    unit_changed=1
+    # Check the prepared version directly; current still refers to the old one.
     sed "s|$base/current|$release|g" "$scratch/market-spread-monitor.service" > "$scratch/check.service"
     systemd-analyze verify "$scratch/check.service" || die 'systemd 服务文件校验失败'
-  }
+  else log '服务定义未变，跳过重复写入和校验。'; fi
 
   [[ ! -L "$base/current" ]] || old_current=$(readlink "$base/current")
   [[ ! -f "$unit" ]] || cp -p "$unit" "$scratch/previous.service"
@@ -550,8 +594,8 @@ main() {
   systemctl stop market-spread-monitor.service 2>/dev/null || { (( ! was_active )) || die '无法停止原服务'; }
   ln -s "$release" "$base/current.next"
   mv -Tf "$base/current.next" "$base/current"
-  install -m 0644 "$scratch/market-spread-monitor.service" "$unit"
-  systemctl daemon-reload
+  if (( unit_changed )); then install -m 0644 "$scratch/market-spread-monitor.service" "$unit"; fi
+  reload_service_definition "$unit_changed"
   systemctl start market-spread-monitor.service
   # Read EnvironmentFile through systemd itself; never execute or echo an existing config.
   systemd-run --quiet --wait --pipe --collect --unit="market-spread-monitor-check-$$" --property="EnvironmentFile=$config" "$runtime/bin/node" "$release/deploy/check-install.mjs" --describe-after-check "$first_install"
@@ -560,7 +604,7 @@ main() {
   local main_pid
   main_pid=$(systemctl show --property=MainPID --value market-spread-monitor.service)
   [[ "$main_pid" =~ ^[1-9][0-9]*$ && $(readlink -f "/proc/$main_pid/cwd") == "$release" ]] || die '运行进程与新版本不一致'
-  systemctl enable market-spread-monitor.service
+  enable_service
   switching=0
   record_success
   prune_releases

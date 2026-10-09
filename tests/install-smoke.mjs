@@ -18,6 +18,7 @@ const installer = join(root, "deploy/install.sh");
 const scratch = await mkdtemp(join(tmpdir(), "market-spread-installer-test-"));
 const base = "http://127.0.0.1:31877";
 const buildWorkspace = "/opt/market-spread-monitor/build";
+const unitPath = "/etc/systemd/system/market-spread-monitor.service";
 let headers;
 const timings = [];
 async function run(command, args) {
@@ -75,6 +76,27 @@ async function replaceConfig(value) {
   await run("sudo", ["install", "-m", "0600", path, "/etc/market-spread-monitor.env"]);
 }
 async function buildCount() { return (await run("sudo", ["cat", "/var/cache/market-spread-monitor/install-test-builds"])).stdout.trim().split("\n").length; }
+async function assertLinuxDependencies(release, source) {
+  for (const name of ["vite", "vinext", "wrangler", "eslint", "@cloudflare/vite-plugin"]) {
+    assert.equal(existsSync(join(release, "node_modules", name)), false, `Linux installation must omit ${name}`);
+  }
+  for (const name of ["next", "react", "typescript", "tailwindcss", "@tailwindcss/postcss", "tw-animate-css", "@types/node", "@types/react", "@types/react-dom"]) {
+    assert.ok(existsSync(join(release, "node_modules", name, "package.json")), `Linux installation must retain ${name}`);
+  }
+  for (const name of ["package.json", "package-lock.json"]) {
+    assert.deepEqual(await readFile(join(release, name)), await readFile(join(source, name)), `Installation must restore the original ${name} byte for byte`);
+    assert.equal(existsSync(join(release, `.install-source-${name}`)), false, "Temporary install manifests must be removed");
+  }
+}
+async function assertNoWork(output, { release, processId, builds, dependencyTime, unitTime }) {
+  assert.match(output, /跳过.*依赖安装.*构建.*重启/);
+  assert.ok(!output.includes("正在安装依赖"));
+  assert.equal(await current(), release);
+  assert.equal(await pid(), processId);
+  assert.equal(await buildCount(), builds);
+  assert.equal((await stat(join(release, "node_modules/.package-lock.json"))).mtimeMs, dependencyTime);
+  assert.equal((await stat(unitPath)).mtimeMs, unitTime);
+}
 function logBuildEvidence(label, output) {
   const lines = output.replace(/\u001b\[[0-9;]*m/g, "").split("\n").filter(line => /Installer (cache|compile)|cached modules|built modules|compiled successfully|Compiled successfully|restore cache|pack from cache/i.test(line));
   console.log(`Installer ${label} build evidence:\n${lines.join("\n")}`);
@@ -116,6 +138,10 @@ try {
 import { appendFileSync, existsSync, readFileSync, writeFileSync, cpSync, realpathSync, statSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 assert.equal(realpathSync('.'), '/opt/market-spread-monitor/build', 'Every real Next build must use the same physical directory');
+assert.equal(JSON.parse(readFileSync('package.json', 'utf8')).scripts['build:linux'], 'node tests/install-build-wrapper.mjs', 'The original build script must be restored before npm runs it');
+assert.ok(JSON.parse(readFileSync('package-lock.json', 'utf8')).packages[''].devDependencies.eslint, 'The complete source lock must be restored before compilation');
+for (const name of ['vite', 'vinext', 'wrangler', 'eslint', '@cloudflare/vite-plugin']) assert.equal(existsSync('node_modules/' + name), false, 'Linux build must omit ' + name);
+for (const name of ['typescript', 'tailwindcss', '@tailwindcss/postcss']) assert.ok(existsSync('node_modules/' + name + '/package.json'), 'Linux build requires ' + name);
 appendFileSync('/var/cache/market-spread-monitor/install-test-builds', JSON.stringify({ cwd: realpathSync('.') }) + '\\n');
 const mode = existsSync('install-fixture-mode') ? readFileSync('install-fixture-mode','utf8').trim() : '';
 if (mode === 'check-build-cache') {
@@ -178,6 +204,12 @@ else {
   const firstPid = await pid();
   assert.equal(await buildCount(), 1);
   const firstDependencyTime = (await stat(join(firstRelease, "node_modules/.package-lock.json"))).mtimeMs;
+  const firstUnitTime = (await stat(unitPath)).mtimeMs;
+  await assertLinuxDependencies(firstRelease, baseline);
+  assert.match(coldBuild, /安装 Linux 所需依赖/);
+  const dependencyKB = Number((await run("du", ["-sk", join(firstRelease, "node_modules")])).stdout.trim().split(/\s+/)[0]);
+  assert.ok(Number.isSafeInteger(dependencyKB) && dependencyKB > 0);
+  console.log("Installer Linux dependency size:", JSON.stringify({ dependencyKB }));
 
   console.log("Installer: unchanged source (even after touch) performs no build, install, release switch or restart");
   await utimes(join(baseline, "README.md"), new Date(), new Date());
@@ -206,6 +238,23 @@ else {
   assert.equal(await readFile(join(firstRelease, ".install-source"), "utf8"), originalArtifactSource);
   assert.notEqual(await readFile(join(firstRelease, ".install-checked-source"), "utf8"), originalArtifactSource);
 
+  console.log("Installer: unrelated Sites configuration and development dependency changes require no install, build or restart");
+  const noWork = { release: firstRelease, processId: firstPid, builds: 1, dependencyTime: firstDependencyTime, unitTime: firstUnitTime };
+  const viteConfig = join(baseline, "vite.config.ts");
+  await writeFile(viteConfig, (await readFile(viteConfig, "utf8")) + "\n// Sites-only configuration fixture.\n");
+  await assertNoWork(await install(baseline), noWork);
+  const developmentManifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  const sourceLockPath = join(baseline, "package-lock.json");
+  const developmentLock = JSON.parse(await readFile(sourceLockPath, "utf8"));
+  const eslintVersion = developmentLock.packages["node_modules/eslint"].version;
+  const eslintRange = developmentManifest.devDependencies.eslint === `~${eslintVersion}` ? `^${eslintVersion}` : `~${eslintVersion}`;
+  developmentManifest.devDependencies.eslint = eslintRange;
+  developmentLock.packages[""].devDependencies.eslint = eslintRange;
+  await writeFile(manifestPath, JSON.stringify(developmentManifest));
+  await writeFile(sourceLockPath, JSON.stringify(developmentLock));
+  await assertNoWork(await install(baseline), noWork);
+  assert.equal(await readFile(join(firstRelease, ".install-source"), "utf8"), originalArtifactSource, "Ignored tool changes must not relabel the compiled artifact");
+
   console.log("Installer: configuration changes only restart, and invalid configuration leaves the old process running");
   const expectedConfig = originalConfig.replace("OIL_POLL_INTERVAL_SECONDS=30", "OIL_POLL_INTERVAL_SECONDS=45");
   await replaceConfig(expectedConfig);
@@ -214,6 +263,7 @@ else {
   assert.notEqual(await pid(), firstPid);
   assert.equal(await buildCount(), 1);
   assert.match(configured, /仅应用配置或恢复服务/);
+  assert.equal((await stat(unitPath)).mtimeMs, firstUnitTime, "Configuration-only recovery must not rewrite the service unit");
   assert.equal((await (await fetch(`${base}/api/monitors/oil/status`, { headers })).json()).pollSeconds, 45);
   assert.deepEqual(await sharedState(), sharedConfig);
   const configuredPid = await pid();
@@ -260,6 +310,8 @@ else {
   assert.match(upgraded, /依赖未变，复用已安装依赖/);
   assert.ok(!upgraded.includes("正在安装依赖"));
   assert.equal(await buildCount(), 2);
+  assert.equal((await stat(unitPath)).mtimeMs, firstUnitTime, "Application upgrades must retain an unchanged service unit");
+  await assertLinuxDependencies(secondRelease, baseline);
   assert.equal((await stat(join(secondRelease, "node_modules/.package-lock.json"))).mtimeMs, firstDependencyTime);
   assert.notEqual((await stat(join(firstRelease, "node_modules/next/package.json"))).ino, (await stat(join(secondRelease, "node_modules/next/package.json"))).ino);
   assert.equal(await (await fetch(`${base}/install-version-marker.txt`, { headers })).text(), "upgraded-source");
@@ -360,7 +412,6 @@ else {
   assert.equal(existsSync(firstRelease), false, "The oldest successful release is reclaimed after the next successful upgrade");
   console.log("Installer timings:", JSON.stringify(timings));
   assert.deepEqual(await sharedState(), sharedConfig);
-  console.log("Installer smoke passed: no-op, cache reuse, storage reclamation, space/inode preflight, config-only restart, recovery, rollback and shared Feishu persistence; no Feishu messages sent.");
   assert.equal(await databaseMarker(), 'persisted', 'Dependency rebuild preserves the existing SQLite database');
 
   console.log("Installer: an independent server change reuses the verified Next artifact and preserves its provenance");
@@ -395,10 +446,53 @@ else {
   assert.equal(await buildCount(), buildBeforeBackend + 2);
   assert.ok(existsSync(join(await current(), ".next/build-manifest.json")));
   assert.equal(await databaseMarker(), 'persisted');
+
+  console.log("Installer: legacy dependency, runtime and build fingerprints migrate once, then the next run is a no-op");
+  const beforeMigration = await current();
+  const buildsBeforeMigration = await buildCount();
+  const dependenciesBeforeMigration = (await stat(join(beforeMigration, "node_modules/.package-lock.json"))).mtimeMs;
+  const legacyMarkers = { ".install-dependencies": "1".repeat(64), ".install-runtime": "2".repeat(64), ".install-build": "3".repeat(64) };
+  // Emulate all three old-schema keys. Changing only the dependency marker can
+  // leave the valid runtime/build fast path untouched and would not test migration.
+  for (const [name, value] of Object.entries(legacyMarkers)) {
+    const marker = join(scratch, name);
+    await writeFile(marker, `${value}\n`);
+    await run("sudo", ["install", "-m", "0644", marker, join(beforeMigration, name)]);
+  }
+  const migrated = await install(baseline);
+  const migratedRelease = await current();
+  assert.notEqual(migratedRelease, beforeMigration);
+  assert.match(migrated, /正在安装依赖/);
+  assert.ok(!migrated.includes("Next 构建输入未变"));
+  assert.equal(await buildCount(), buildsBeforeMigration + 1);
+  await assertLinuxDependencies(migratedRelease, baseline);
+  const migratedDependencyTime = (await stat(join(migratedRelease, "node_modules/.package-lock.json"))).mtimeMs;
+  assert.notEqual(migratedDependencyTime, dependenciesBeforeMigration);
+  const migratedMarkers = {};
+  for (const [name, value] of Object.entries(legacyMarkers)) {
+    migratedMarkers[name] = await readFile(join(migratedRelease, name), "utf8");
+    assert.notEqual(migratedMarkers[name].trim(), value);
+    assert.match(migratedMarkers[name].trim(), /^[a-f0-9]{64}$/);
+  }
+  const migratedReleases = await releases();
+  const migratedNoWork = {
+    release: migratedRelease, processId: await pid(), builds: buildsBeforeMigration + 1,
+    dependencyTime: migratedDependencyTime, unitTime: (await stat(unitPath)).mtimeMs,
+  };
+  await assertNoWork(await install(baseline), migratedNoWork);
+  assert.deepEqual(await releases(), migratedReleases);
+  for (const [name, value] of Object.entries(migratedMarkers)) assert.equal(await readFile(join(migratedRelease, name), "utf8"), value);
+  assert.equal(await databaseMarker(), 'persisted', 'Schema migration must preserve the existing SQLite database');
+  assert.equal(await config(), expectedConfig);
+  assert.deepEqual((await state()).config.rules, rules);
+  assert.deepEqual((await oilState()).config, oilConfig);
+  assert.deepEqual(await sharedState(), sharedConfig);
+  assert.deepEqual(await (await fetch(`${base}/install-cache-probe`, { headers })).json(), { version: "upgraded-compiled-route" });
   const buildRecords = (await run("sudo", ["cat", "/var/cache/market-spread-monitor/install-test-builds"])).stdout.trim().split("\n").map(line => JSON.parse(line));
   assert.ok(buildRecords.length >= 2);
   assert.ok(buildRecords.every(record => record.cwd === buildWorkspace), "All build attempts, including failed ones, use the stable workspace path");
   console.log("Complete installer timings:", JSON.stringify(timings));
+  console.log("Installer smoke passed: Linux dependency profile, no-op updates, unchanged service unit, cache reuse, storage reclamation, space/inode preflight, config-only restart, recovery, rollback, schema migration and shared Feishu persistence; no Feishu messages sent.");
 } finally {
   await run("sudo", ["systemctl", "stop", "market-spread-monitor.service"]).catch(() => {});
   assert.ok(resolve(scratch).startsWith(resolve(tmpdir()) + "/market-spread-installer-test-"));

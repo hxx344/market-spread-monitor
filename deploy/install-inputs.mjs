@@ -1,19 +1,25 @@
 import { createHash } from "node:crypto";
 import { readFileSync, existsSync, readdirSync, lstatSync } from "node:fs";
-import { join, dirname, resolve, relative, sep } from "node:path";
+import { join, dirname, resolve, relative, sep, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
+import { selectDependencyProfile } from "./linux-dependencies.mjs";
 
-export function dependencyKey(directory, { sourceId, nodeVersion, npmVersion, architecture }) {
-  const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
-  const lifecycle = ["preinstall", "install", "postinstall", "prepublish", "preprepare", "prepare", "postprepare"].some(name => manifest.scripts?.[name]);
-  const localDependency = Object.values({ ...manifest.dependencies, ...manifest.devDependencies, ...manifest.optionalDependencies }).some(value => /^(file:|link:|workspace:|\.\.?\/)/.test(value));
+function profileDependencyKey(directory, { sourceId, nodeVersion, npmVersion, architecture }, profile) {
+  const manifest = profile.manifest;
+  const lifecycle = ["preinstall", "install", "postinstall", "prepublish", "preprepare", "prepare", "postprepare"].some(name => Object.hasOwn(manifest.scripts ?? {}, name));
+  const localDependency = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"].flatMap(field => Object.values(manifest[field] ?? {})).some(value => typeof value === "string" && (/^(?:file:|git\+file:|link:|workspace:|~[\\/]|\.\.?[\\/]|[\\/]|[a-zA-Z]:[\\/])/.test(value) || isAbsolute(value)));
   const hash = createHash("sha256");
-  hash.update(JSON.stringify({ schema: 1, nodeVersion, npmVersion, architecture, install: "development,dev,optional", sourceId: lifecycle || localDependency || manifest.workspaces || existsSync(join(directory, "patches")) ? sourceId : null }));
-  for (const file of ["package.json", "package-lock.json", ".npmrc"]) {
+  const sourceBound = profile.kind === "root-v1" && (lifecycle || localDependency || manifest.workspaces || manifest.bundleDependencies || manifest.bundledDependencies || existsSync(join(directory, "patches")) || existsSync(join(directory, "binding.gyp")));
+  hash.update(JSON.stringify({ schema: 2, profile: profile.kind, nodeVersion, npmVersion, architecture, install: "development,dev,optional", sourceId: sourceBound ? sourceId : null }));
+  for (const [file, path] of [["package.json", profile.manifestPath], ["package-lock.json", profile.lockPath], [".npmrc", join(directory, ".npmrc")]]) {
     hash.update(`\0${file}\0`);
-    hash.update(existsSync(join(directory, file)) ? readFileSync(join(directory, file)) : "<absent>");
+    hash.update(existsSync(path) ? readFileSync(path) : "<absent>");
   }
   return hash.digest("hex");
+}
+
+export function dependencyKey(directory, environment) {
+  return profileDependencyKey(directory, environment, selectDependencyProfile(directory));
 }
 
 const ignoredDirectories = new Set([".git", ".github", ".openai", "node_modules", ".next", "dist", ".vinext", ".sites-runtime", ".wrangler", "runtime-data", ".codex", ".agents", "output", "outputs", ".playwright-cli", ".runtime", "docs", "tests"]);
@@ -21,6 +27,10 @@ const nextEnvironmentFiles = new Set([".env", ".env.local", ".env.production", "
 // These custom-server entry points run outside Next. Everything else is a
 // build input unless it is a deployment helper or documentation/test artifact.
 const independentServerFiles = new Set(["server/linux.mjs", "server/entrypoint.sh", "server/http.mjs", "server/monitor-services.mjs", "server/market-collector.mjs", "server/market-store.mjs", "server/initial-market.mjs"]);
+const linuxExcludedFiles = new Set(["vite.config.ts", "drizzle.config.ts", "cloudflare-env.d.ts"]);
+function linuxExcluded(name) {
+  return linuxExcludedFiles.has(name) || name.startsWith("build/") || name.startsWith("db/");
+}
 function sourceFiles(directory, path = "") {
   const files = [];
   for (const entry of readdirSync(join(directory, path), { withFileTypes: true })) {
@@ -44,44 +54,98 @@ function digestFiles(directory, label, files) {
   return hash.digest("hex");
 }
 
-export function installKeys(directory, environment, buildEnvironment = process.env) {
-  const dependencies = dependencyKey(directory, environment);
-  const files = new Set(sourceFiles(directory));
-  const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
-  // A build script may explicitly use a file under tests, as the CI installer
-  // fixture does. Such a file is an actual build input rather than a test-only edit.
-  for (const word of (manifest.scripts?.["build:linux"] ?? "").split(/\s+/)) {
-    const name = word.replace(/^['"]|['"]$/g, "").replace(/^\.\//, "");
-    if (!name.startsWith("/") && !name.includes("..") && existsSync(join(directory, name)) && lstatSync(join(directory, name)).isFile()) files.add(name);
-  }
-  const build = new Set([...files].filter(name => !name.startsWith("deploy/") && !independentServerFiles.has(name)));
-  // Promote an otherwise independent entry point if Next-facing code starts
-  // referring to it. Match all local string references, including dynamic import.
-  for (const name of build) {
-    if (!/\.[cm]?[jt]sx?$/.test(name)) continue;
+function promoteReferencedFiles(directory, included, available) {
+  // Set iteration also visits newly promoted files, so transitive references
+  // restore excluded tool files and independent server entries to the key.
+  for (const name of included) {
+    if (!/\.(?:[cm]?[jt]sx?|json|css)$/.test(name)) continue;
     const source = readFileSync(join(directory, name), "utf8");
     for (const match of source.matchAll(/["'`]((?:\.{1,2}\/|@\/)[^"'`\n]+)["'`]/g)) {
       const target = match[1].startsWith("@/") ? join(directory, match[1].slice(2)) : resolve(directory, dirname(name), match[1]);
-      for (const suffix of ["", ".ts", ".tsx", ".js", ".mjs", "/index.ts", "/index.mjs"]) {
+      for (const suffix of ["", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".json", "/index.ts", "/index.tsx", "/index.js", "/index.mjs", "/index.cjs"]) {
         const candidate = relative(resolve(directory), target + suffix).split(sep).join("/");
-        if (files.has(candidate)) build.add(candidate);
+        if (available.has(candidate)) included.add(candidate);
       }
     }
   }
+}
+
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, entry]) => [key, canonical(entry)]));
+  return value;
+}
+
+function linuxScripts(manifest) {
+  const all = manifest.scripts ?? {};
+  const selected = Object.fromEntries(Object.entries(all).filter(([name]) => /^(pre|post)?(build|start):linux$/.test(name)));
+  // Package-manager commands may delegate to any other root script and its
+  // lifecycle hooks. Preserve the complete recipe in that case.
+  return Object.values(selected).some(script => /\b(?:npm|pnpm|yarn)\b/.test(script)) ? all : selected;
+}
+
+function linuxPackageMetadata(manifest) {
+  // The selected dependency profile covers dependency declarations and locks.
+  // Keep every other field (including type/imports/exports/config) conservative,
+  // while unrelated development scripts do not affect the Linux artifact.
+  const metadata = { ...manifest };
+  for (const name of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies", "peerDependenciesMeta"]) delete metadata[name];
+  metadata.scripts = linuxScripts(manifest);
+  return JSON.stringify(canonical(metadata));
+}
+
+function packageReferencedFiles(manifest, available) {
+  const files = new Set();
+  function visit(value) {
+    if (typeof value === "string" && value.startsWith("./")) {
+      const pattern = value.slice(2).split("*");
+      for (const name of available) {
+        if (pattern.length === 1 ? name === pattern[0] : name.startsWith(pattern[0]) && name.endsWith(pattern.at(-1))) files.add(name);
+      }
+    } else if (value && typeof value === "object") Object.values(value).forEach(visit);
+  }
+  for (const field of ["imports", "exports", "main", "module", "browser", "bin"]) visit(manifest[field]);
+  return files;
+}
+
+export function installKeys(directory, environment, buildEnvironment = process.env) {
+  const profile = selectDependencyProfile(directory);
+  const dependencies = profileDependencyKey(directory, environment, profile);
+  const available = new Set(sourceFiles(directory));
+  const linux = profile.kind === "linux-v1";
+  const files = new Set([...available].filter(name => !linux || (!linuxExcluded(name) && name !== "package.json" && name !== "package-lock.json")));
+  const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
+  if (linux) for (const name of packageReferencedFiles(manifest, available)) files.add(name);
+  // Scripts can explicitly consume an excluded file, including test fixtures.
+  const recipes = linux ? Object.values(linuxScripts(manifest)) : ["prebuild:linux", "build:linux", "postbuild:linux"].map(name => manifest.scripts?.[name] ?? "");
+  for (const script of recipes) {
+    for (const word of script.split(/\s+/)) {
+      const name = word.replace(/^['"]|['"]$/g, "").replace(/^\.\//, "");
+      if (!name.startsWith("/") && !name.includes("..") && existsSync(join(directory, name)) && lstatSync(join(directory, name)).isFile()) {
+        files.add(name);
+        available.add(name);
+      }
+    }
+  }
+  const build = new Set([...files].filter(name => !name.startsWith("deploy/") && !independentServerFiles.has(name)));
+  promoteReferencedFiles(directory, files, available);
+  promoteReferencedFiles(directory, build, available);
   const publicEnvironment = Object.fromEntries(Object.entries(buildEnvironment).filter(([key]) => /^(NEXT_PUBLIC_|MONITOR_BUILD_)/.test(key)).sort(([a], [b]) => a.localeCompare(b)));
-  const runtime = digestFiles(directory, `runtime-v2:${dependencies}`, files);
-  const compiled = digestFiles(directory, `next-v2:${dependencies}:${JSON.stringify(publicEnvironment)}:NODE_ENV=production`, build);
+  const metadata = linux ? linuxPackageMetadata(manifest) : "";
+  const runtime = digestFiles(directory, `runtime-v3:${dependencies}:${metadata}`, files);
+  const compiled = digestFiles(directory, `next-v3:${dependencies}:${metadata}:${JSON.stringify(publicEnvironment)}:NODE_ENV=production`, build);
   return { dependencies, runtime, build: compiled };
 }
 
 export function validBuild(directory) {
   try {
     if (!readFileSync(join(directory, ".next/BUILD_ID"), "utf8").trim()) return false;
+    let routes;
     for (const file of [".next/build-manifest.json", ".next/required-server-files.json", ".next/server/app-paths-manifest.json"]) {
       const value = JSON.parse(readFileSync(join(directory, file), "utf8"));
       if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+      if (file === ".next/server/app-paths-manifest.json") routes = value;
     }
-    const routes = JSON.parse(readFileSync(join(directory, ".next/server/app-paths-manifest.json"), "utf8"));
     return Object.values(routes).every(name => typeof name === "string" && !name.startsWith("/") && !name.split(/[\\/]/).includes("..") && existsSync(join(directory, ".next/server", name)));
   } catch { return false; }
 }
