@@ -9,7 +9,7 @@ export function releaseInput(name) {
   if (/^(?:docs|tests|\.github|\.openai|\.codex|\.agents)\//.test(name)) return false;
   if (!name.includes('/') && (/\.md$/i.test(name) || /^\.git/.test(name))) return false;
   if (/^deploy\/(?:release-common\.sh|test-release\.py)$/.test(name) || /^scripts\/(?:publish|merge)-release\.mjs$/.test(name)) return false;
-  return name !== 'deploy/install.sh' && name !== 'deploy/profile-install.sh';
+  return name !== 'deploy/install.sh' && name !== 'deploy/profile-install.sh' && name !== 'deploy/README.md';
 }
 
 export function applicationKey(root) {

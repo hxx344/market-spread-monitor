@@ -20,9 +20,9 @@ test('deployment identity follows runtime content and excludes documentation, te
     write('package-lock.json', '{"lockfileVersion":3}');
     write('server/application.mjs', 'export const value = 1;');
     const initial = key();
-    for (const name of ['README.md', 'docs/install.md', 'tests/runtime.test.mjs', '.github/workflows/release.yml']) write(name, 'first');
+    for (const name of ['README.md', 'docs/install.md', 'deploy/README.md', 'tests/runtime.test.mjs', '.github/workflows/release.yml']) write(name, 'first');
     assert.equal(key(), initial);
-    for (const name of ['README.md', 'docs/install.md', 'tests/runtime.test.mjs', '.github/workflows/release.yml']) write(name, 'second');
+    for (const name of ['README.md', 'docs/install.md', 'deploy/README.md', 'tests/runtime.test.mjs', '.github/workflows/release.yml']) write(name, 'second');
     assert.equal(key(), initial);
     write('package-lock.json', '{"lockfileVersion":3,"changed":true}');
     assert.notEqual(key(), initial);

@@ -4,9 +4,23 @@
 curl -fsSL https://raw.githubusercontent.com/hxx344/market-spread-monitor/main/deploy/install.sh | bash
 ```
 
-支持 Ubuntu 22.04 / 24.04、Debian 12 / 13，x86_64 / ARM64，要求 systemd 正在运行。脚本通过 sudo 提权或以 root 执行；安装专用 Node.js 24.15.0 并校验下载包。重复执行即升级；新版构建、登录及两个后台检查通过后完成切换，失败恢复旧版本。
+支持 Ubuntu 22.04 / 24.04、Debian 12 / 13，x86_64 / ARM64，要求 systemd 正在运行。脚本通过 sudo 提权或以 root 执行；安装专用 Node.js 24.15.0 并校验下载包。默认下载 CI 验证过的运行包，服务器不执行 npm 安装或构建。重复执行即升级；下载校验、登录及后台检查通过后完成切换，失败恢复旧版本。
 
-## 按变化升级
+## 默认 CI 运行包
+
+| 检查结果 | 执行内容 |
+| --- | --- |
+| 运行内容、配置和服务健康状态未变 | 仅核对清单和健康，跳过下载包、安装依赖、构建及重启 |
+| 新提交仅修改文档、测试、CI 或安装器 | 内容键未变时保持当前进程和版本目录 |
+| 仅配置变化或服务停止 | 复用当前运行包，校验配置并恢复服务 |
+| 运行代码变化或旧源码安装首次迁移 | 下载固定提交制品、校验 SHA-256、独立解包后切换 |
+| 制品缺失、校验失败或启动失败 | 切换前停止更新，或恢复原服务；保留配置和数据 |
+
+x64 和 ARM64 都在原生 Linux 环境验证解包后的服务；最近成功的构建作为可安装版本，后续失败构建不会覆盖它。详细规则见 [CI 运行包部署](../docs/ci-release.md)。
+
+## 源码模式的增量构建
+
+下面的依赖、缓存和现场构建规则仅适用于显式指定 `PROJECT_DEPLOY_MODE=source`、`--source-dir` 或 `--rebuild`。例如将一键命令末尾改为 `env PROJECT_DEPLOY_MODE=source bash`。
 
 | 检查结果 | 执行内容 |
 | --- | --- |
@@ -47,7 +61,7 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/market-spread-monitor/main/d
 
 下载部署脚本单独计时；阶段总耗时从提权后的安装前置检查开始，不包含下载诊断入口和等待输入 sudo 密码的时间。报告保存在输出指示的 `/tmp/market-spread-profile.XXXXXXXX/summary.txt`，目录和文件仅当前执行用户（正常为 root）可读，可用 `sudo cat` 查看。报告只含固定阶段、耗时及状态，不保存安装输出、登录密码或环境配置；排查时粘贴末尾耗时汇总即可。
 
-### 构建优化
+### 源码模式构建优化
 
 服务器安装全部运行依赖，以及 React/Vite 构建需要的 Vite、React 插件、TypeScript、类型声明和 Tailwind 工具；不安装 Next、Vinext、Wrangler、ESLint、Drizzle Kit 等 Linux 路径未使用的工具。`npm run build:linux` 先显式运行 TypeScript 检查，再分别构建浏览器与 SSR 入口。`tsconfig.linux.json` 保留应用类型检查，应用实际导入的文件仍参与检查和构建内容判断。
 
