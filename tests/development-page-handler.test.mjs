@@ -131,7 +131,9 @@ test('real Vite HTTP and HMR share Basic authentication without a second listene
     const browser = await f.open({ headers, path: `/?token=${encodeURIComponent(token)}` });
     assert.equal(browser.message.type, 'connected');
     assert.equal(browser.ws.readyState, WebSocket.OPEN);
+    const disconnected = new Promise(resolve => browser.ws.once('close', resolve));
     await f.closePages();
-    assert.notEqual(browser.ws.readyState, WebSocket.OPEN, 'Closing Vite terminates its active HMR client');
+    await deadline(disconnected, 5000, 'The HMR client must receive the server shutdown');
+    assert.equal(browser.ws.readyState, WebSocket.CLOSED, 'Closing Vite terminates its active HMR client');
   });
 });
