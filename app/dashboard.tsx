@@ -1,8 +1,7 @@
 "use client";
 
 import { Activity as ChartActivity, useEffect, useMemo, useState } from "react";
-import dynamic from "next/dynamic";
-import Link from "next/link";
+import { lazyComponent } from "../lib/lazy-component";
 import { Activity, ArrowDownRight, ArrowUpRight, ChevronDown, Clock3, Info, RefreshCw, MoveRight, BarChart3 } from "lucide-react";
 import { ranges } from "../lib/chart-ranges";
 import { dailyPoints, selectRange } from "../lib/market";
@@ -12,12 +11,12 @@ import { createTrend } from "../lib/monitor-trend";
 import type { InitialMarketData } from "../lib/initial-market";
 
 const EMPTY_POINTS: never[] = [];
-const SpreadChart = dynamic(() => import("./spread-chart"), {
-  ssr: false,
+const SpreadChart = lazyComponent(() => import("./spread-chart"), {
+  clientOnly: true,
   loading: () => <section className="chart-panel"><div className="chart-container"><div className="empty-chart" role="status"><p>正在载入价差图表…</p></div></div></section>,
 });
-const HynixFundingPanel = dynamic(() => import("./hynix-funding-panel"), {
-  ssr: false,
+const HynixFundingPanel = lazyComponent(() => import("./hynix-funding-panel"), {
+  clientOnly: true,
   loading: () => <section className="chart-panel hynix-funding-panel"><div className="chart-container"><div className="empty-chart" role="status"><p>正在载入多空资金费图表…</p></div></div></section>,
 });
 const money = (v: number | undefined) => v === undefined ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(v);
@@ -48,7 +47,7 @@ export default function Dashboard({ onSummary, active = true, summaryActive = ac
   const recent = useMemo(() => dailyPoints(points).slice(-6).reverse(),[points]);
   const direction = !current || current.premium >= 0 ? "positive" : "negative";
   return <div className="site-shell">
-    <header className="topbar"><Link className="brand" href="/" aria-label="Hynix Spread 首页"><span className="brand-mark"><BarChart3 size={23}/></span><span>HYNIX<span className="brand-light"> / SPREAD</span></span></Link><div className="top-meta"><span>跨市场观察</span><span className="vertical-rule"/><span className="source-dot"/>Hyperliquid</div></header>
+    <header className="topbar"><a className="brand" href="/" aria-label="Hynix Spread 首页"><span className="brand-mark"><BarChart3 size={23}/></span><span>HYNIX<span className="brand-light"> / SPREAD</span></span></a><div className="top-meta"><span>跨市场观察</span><span className="vertical-rule"/><span className="source-dot"/>Hyperliquid</div></header>
     <main>
       <div className="page-heading"><div><div className="eyebrow">SK HYNIX <span>/</span> 000660 · SKHY</div><h1>海力士 ADR 价差<span className="small-tag">上市以来</span></h1><p>正股与 ADR 同口径比较 · Hyperliquid 永续合约</p></div><div className="refresh-area"><button className="refresh-button" onClick={refresh} disabled={loading}><RefreshCw size={15} className={loading ? "spinning" : ""}/>{loading ? "加载行情" : "刷新行情"}</button><span>每 10 秒自动刷新</span></div></div>
       <div className="data-status" role="status"><span className="status-left"><Clock3 size={14}/>{quote ? `${quoteError ? "实时更新中断 · 上次获取" : "实时报价 · 获取于"} ${date(quote.fetchedAt,true)} ${new Date(quote.fetchedAt).toISOString().slice(11,19)} UTC` : quoteError ? "实时报价暂不可用 · 每 10 秒自动重试" : "正在获取实时报价 · 每 10 秒自动刷新"}</span><span className="status-right">USD · 1 股正股 = 10 份 ADR</span></div>

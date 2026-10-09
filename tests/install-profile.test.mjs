@@ -56,7 +56,7 @@ profile_phase deps_install
   profile_now=2500
   profile_skip compiler_cache cache_unavailable
   profile_now=4500
-  profile_phase next_build
+  profile_phase app_build
 )
 profile_now=8500
 profile_skip source_download unchanged
@@ -75,17 +75,17 @@ profile_phase rollback
   assert.equal(result.directories.length, 1);
   assert.match(result.summary, /总耗时：10\.500 秒/);
   assert.match(result.summary, /部署退出码：0/);
-  assert.match(result.summary, /主要耗时：Next\.js 构建（含类型检查） \[next_build\]（5\.000 秒，47\.62%）/);
+  assert.match(result.summary, /主要耗时：React\/Vite 构建（含类型检查） \[app_build\]（5\.000 秒，47\.62%）/);
   const stages = rows(result.summary);
   assert.equal(stages.length, 28);
-  assert.deepEqual(stages.slice(0, 5).map(({ id, seconds }) => [id, seconds]), [["next_build", 5], ["deps_install", 3.5], ["preflight", 1], ["health_check", 0.5], ["exit_cleanup", 0.5]]);
+  assert.deepEqual(stages.slice(0, 5).map(({ id, seconds }) => [id, seconds]), [["app_build", 5], ["deps_install", 3.5], ["preflight", 1], ["health_check", 0.5], ["exit_cleanup", 0.5]]);
   assert.equal(stages.reduce((total, row) => total + row.seconds, 0), 10.5);
   assert.ok(Math.abs(stages.reduce((total, row) => total + row.percent, 0) - 100) < 0.02);
   assert.equal(stages.find(row => row.id === "source_download").state, "跳过（内容未变）");
   assert.equal(stages.find(row => row.id === "compiler_cache").state, "跳过（无可用缓存）");
   assert.equal(stages.find(row => row.id === "rollback").state, "未执行");
   assert.equal(result.events.split("\n").filter(line => line.startsWith("end\t")).length, 1, "Report is idempotent");
-  assert.match(result.events, /phase\t4500\tnext_build\t0/);
+  assert.match(result.events, /phase\t4500\tapp_build\t0/);
   assert.equal((result.stdout.match(/计时报告：/g) ?? []).length, 1);
   if (process.platform === "linux") {
     assert.equal((await stat(result.directory)).mode & 0o777, 0o700);
@@ -98,18 +98,18 @@ test("a failing child reports the build failure once and preserves the original 
 profile_init "$fixture_root"
 profile_phase preflight
 profile_now=2000
-profile_phase next_build
+profile_phase app_build
 trap 'status=$?; profile_now=6500; profile_phase exit_cleanup "$status"; profile_now=7000; profile_report "$status"; exit "$status"' EXIT
 (
   trap 'status=$?; profile_report "$status"; exit "$status"' EXIT
   profile_now=3000
-  profile_phase next_build
+  profile_phase app_build
   exit 37
 )
 `);
   assert.equal(result.code, 37, result.stderr);
   const stages = rows(result.summary);
-  assert.equal(stages.find(row => row.id === "next_build").state, "失败（退出码 37）");
+  assert.equal(stages.find(row => row.id === "app_build").state, "失败（退出码 37）");
   assert.equal(stages.find(row => row.id === "exit_cleanup").state, "完成", "Successful cleanup does not inherit the earlier failure");
   assert.equal(stages.find(row => row.id === "rollback").state, "未执行");
   assert.match(result.summary, /总耗时：6\.000 秒/);
@@ -121,7 +121,7 @@ trap 'status=$?; profile_now=6500; profile_phase exit_cleanup "$status"; profile
 test("disabled profiling has no output or filesystem side effects", shellOnly, async t => {
   const result = await fixture(t, String.raw`
 profile_phase preflight
-profile_skip next_build reused
+profile_skip app_build reused
 profile_report 43
 `);
   assert.equal(result.code, 0, result.stderr);
@@ -139,9 +139,9 @@ profile_phase preflight
 printf '%s\n' "$SECRET_VALUE"
 profile_phase "$SECRET_VALUE"
 profile_skip "$SECRET_VALUE" reused
-profile_skip next_build "$SECRET_VALUE"
-profile_phase next_build "$SECRET_VALUE"
-profile_skip next_build reused
+profile_skip app_build "$SECRET_VALUE"
+profile_phase app_build "$SECRET_VALUE"
+profile_skip app_build reused
 profile_now=2000
 profile_report 0
 `);
@@ -150,8 +150,8 @@ profile_report 0
   assert.ok(!result.events.includes(secret));
   assert.ok(!result.summary.includes(secret));
   assert.ok(!result.events.includes(result.root));
-  assert.equal(rows(result.summary).find(row => row.id === "next_build").state, "跳过（已复用）");
-  assert.deepEqual(result.events.trim().split("\n"), ["phase\t1000\tpreflight\t0", "skip\t1000\tnext_build\treused", "end\t2000\t0\t0"]);
+  assert.equal(rows(result.summary).find(row => row.id === "app_build").state, "跳过（已复用）");
+  assert.deepEqual(result.events.trim().split("\n"), ["phase\t1000\tpreflight\t0", "skip\t1000\tapp_build\treused", "end\t2000\t0\t0"]);
 });
 
 test("unavailable clock, event writes, or report output never replace the deployment error", shellOnly, async t => {
@@ -166,7 +166,7 @@ test("unavailable clock, event writes, or report output never replace the deploy
 profile_init "$fixture_root"
 profile_phase preflight
 ${sabotage}
-profile_phase next_build
+profile_phase app_build
 trap 'status=$?; profile_report "$status"; exit "$status"' EXIT
 exit 47
 `);

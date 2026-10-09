@@ -4,8 +4,7 @@ import { useHubBridge } from "../lib/hub-bridge";
 import { memo, useCallback, useEffect, useState } from "react";
 import { flushSync } from "react-dom";
 import { Activity, ArrowUpRight, Layers3 } from "lucide-react";
-import Link from "next/link";
-import dynamic from 'next/dynamic';
+import { lazyComponent } from '../lib/lazy-component';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import { monitors } from "../lib/monitors";
 import { goldOilSummary, goldOilTrend, summaryExpired, summaryStatusLabels, summaryTimestamp, type MonitorSummary } from "../lib/monitor-summary";
@@ -22,7 +21,7 @@ import { GOLD_OIL_INSTRUMENTS, GOLD_OIL_EXCHANGES, GOLD_OIL_VARIANTS, goldOilVar
 import ExchangeComparison from "./exchange-comparison";
 import { useMonitorControls } from '../lib/use-monitor-controls';
 import { usePerpetualSummary } from '../hooks/use-perpetual-summary';
-const PerpetualPanel = dynamic(() => import('./perpetual-panel'), { loading: () => <p role="status">正在加载合约监控…</p> });
+const PerpetualPanel = lazyComponent(() => import('./perpetual-panel'), { loading: () => <p role="status">正在加载合约监控…</p> });
 
 const panels = { oil: memo(OilPanel), hynix: memo(Dashboard), 'cl-xau': memo(GoldOilPanel) };
 
@@ -123,7 +122,7 @@ export default function MonitorHub({ initial = null, initialMonitor = "oil", ini
     return () => lifecycle.abort();
   }, [selectMonitor]);
   return <div className={`monitor-hub ${active === "perpetual" ? "monitor-hub-perpetual" : ""}`}>
-    <header className="hub-header"><Link className="hub-brand" href="/"><span><Activity size={23}/></span>MARKET <b>/ MONITOR</b></Link><div className="hub-source">跨市场行情 <span>· CEX / DEX</span></div></header>
+    <header className="hub-header"><a className="hub-brand" href="/"><span><Activity size={23}/></span>MARKET <b>/ MONITOR</b></a><div className="hub-source">跨市场行情 <span>· CEX / DEX</span></div></header>
     <div className="hub-intro"><div><p className="eyebrow">跨市场价差观察</p><h1>市场监控</h1></div><a href="https://github.com/hxx344/market-spread-monitor" target="_blank" rel="noreferrer"><Layers3 size={16}/>项目与扩展说明<ArrowUpRight size={15}/></a></div>
     <Tabs value={active} onValueChange={value => selectMonitor(String(value))} className={`hub-tabs ${active === "perpetual" ? "hub-perpetual-active" : ""}`}>
       <TabsList className="hub-market-nav" aria-label="选择监控市场">{monitors.map(monitor => <TabsTrigger key={monitor.id} value={monitor.id} className="hub-market-tab">{monitor.title}</TabsTrigger>)}</TabsList>

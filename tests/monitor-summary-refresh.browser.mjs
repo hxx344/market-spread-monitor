@@ -1,4 +1,4 @@
-// Start the production Next server on 3189, then run in a Playwright CLI session:
+// Start tests/ssr-browser-server.mjs on 3189, then run in a Playwright CLI session:
 // playwright-cli run-code --filename tests/monitor-summary-refresh.browser.mjs
 // API fixtures and a controlled clock keep this regression independent of live markets.
 // eslint-disable-next-line @typescript-eslint/no-unused-expressions -- Playwright CLI evaluates this function.

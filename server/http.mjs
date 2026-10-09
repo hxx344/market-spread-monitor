@@ -31,7 +31,7 @@ async function body(request) {
   try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw new Error("请求必须是有效 JSON。"); }
 }
 
-export function createHandler({ service, services, username, password, nextHandler }) {
+export function createHandler({ service, services, username, password, pageHandler, nextHandler = pageHandler }) {
   const credential = Buffer.from(`${username}:${password}`).toString("base64");
   return async (request, response) => {
     try {
@@ -117,7 +117,11 @@ export function createHandler({ service, services, username, password, nextHandl
           return json(response, 200, result);
         } catch (error) { return json(response, path.endsWith("/test") ? 502 : 400, { error: error.message }); }
       }
-      await nextHandler(request, response);
+      try { await nextHandler(request, response); }
+      catch {
+        if (!response.destroyed && !response.headersSent) await json(response, 500, { error: '页面服务暂不可用' });
+        else if (!response.destroyed) response.end();
+      }
     } catch {
       if (!response.headersSent) json(response, 400, { error: "无法处理请求，请检查输入后重试。" });
       else response.end();

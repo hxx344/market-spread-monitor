@@ -39,7 +39,7 @@ profile_event() {
   [[ ${profile_enabled:-0} == 1 ]] || return 0
   local kind=${1:-} id=${2:-} value=${3:-0}
   case "$id" in
-    preflight|startup_cleanup|system_packages|source_identity|node_runtime|source_download|fingerprints|fast_probe|service_setup|space_check|source_copy|config_check|deps_copy|artifact_copy|compiler_cache|build_workspace|deps_install|next_build|build_validate|permissions|unit_prepare|service_switch|health_check|success_record|final_cleanup|describe|rollback|exit_cleanup) ;;
+    preflight|startup_cleanup|system_packages|source_identity|node_runtime|source_download|fingerprints|fast_probe|service_setup|space_check|source_copy|config_check|deps_copy|artifact_copy|compiler_cache|build_workspace|deps_install|app_build|build_validate|permissions|unit_prepare|service_switch|health_check|success_record|final_cleanup|describe|rollback|exit_cleanup) ;;
     *) return 0 ;;
   esac
   case "$kind" in
@@ -125,7 +125,7 @@ profile_report() {
       add("compiler_cache", "编译缓存恢复")
       add("build_workspace", "构建目录准备")
       add("deps_install", "项目依赖安装")
-      add("next_build", "Next.js 构建（含类型检查）")
+      add("app_build", "React/Vite 构建（含类型检查）")
       add("build_validate", "构建结果验证")
       add("permissions", "文件权限设置")
       add("unit_prepare", "服务定义准备")
@@ -226,7 +226,7 @@ install_project_dependencies() {
     root-v1) log '依赖包含完整安装要求，使用原项目依赖清单。' ;;
     *) die '依赖安装方案无效' ;;
   esac
-  if runuser -u spread-monitor -- env PATH="$runtime/bin:$PATH" NODE_ENV=development NEXT_TELEMETRY_DISABLED=1 npm_config_cache=/var/cache/market-spread-monitor npm ci --include=dev --include=optional --prefer-offline --no-audit --no-fund; then
+  if runuser -u spread-monitor -- env PATH="$runtime/bin:$PATH" NODE_ENV=development npm_config_cache=/var/cache/market-spread-monitor npm ci --include=dev --include=optional --prefer-offline --no-audit --no-fund; then
     status=0
   else status=$?; fi
   if [[ "$profile" == linux-v1 ]]; then
@@ -236,7 +236,7 @@ install_project_dependencies() {
   return "$status"
 }
 
-# Next includes its absolute installation path in Webpack's cache version.
+# TypeScript incremental records use a stable compilation path.
 # Build every candidate at the same path, then move it into its final release.
 # This is a temporary candidate, never a third persistent dependency tree.
 managed_build_workspace() {
@@ -348,8 +348,8 @@ reclaim_caches() {
   done
   for directory in "$base"/releases/*; do
     managed_release "$directory" || continue
-    # Webpack compilation cache only; keep runtime images/fetch caches intact.
-    path="$directory/.next/cache/webpack"
+    # Rebuildable type-check data only; never remove application/runtime data.
+    path="$directory/.build-cache"
     [[ -d "$path" && ! -L "$path" && $(readlink -f "$path") == "$path" ]] || continue
     protects_path "$path" && continue
     rm -rf --one-file-system -- "$path"; removed=$((removed + 1))
@@ -378,10 +378,10 @@ check_build_space() {
     dependency_kb=$(du -sk -- "$candidate/node_modules" | awk '{print $1}')
     dependency_inodes=$(du --inodes -s -- "$candidate/node_modules" | awk '{print $1}')
   fi
-  if [[ -z "$candidate_sizes" && -n "$candidate" && -d "$candidate/.next" ]]; then
-    value=$(du -sk --exclude=cache -- "$candidate/.next" | awk '{print $1}')
+  if [[ -z "$candidate_sizes" && -n "$candidate" && -d "$candidate/dist" ]]; then
+    value=$(du -sk -- "$candidate/dist" | awk '{print $1}')
     (( value <= build_kb )) || build_kb=$value
-    value=$(du --inodes -s --exclude=cache -- "$candidate/.next" | awk '{print $1}')
+    value=$(du --inodes -s -- "$candidate/dist" | awk '{print $1}')
     (( value <= build_inodes )) || build_inodes=$value
   fi
   build_required_kb=$((build_kb + 262144))
@@ -426,8 +426,8 @@ record_success() {
     dependency_inodes=$(du --inodes -s -- "$release/node_modules" | awk '{print $1}')
   fi
   if (( ! reused_build )) || [[ -z "$candidate_sizes" ]]; then
-    build_kb=$(du -sk --exclude=cache -- "$release/.next" | awk '{print $1}')
-    build_inodes=$(du --inodes -s --exclude=cache -- "$release/.next" | awk '{print $1}')
+    build_kb=$(du -sk -- "$release/dist" | awk '{print $1}')
+    build_inodes=$(du --inodes -s -- "$release/dist" | awk '{print $1}')
   fi
   atomic_marker "$release/.install-storage.json" "{\"dependencies\":\"$dependency_key\",\"build\":\"$build_key\",\"dependencyKB\":$dependency_kb,\"dependencyInodes\":$dependency_inodes,\"buildKB\":$build_kb,\"buildInodes\":$build_inodes}"
   touch "$release/.install-root-owned"
@@ -592,9 +592,9 @@ main() {
   else
     # Content-based identity: touching a file or running a previous build is not an upgrade.
     local source_kb
-    source_kb=$(du -sk --exclude='.git' --exclude='node_modules' --exclude='.next' --exclude='dist' --exclude='.vinext' --exclude='.sites-runtime' --exclude='.wrangler' --exclude='.env*' --exclude='runtime-data' --exclude='.codex' --exclude='.agents' --exclude='output' --exclude='outputs' --exclude='.playwright-cli' --exclude='.runtime' --exclude='.install-*' --exclude='*.tsbuildinfo' -- "$source_dir" | awk '{print $1}')
+    source_kb=$(du -sk --exclude='.git' --exclude='node_modules' --exclude='.next' --exclude='.build-cache' --exclude='dist' --exclude='.vinext' --exclude='.sites-runtime' --exclude='.wrangler' --exclude='.env*' --exclude='runtime-data' --exclude='.codex' --exclude='.agents' --exclude='output' --exclude='outputs' --exclude='.playwright-cli' --exclude='.runtime' --exclude='.install-*' --exclude='*.tsbuildinfo' -- "$source_dir" | awk '{print $1}')
     require_space /tmp "$((source_kb + 16384))" 128
-    tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf "$scratch/source.tar.gz" --exclude='./.git' --exclude='./node_modules' --exclude='./.next' --exclude='./dist' --exclude='./.vinext' --exclude='./.sites-runtime' --exclude='./.wrangler' --exclude='./.env*' --exclude='./runtime-data' --exclude='./.codex' --exclude='./.agents' --exclude='./output' --exclude='./outputs' --exclude='./.playwright-cli' --exclude='./.runtime' --exclude='./.install-*' --exclude='*.tsbuildinfo' -C "$source_dir" .
+    tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf "$scratch/source.tar.gz" --exclude='./.git' --exclude='./node_modules' --exclude='./.next' --exclude='./.build-cache' --exclude='./dist' --exclude='./.vinext' --exclude='./.sites-runtime' --exclude='./.wrangler' --exclude='./.env*' --exclude='./runtime-data' --exclude='./.codex' --exclude='./.agents' --exclude='./output' --exclude='./outputs' --exclude='./.playwright-cli' --exclude='./.runtime' --exclude='./.install-*' --exclude='*.tsbuildinfo' -C "$source_dir" .
     release_id="local-$(digest "$scratch/source.tar.gz")"
   fi
 
@@ -653,9 +653,9 @@ main() {
     candidate_source_valid=0
   fi
   if [[ -n "$candidate" && -f "$candidate/.install-ready" && -f "$candidate/.install-root-owned" &&
-      -d "$candidate/node_modules" && ! -L "$candidate/node_modules" && -x "$candidate/node_modules/.bin/next" &&
+      -d "$candidate/node_modules" && ! -L "$candidate/node_modules" && -x "$candidate/node_modules/.bin/vite" &&
       -f "$candidate/node_modules/.package-lock.json" && $(readlink -f "$candidate/.runtime") == "$runtime" ]] &&
-      (cd "$candidate"; "$runtime/bin/node" -e "require('next'); require('react')"); then
+      (cd "$candidate"; "$runtime/bin/node" -e "require('vite'); require('react'); require('react-dom/server'); require('typescript')"); then
     candidate_dependencies_valid=1
     if "$runtime/bin/node" "$input_dir/deploy/install-inputs.mjs" "$candidate" --valid-build; then candidate_valid=1; fi
     candidate_sizes=$("$runtime/bin/node" "$input_dir/deploy/install-inputs.mjs" "$candidate" --sizes)
@@ -666,7 +666,7 @@ main() {
       $(cat "$candidate/.install-build" 2>/dev/null || true) == "$build_key" ]]; then
     release=$candidate; reused=1; reused_build=1
     profile_skip deps_install reused
-    profile_skip next_build reused
+    profile_skip app_build reused
     for phase in deps_copy artifact_copy compiler_cache build_workspace build_validate permissions unit_prepare source_copy service_setup space_check; do profile_skip "$phase" not_needed; done
     if [[ $(cat "$release/.install-config") == "$(digest "$config")" && $(cat "$release/.install-unit") == "$(unit_fingerprint)" ]] && probe_running; then
       profile_skip service_switch unchanged
@@ -725,7 +725,7 @@ main() {
   touch "$release/.install-owned"
   chmod 0755 "$release"
   # Only source files enter a candidate; generated/runtime trees are never copied here.
-  tar --exclude='./node_modules' --exclude='./.next' --exclude='./.runtime' --exclude='./.install-*' -C "$input_dir" -cf - . | tar -xf - -C "$release"
+  tar --exclude='./node_modules' --exclude='./.next' --exclude='./dist' --exclude='./.build-cache' --exclude='./.runtime' --exclude='./.install-*' -C "$input_dir" -cf - . | tar -xf - -C "$release"
   [[ -f "$release/deploy/check-install.mjs" && -f "$release/deploy/install-inputs.mjs" && -f "$release/deploy/market-spread-monitor.service" && -f "$release/server/entrypoint.sh" ]] || die '发布文件不完整'
   profile_phase config_check
   check_config
@@ -733,43 +733,30 @@ main() {
   if (( ! rebuild && candidate_dependencies_valid )) && [[ -f "$candidate/.install-dependencies" && $(cat "$candidate/.install-dependencies") == "$dependency_key" ]]; then
     log '依赖未变，复用已安装依赖的独立副本。'
     profile_phase deps_copy
-    if cp -a --reflink=auto "$candidate/node_modules" "$release/node_modules" && [[ -x "$release/node_modules/.bin/next" && -f "$release/node_modules/.package-lock.json" ]] && (cd "$release"; "$runtime/bin/node" -e "require('next'); require('react')"); then
+    if cp -a --reflink=auto "$candidate/node_modules" "$release/node_modules" && [[ -x "$release/node_modules/.bin/vite" && -f "$release/node_modules/.package-lock.json" ]] && (cd "$release"; "$runtime/bin/node" -e "require('vite'); require('react'); require('react-dom/server'); require('typescript')"); then
       reused=1
       profile_skip deps_install reused
       if (( candidate_valid )) && [[ $(cat "$candidate/.install-build") == "$build_key" ]]; then
-        log 'Next 构建输入未变，复用已验证的独立构建副本。'
+        log 'React/Vite 构建输入未变，复用已验证的独立构建副本。'
         profile_phase artifact_copy
-        mkdir "$release/.next"
-        local artifact
-        for artifact in "$candidate/.next"/* "$candidate/.next"/.[!.]*; do
-          [[ -e "$artifact" && ${artifact##*/} != cache ]] || continue
-          cp -a --reflink=auto "$artifact" "$release/.next/"
-        done
+        cp -a --reflink=auto "$candidate/dist" "$release/dist"
         if "$runtime/bin/node" "$release/deploy/install-inputs.mjs" "$release" --valid-build; then reused_build=1;
-        else rm -rf -- "$release/.next"; fi
+        else rm -rf -- "$release/dist"; fi
       else profile_skip artifact_copy not_needed; fi
-      # Copy only compilation caches. .rscinfo preserves Next's own expiring
-      # build salt (part of the Webpack key); .tsbuildinfo enables incremental
-      # type checking. Never copy runtime image/fetch caches or fix the salt.
-      if [[ -d "$candidate/.next/cache" && ! -L "$candidate/.next/cache" ]]; then
-        profile_phase compiler_cache
-        local cache_kb=0 cache_inodes=0 cache_entry
-        local -a compiler_caches=()
-        for cache_entry in webpack .rscinfo .tsbuildinfo; do
-          [[ -e "$candidate/.next/cache/$cache_entry" && ! -L "$candidate/.next/cache/$cache_entry" ]] || continue
-          compiler_caches+=("$candidate/.next/cache/$cache_entry")
-          cache_kb=$((cache_kb + $(du -sk -- "$candidate/.next/cache/$cache_entry" | awk '{print $1}')))
-          cache_inodes=$((cache_inodes + $(du --inodes -s -- "$candidate/.next/cache/$cache_entry" | awk '{print $1}')))
-        done
-        if (( ${#compiler_caches[@]} )); then
-          storage_stats "$base/releases"
-          if (( storage_free_kb >= cache_kb + build_required_kb + 262144 )) && { [[ "$storage_free_inodes" == - ]] || (( storage_free_inodes >= cache_inodes + build_required_inodes )); }; then
-            mkdir -p "$release/.next/cache"
-            if cp -a --reflink=auto -- "${compiler_caches[@]}" "$release/.next/cache/"; then
-              log '已复制 Webpack 与 TypeScript 编译缓存，构建时按内容校验复用。'
-            else rm -rf -- "$release/.next/cache"; fi
-          else log '剩余空间较少，跳过可选编译缓存副本。'; fi
-        fi
+      # Only TypeScript has a persistent compilation cache in this build chain.
+      if [[ -d "$candidate/.build-cache" && ! -L "$candidate/.build-cache" &&
+          -f "$candidate/.build-cache/tsconfig.tsbuildinfo" && ! -L "$candidate/.build-cache/tsconfig.tsbuildinfo" ]]; then
+        local cache_kb cache_inodes
+        cache_kb=$(du -sk -- "$candidate/.build-cache/tsconfig.tsbuildinfo" | awk '{print $1}')
+        cache_inodes=1
+        storage_stats "$base/releases"
+        if (( storage_free_kb >= cache_kb + build_required_kb + 262144 )) && { [[ "$storage_free_inodes" == - ]] || (( storage_free_inodes >= cache_inodes + build_required_inodes )); }; then
+          profile_phase compiler_cache
+          mkdir -p "$release/.build-cache"
+          if cp -a --reflink=auto -- "$candidate/.build-cache/tsconfig.tsbuildinfo" "$release/.build-cache/"; then
+            log '已复制 TypeScript 增量检查缓存，构建时按内容校验复用。'
+          else rm -rf -- "$release/.build-cache"; fi
+        else profile_skip compiler_cache space_low; log '剩余空间较少，跳过可选编译缓存副本。'; fi
       else profile_skip compiler_cache cache_unavailable; fi
     else
       log '依赖副本不完整，自动重新安装。'
@@ -780,8 +767,8 @@ main() {
     profile_skip artifact_copy not_needed
     profile_skip compiler_cache cache_unavailable
   fi
-  # Reused dependencies are already immutable and retain root ownership. Next
-  # writes to the candidate/.next, not into an existing dependency installation.
+  # Reused dependencies stay immutable. Build outputs and type-check cache are
+  # written only into the independent candidate, never its running predecessor.
   profile_phase build_workspace
   require_space "$base/releases" "$build_required_kb" "$build_required_inodes"
   if (( ! reused || ! reused_build )); then
@@ -803,10 +790,10 @@ main() {
       install_project_dependencies
     fi
     if (( ! reused_build )); then
-      log '正在构建变更后的代码（包含 Next 类型检查）。'
-      profile_phase next_build
-      runuser -u spread-monitor -- env PATH="$runtime/bin:$PATH" NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 npm run build:linux
-    else profile_skip next_build reused; fi
+      log '正在构建变更后的代码（包含 TypeScript 检查与 React/Vite 构建）。'
+      profile_phase app_build
+      runuser -u spread-monitor -- env PATH="$runtime/bin:$PATH" NODE_ENV=production npm run build:linux
+    else profile_skip app_build reused; fi
   )
   profile_phase build_validate
   restore_build_workspace || die '无法将构建结果移入版本目录'
@@ -817,14 +804,12 @@ main() {
   fi
   build_source=$release_id
   if (( reused_build )); then build_source=$(cat "$candidate/.install-build-source"); fi
-  # Source and dependencies are root-owned and read-only to the service. Only
-  # Next's runtime cache remains writable. Avoid traversing copied dependencies.
+  # Source, build artifacts and type-check cache are read-only to the service.
+  # Avoid traversing dependencies which already retain root ownership.
   profile_phase permissions
-  find "$release" \( -path "$release/node_modules" -o -path "$release/.next/cache" \) -prune -o \
+  find "$release" -path "$release/node_modules" -prune -o \
     \( -exec chown -h root:root {} + \( -type f -exec chmod a+r,go-w {} + -o -type d -exec chmod a+rx,go-w {} + \) \)
   if (( ! reused )); then chown -R root:root "$release/node_modules"; chmod -R a+rX,go-w "$release/node_modules"; fi
-  install -d -m 0700 -o spread-monitor -g spread-monitor "$release/.next/cache"
-  chown -R spread-monitor:spread-monitor "$release/.next/cache"
   profile_phase unit_prepare
   sed -e "s|^WorkingDirectory=.*|WorkingDirectory=$base/current|" -e "s|^ExecStart=.*|ExecStart=/bin/bash $base/current/server/entrypoint.sh|" "$release/deploy/market-spread-monitor.service" > "$scratch/market-spread-monitor.service"
   if ! cmp -s -- "$scratch/market-spread-monitor.service" "$unit"; then

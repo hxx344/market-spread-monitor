@@ -1,7 +1,7 @@
 "use client";
 
 import { Fragment, memo, useCallback, useEffect, useId, useRef, useState } from "react";
-import dynamic from "next/dynamic";
+import { lazyComponent } from "../lib/lazy-component";
 import { ChevronDown, RefreshCw } from "lucide-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { calculateExchangeSpread, displayComparisonExchanges, exchangeContracts, exchangeDefinition, exchangeNames, externalQuoteStale, type Exchange, type ExchangeLeg, type ExchangeQuote, type ExternalQuoteSet, type SpreadMarket } from "../lib/exchange-quotes";
@@ -11,7 +11,7 @@ import { startActivityPolling } from "../lib/polling";
 import ExchangeFundingHistoryPanel, { type FundingHistorySelection } from "./exchange-funding-history";
 import VariationalSession from "./variational-session";
 
-const OilFundingHedge = dynamic(() => import("./oil-funding-hedge"), { ssr: false, loading: () => <p className="exchange-caption" role="status">正在载入四腿历史模拟…</p> });
+const OilFundingHedge = lazyComponent(() => import("./oil-funding-hedge"), { clientOnly: true, loading: () => <p className="exchange-caption" role="status">正在载入四腿历史模拟…</p> });
 
 const signed = (value: number | null | undefined, digits = 2, suffix = "") => { if (value == null) return "—"; const rounded = Number(value.toFixed(digits)); return `${rounded > 0 ? "+" : rounded < 0 ? "−" : ""}${Math.abs(rounded).toFixed(digits)}${suffix}`; };
 const tone = (value: number | null | undefined) => value == null || value === 0 ? "" : value > 0 ? "positive" : "negative";

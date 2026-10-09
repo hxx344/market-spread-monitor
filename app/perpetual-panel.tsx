@@ -1,8 +1,7 @@
 "use client";
 
 import { hubNavigate, cleanHubQuery } from "../lib/hub-bridge";
-import { Fragment, Suspense, memo, useDeferredValue, useEffect, useMemo, useState, type ReactNode } from "react";
-import dynamic from "next/dynamic";
+import { Fragment, Suspense, lazy, memo, useDeferredValue, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Activity, ArrowDown, Bell, ChevronDown, ChevronLeft, ChevronRight, RefreshCw, Search, SlidersHorizontal, Star, X } from "lucide-react";
 import { usePerpetualFeed } from "../hooks/use-perpetual-feed";
 import { usePerpetualQuality } from "../hooks/use-perpetual-quality";
@@ -29,14 +28,14 @@ import { compileScannerRanges, evaluateScannerRanges, parseScannerRangeInputs, t
 import "./perpetual.css";
 import "./perpetual-scanner.css";
 
-const PerpetualHealth = dynamic(() => import("./perpetual-health"));
-const PerpetualManualPairs = dynamic(() => import("./perpetual-manual-pairs"));
-const PerpetualAlerts = dynamic(() => import("./perpetual-alerts"));
-const PerpetualExecution = dynamic(() => import("./perpetual-execution").then(module => module.PerpetualExecution));
-const PerpetualHolding = dynamic(() => import("./perpetual-holding"));
-const PerpetualTrend = dynamic(() => import("./perpetual-trend"));
-const PerpetualExit = dynamic(() => import("./perpetual-exit"));
-const PerpetualPaper = dynamic(() => import("./perpetual-paper"));
+const PerpetualHealth = lazy(() => import("./perpetual-health"));
+const PerpetualManualPairs = lazy(() => import("./perpetual-manual-pairs"));
+const PerpetualAlerts = lazy(() => import("./perpetual-alerts"));
+const PerpetualExecution = lazy(() => import("./perpetual-execution").then(module => ({ default: module.PerpetualExecution })));
+const PerpetualHolding = lazy(() => import("./perpetual-holding"));
+const PerpetualTrend = lazy(() => import("./perpetual-trend"));
+const PerpetualExit = lazy(() => import("./perpetual-exit"));
+const PerpetualPaper = lazy(() => import("./perpetual-paper"));
 type DetailTab = "execution" | "quality" | "exit" | "quotes";
 
 const scannerPreferencesKey = "market-monitor:perpetual-scanner:v1";
@@ -563,7 +562,7 @@ function PerpetualPanel({ active = true, interactionActive = active, onSummary, 
         <div className="perp-filter-footer"><span>范围、筛选与组合自选保存在当前浏览器</span><button type="button" onClick={resetFilters}>重置全部筛选</button></div>
       </details>
       <button type="button" className="perp-tool-button" title="选择七所并按现货买卖汇率比较；模拟资格由 CrossEx 模块再次核对" onClick={() => { changeView("rank"); updateFilters({ exchanges: ["binance", "bybit", "okx", "gate", "kraken", "hyperliquid", "lighter"], crossCurrency: true, pairMode: "all", priceMode: "book", search: "", favoritesOnly: false, sortBy: "gross", minSpreadPercent: 0 }); }}>CrossEx 七所</button>
-      <PerpetualManualPairs snapshot={data} mode={filters.priceMode} now={now} budget={qualityBudget} active={opportunitiesActive && toolsOpen} paused={paused}/>
+      <Suspense fallback={null}><PerpetualManualPairs snapshot={data} mode={filters.priceMode} now={now} budget={qualityBudget} active={opportunitiesActive && toolsOpen} paused={paused}/></Suspense>
       <div id="perpetual-health-region" hidden={!healthOpen}><Suspense fallback={<p role="status">正在加载报价健康…</p>}>{healthOpen ? <PerpetualHealth active={active} defaultOpen/> : null}</Suspense></div>
       <div id="perpetual-alert-region" hidden={!alertsOpen}><Suspense fallback={<p role="status">正在加载机会提醒…</p>}>{alertsVisited ? <PerpetualAlerts active={active && alertsOpen} pair={alertPair} budget={qualityBudget} defaultOpen/> : null}</Suspense></div>
       <PerpetualCrossExSettings settings={crossex} now={now}/>

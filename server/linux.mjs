@@ -1,9 +1,8 @@
 import { createServer } from "node:http";
 import { resolve } from "node:path";
-import next from "next";
 import { createMonitorServices } from "./monitor-services.mjs";
 import { createHandler } from "./http.mjs";
-import { registerInitialMarket } from "./initial-market.mjs";
+import { createPageHandler } from './page-handler.mjs';
 
 const host = process.env.HOST ?? "127.0.0.1";
 const port = Number(process.env.PORT ?? 3000);
@@ -14,18 +13,16 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("PORT �
 const directory = resolve(process.env.ALERT_DATA_DIR ?? "./runtime-data");
 if (process.platform === "linux" && process.env.MONITOR_EXTERNAL_LOCK !== "1") throw new Error("请通过 bash server/entrypoint.sh 启动，确保运行数据目录持有内核锁。");
 const services = await createMonitorServices(directory, { externallyLocked: process.env.MONITOR_EXTERNAL_LOCK === "1" });
-const releaseInitialMarket = registerInitialMarket(services);
-const app = next({ dev: false, hostname: host, port });
-let server;
+let server, pages;
 try {
-await app.prepare();
-server = createServer(createHandler({ services, username, password, nextHandler: app.getRequestHandler() }));
+pages = await createPageHandler({ services, development: process.argv.includes('--dev') });
+server = createServer(createHandler({ services, username, password, pageHandler: pages.handle }));
 server.requestTimeout = 30_000;
 await new Promise((accept, reject) => { server.once("error", reject); server.listen(port, host, accept); });
 services.market.start();
 for (const service of services.values()) await service.start();
 console.log(`Market Monitor is listening on http://${host}:${port}; ${[...services].filter(([, service]) => service.runtime().running).map(([id]) => id).join(', ') || 'no'} monitors are running.`);
-} catch (error) { releaseInitialMarket(); await Promise.allSettled([...services.values()].map(service => service.stop())); await services.market.stop(); await services.notifications.stop(); throw error; }
+} catch (error) { await pages?.close(); await Promise.allSettled([...services.values()].map(service => service.stop())); await services.market.stop(); await services.notifications.stop(); throw error; }
 let closing = false;
 async function shutdown() {
   if (closing) return;
@@ -34,12 +31,11 @@ async function shutdown() {
   const closed = new Promise(accept => server.close(accept));
   for (const service of services.values()) service.closeStreams?.();
   await closed;
-  releaseInitialMarket();
   // Drain active configuration requests before stopping persistence or releasing locks.
   await Promise.all([...services.values()].map(service => service.stop()));
   await services.market.stop();
   await services.notifications.stop();
-  await app.close();
+  await pages.close();
   clearTimeout(timeout);
   process.exit(0);
 }

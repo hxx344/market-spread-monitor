@@ -1,5 +1,4 @@
 "use client";
-/* eslint-disable @next/next/no-css-tags -- The shared stylesheet must load inside this ShadowRoot. */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';

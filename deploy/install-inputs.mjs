@@ -10,7 +10,7 @@ function profileDependencyKey(directory, { sourceId, nodeVersion, npmVersion, ar
   const localDependency = ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"].flatMap(field => Object.values(manifest[field] ?? {})).some(value => typeof value === "string" && (/^(?:file:|git\+file:|link:|workspace:|~[\\/]|\.\.?[\\/]|[\\/]|[a-zA-Z]:[\\/])/.test(value) || isAbsolute(value)));
   const hash = createHash("sha256");
   const sourceBound = profile.kind === "root-v1" && (lifecycle || localDependency || manifest.workspaces || manifest.bundleDependencies || manifest.bundledDependencies || existsSync(join(directory, "patches")) || existsSync(join(directory, "binding.gyp")));
-  hash.update(JSON.stringify({ schema: 2, profile: profile.kind, nodeVersion, npmVersion, architecture, install: "development,dev,optional", sourceId: sourceBound ? sourceId : null }));
+  hash.update(JSON.stringify({ schema: 3, profile: profile.kind, nodeVersion, npmVersion, architecture, install: "development,dev,optional", sourceId: sourceBound ? sourceId : null }));
   for (const [file, path] of [["package.json", profile.manifestPath], ["package-lock.json", profile.lockPath], [".npmrc", join(directory, ".npmrc")]]) {
     hash.update(`\0${file}\0`);
     hash.update(existsSync(path) ? readFileSync(path) : "<absent>");
@@ -22,12 +22,12 @@ export function dependencyKey(directory, environment) {
   return profileDependencyKey(directory, environment, selectDependencyProfile(directory));
 }
 
-const ignoredDirectories = new Set([".git", ".github", ".openai", "node_modules", ".next", "dist", ".vinext", ".sites-runtime", ".wrangler", "runtime-data", ".codex", ".agents", "output", "outputs", ".playwright-cli", ".runtime", "docs", "tests"]);
-const nextEnvironmentFiles = new Set([".env", ".env.local", ".env.production", ".env.production.local"]);
-// These custom-server entry points run outside Next. Everything else is a
+const ignoredDirectories = new Set([".git", ".github", ".openai", "node_modules", ".next", "dist", ".build-cache", ".vinext", ".sites-runtime", ".wrangler", "runtime-data", ".codex", ".agents", "output", "outputs", ".playwright-cli", ".runtime", "docs", "tests"]);
+const buildEnvironmentFiles = new Set([".env", ".env.local", ".env.production", ".env.production.local"]);
+// These custom-server entry points run outside the UI build. Everything else is a
 // build input unless it is a deployment helper or documentation/test artifact.
-const independentServerFiles = new Set(["server/linux.mjs", "server/entrypoint.sh", "server/http.mjs", "server/monitor-services.mjs", "server/market-collector.mjs", "server/market-store.mjs", "server/initial-market.mjs"]);
-const linuxExcludedFiles = new Set(["vite.config.ts", "drizzle.config.ts", "cloudflare-env.d.ts"]);
+const independentServerFiles = new Set(["server/linux.mjs", "server/entrypoint.sh", "server/http.mjs", "server/page-handler.mjs", "server/monitor-services.mjs", "server/market-collector.mjs", "server/market-store.mjs", "server/initial-market.mjs"]);
+const linuxExcludedFiles = new Set(["drizzle.config.ts", "cloudflare-env.d.ts"]);
 function linuxExcluded(name) {
   return linuxExcludedFiles.has(name) || name.startsWith("build/") || name.startsWith("db/");
 }
@@ -37,7 +37,7 @@ function sourceFiles(directory, path = "") {
     const name = path ? `${path}/${entry.name}` : entry.name;
     // public/ is served verbatim, including Markdown or paths named docs/tests.
     // Only known root-level development material is irrelevant to deployment.
-    if (!path && (ignoredDirectories.has(entry.name) || (entry.name.startsWith(".env") && !nextEnvironmentFiles.has(entry.name)) || entry.name.startsWith(".install-") || entry.name.startsWith(".tmp") || entry.name.endsWith(".tsbuildinfo") || name === "next-env.d.ts" || /\.md$/i.test(entry.name))) continue;
+    if (!path && (ignoredDirectories.has(entry.name) || (entry.name.startsWith(".env") && !buildEnvironmentFiles.has(entry.name)) || entry.name.startsWith(".install-") || entry.name.startsWith(".tmp") || entry.name.endsWith(".tsbuildinfo") || name === "next-env.d.ts" || /\.md$/i.test(entry.name))) continue;
     if (entry.isDirectory()) {
       if (path || !ignoredDirectories.has(entry.name)) files.push(...sourceFiles(directory, name));
     } else if (entry.isFile() || entry.isSymbolicLink()) files.push(name);
@@ -130,23 +130,56 @@ export function installKeys(directory, environment, buildEnvironment = process.e
   const build = new Set([...files].filter(name => !name.startsWith("deploy/") && !independentServerFiles.has(name)));
   promoteReferencedFiles(directory, files, available);
   promoteReferencedFiles(directory, build, available);
-  const publicEnvironment = Object.fromEntries(Object.entries(buildEnvironment).filter(([key]) => /^(NEXT_PUBLIC_|MONITOR_BUILD_)/.test(key)).sort(([a], [b]) => a.localeCompare(b)));
+  const publicEnvironment = Object.fromEntries(Object.entries(buildEnvironment).filter(([key]) => /^(VITE_|MONITOR_BUILD_)/.test(key)).sort(([a], [b]) => a.localeCompare(b)));
   const metadata = linux ? linuxPackageMetadata(manifest) : "";
-  const runtime = digestFiles(directory, `runtime-v3:${dependencies}:${metadata}`, files);
-  const compiled = digestFiles(directory, `next-v3:${dependencies}:${metadata}:${JSON.stringify(publicEnvironment)}:NODE_ENV=production`, build);
+  const runtime = digestFiles(directory, `runtime-v4:${dependencies}:${metadata}`, files);
+  const compiled = digestFiles(directory, `react-vite-v1:${dependencies}:${metadata}:${JSON.stringify(publicEnvironment)}:NODE_ENV=production`, build);
   return { dependencies, runtime, build: compiled };
 }
 
 export function validBuild(directory) {
   try {
-    if (!readFileSync(join(directory, ".next/BUILD_ID"), "utf8").trim()) return false;
-    let routes;
-    for (const file of [".next/build-manifest.json", ".next/required-server-files.json", ".next/server/app-paths-manifest.json"]) {
-      const value = JSON.parse(readFileSync(join(directory, file), "utf8"));
-      if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-      if (file === ".next/server/app-paths-manifest.json") routes = value;
+    const root = join(directory, "dist");
+    const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
+    const safePath = name => typeof name === "string" && name.length > 0 && !/[\\:\u0000-\u001f]/.test(name) && !name.split("/").some(part => !part || part === "." || part === "..");
+    const actual = new Set();
+    function inspect(path = "") {
+      const full = join(root, path);
+      const info = lstatSync(full);
+      if (info.isSymbolicLink()) throw new Error("Linked build path");
+      if (info.isDirectory()) {
+        for (const name of readdirSync(full)) inspect(path ? `${path}/${name}` : name);
+      } else if (info.isFile()) {
+        if (path !== "build-manifest.json") {
+          if (!safePath(path) || !/^(client|server)\//.test(path)) throw new Error("Unexpected build file");
+          actual.add(path);
+        }
+      } else throw new Error("Non-regular build path");
     }
-    return Object.values(routes).every(name => typeof name === "string" && !name.startsWith("/") && !name.split(/[\\/]/).includes("..") && existsSync(join(directory, ".next/server", name)));
+    inspect();
+    const inventory = JSON.parse(readFileSync(join(root, "build-manifest.json"), "utf8"));
+    if (!object(inventory) || inventory.schemaVersion !== 1 || !object(inventory.files)) return false;
+    const expected = Object.keys(inventory.files);
+    if (actual.size !== expected.length || !["client/index.html", "client/.vite/manifest.json", "server/entry-server.js"].every(name => actual.has(name))) return false;
+    for (const name of expected) {
+      if (!safePath(name) || !actual.has(name) || !/^[a-f0-9]{64}$/.test(inventory.files[name])) return false;
+      if (createHash("sha256").update(readFileSync(join(root, name))).digest("hex") !== inventory.files[name]) return false;
+    }
+    const manifest = JSON.parse(readFileSync(join(root, "client/.vite/manifest.json"), "utf8"));
+    if (!object(manifest) || !object(manifest["index.html"]) || manifest["index.html"].isEntry !== true) return false;
+    for (const entry of Object.values(manifest)) {
+      if (!object(entry) || !safePath(entry.file) || !actual.has(`client/${entry.file}`)) return false;
+      for (const field of ["css", "assets", "imports", "dynamicImports"]) {
+        if (entry[field] === undefined) continue;
+        if (!Array.isArray(entry[field])) return false;
+        for (const name of entry[field]) {
+          if (field === "imports" || field === "dynamicImports") {
+            if (typeof name !== "string" || !Object.hasOwn(manifest, name)) return false;
+          } else if (!safePath(name) || !actual.has(`client/${name}`)) return false;
+        }
+      }
+    }
+    return true;
   } catch { return false; }
 }
 

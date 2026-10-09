@@ -1,8 +1,7 @@
-// Browser-only fixture: native Windows/Linux Next server, no collectors or live exchange calls.
+// Browser-only fixture: native Windows/Linux page server, no collectors or live exchange calls.
 // Run after npm run build:linux: node tests/oil-exchanges-server.mjs
 import { createServer } from 'node:http';
-import next from 'next';
-import { registerInitialMarket } from '../server/initial-market.mjs';
+import { createPageHandler } from '../server/page-handler.mjs';
 import { comparisonExchanges, exchangeDefinition } from '../lib/exchange-quotes.ts';
 import oilArchive from '../public/oil/data/binance-2026.json' with { type: 'json' };
 import oilCandles from '../public/oil/data/binance-15m.json' with { type: 'json' };
@@ -43,11 +42,9 @@ const services = new Map(['oil', 'hynix'].map(id => [id, { handle(action) {
   if (id === 'oil' && action === 'candles/15m') return { ...oilCandles, status: 'snapshot' };
   throw Error('Fixture unavailable');
 } }]));
-const release = registerInitialMarket(services);
 let variationalSession = { available: true, configured: false, revision: 0, expiresAt: null, updatedAt: null, status: 'missing', error: '' };
-const app = next({ dev: false, hostname: '127.0.0.1', port: 3192 });
-await app.prepare();
-const handler = app.getRequestHandler();
+const app = await createPageHandler({ services });
+const handler = app.handle;
 const server = createServer((request, response) => {
   if (request.url === '/__stop' && request.method === 'POST') { response.end('stopped'); void stop(); return; }
   if (request.url === '/api/monitors/oil/exchanges/variational/session') {
@@ -76,10 +73,14 @@ const server = createServer((request, response) => {
   }
   // Browser scenarios never reach real upstreams, even for unrelated panel reads.
   if (request.url.startsWith('/api/')) { response.writeHead(503, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'Fixture unavailable' })); return; }
-  return handler(request, response);
+  void handler(request, response).catch(error => {
+    console.error('Fixture page handler failed:', error);
+    if (response.headersSent) { response.destroy(error); return; }
+    response.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' }).end('Fixture rendering failed');
+  });
 });
 await new Promise(resolve => server.listen(3192, '127.0.0.1', resolve));
 console.log('Oil exchange fixture ready at http://127.0.0.1:3192');
-async function stop() { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); release(); await app.close(); }
+async function stop() { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await app.close(); }
 process.once('SIGINT', () => void stop());
 process.once('SIGTERM', () => void stop());

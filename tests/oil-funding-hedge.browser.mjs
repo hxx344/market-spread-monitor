@@ -1,5 +1,5 @@
 // Run with playwright-cli run-code --filename tests/oil-funding-hedge.browser.mjs.
-// Uses the native Next fixture tests/oil-exchanges-server.mjs on port 3192.
+// Uses the React SSR fixture tests/oil-exchanges-server.mjs on port 3192.
 // eslint-disable-next-line @typescript-eslint/no-unused-expressions -- Playwright CLI evaluates this function.
 async page => {
   const check = (condition, message) => { if (!condition) throw Error(message); };

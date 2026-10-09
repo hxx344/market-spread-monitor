@@ -33,7 +33,7 @@ function fixture(t, { profile = true, marker = true } = {}) {
   return directory;
 }
 
-test("Linux profile includes every runtime dependency and only the seven build dev dependencies", () => {
+test("Linux profile includes runtime dependencies and the Vite/TypeScript build closure", () => {
   const profile = selectDependencyProfile(root);
   assert.equal(profile.kind, "linux-v1");
   assert.ok(isAbsolute(profile.manifestPath));
@@ -44,7 +44,7 @@ test("Linux profile includes every runtime dependency and only the seven build d
   assert.equal(profile.manifest.scripts, undefined);
   assert.equal(profile.manifest.devDependencies["react-server-dom-webpack"], undefined);
   const packages = readJson(profile.lockPath).packages;
-  for (const name of ["vinext", "vite", "wrangler", "eslint", "eslint-config-next", "drizzle-kit", "react-server-dom-webpack", "@cloudflare/vite-plugin", "@vitejs/plugin-rsc"]) {
+  for (const name of ["next", "vinext", "wrangler", "eslint", "eslint-config-next", "drizzle-kit", "react-server-dom-webpack", "@cloudflare/vite-plugin", "@vitejs/plugin-rsc"]) {
     assert.ok(!packages[`node_modules/${name}`], `${name} must not remain in the Linux closure`);
   }
 });
@@ -54,7 +54,7 @@ test("ordinary scripts and unrelated dev changes do not invalidate the Linux pro
   const manifest = readJson(join(directory, "package.json"));
   manifest.scripts["build:linux"] = "node tests/fixture-build.mjs";
   manifest.scripts.lint = "different lint command";
-  manifest.devDependencies.vite = "99.0.0";
+  manifest.devDependencies.eslint = "99.0.0";
   manifest.devDependencies["new-development-tool"] = "1.0.0";
   writeJson(join(directory, "package.json"), manifest);
   assert.equal(selectDependencyProfile(directory).kind, "linux-v1");
@@ -62,7 +62,8 @@ test("ordinary scripts and unrelated dev changes do not invalidate the Linux pro
 
 test("selected dependencies and installation metadata cannot silently drift", t => {
   for (const mutate of [
-    manifest => { manifest.dependencies.next = "99.0.0"; },
+    manifest => { manifest.dependencies.react = "99.0.0"; },
+    manifest => { manifest.devDependencies.vite = "99.0.0"; },
     manifest => { delete manifest.dependencies.ws; },
     manifest => { manifest.dependencies["new-runtime"] = "1.0.0"; },
     manifest => { manifest.devDependencies.typescript = "99.0.0"; },
@@ -79,14 +80,14 @@ test("selected dependencies and installation metadata cannot silently drift", t 
 
 test("root and generated lock declarations and selected resolutions must agree", t => {
   for (const [file, mutate] of [
-    ["package-lock.json", lock => { lock.packages[""].dependencies.next = "99.0.0"; }],
-    ["package-lock.json", lock => { lock.packages["node_modules/next"].version = "99.0.0"; }],
+    ["package-lock.json", lock => { lock.packages[""].dependencies.react = "99.0.0"; }],
+    ["package-lock.json", lock => { lock.packages["node_modules/react"].version = "99.0.0"; }],
     ["package-lock.json", lock => {
-      lock.packages["node_modules/unused/node_modules/styled-jsx"] = { ...lock.packages["node_modules/styled-jsx"] };
-      lock.packages["node_modules/styled-jsx"].version = "99.0.0";
+      lock.packages["node_modules/unused/node_modules/scheduler"] = { ...lock.packages["node_modules/scheduler"] };
+      lock.packages["node_modules/scheduler"].version = "99.0.0";
     }],
     ["deploy/linux/package-lock.json", lock => { lock.packages[""].devDependencies.typescript = "99.0.0"; }],
-    ["deploy/linux/package-lock.json", lock => { lock.packages["node_modules/next"].version = "99.0.0"; }],
+    ["deploy/linux/package-lock.json", lock => { lock.packages["node_modules/react"].version = "99.0.0"; }],
     ["deploy/linux/package-lock.json", lock => { lock.packages["node_modules/clsx"].integrity = "changed"; }],
     ["deploy/linux/package-lock.json", lock => { delete lock.packages["node_modules/ws"]; }],
   ]) {
@@ -157,7 +158,7 @@ test("generated closure keeps the root lock versions and all supported native op
       assert.deepEqual(entry[field], sourceLock.packages[path][field], `${path} ${field} changed`);
     }
   }
-  const nativeVariants = Object.keys(sourceLock.packages).filter(path => /^node_modules\/(?:@next\/swc-|@tailwindcss\/oxide-|@img\/sharp-|lightningcss-)/.test(path));
+  const nativeVariants = Object.keys(sourceLock.packages).filter(path => /^node_modules\/(?:@rolldown\/binding-|@oxc-parser\/binding-|@oxc-transform\/binding-|@tailwindcss\/oxide-|lightningcss-)/.test(path));
   assert.ok(nativeVariants.some(path => path.includes("linux-arm64")));
   assert.ok(nativeVariants.some(path => path.includes("linux-x64")));
   for (const path of nativeVariants) assert.ok(lock.packages[path], `${path} was lost when pruning on the host platform`);

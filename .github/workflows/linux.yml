@@ -9,8 +9,6 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      NEXT_TELEMETRY_DISABLED: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -20,7 +18,7 @@ jobs:
       - run: npm ci
       - run: node scripts/sync-linux-dependencies.mjs --check
       - run: npm test
-      # next build includes the same TypeScript check; keep it enabled there.
+      # build:linux runs the explicit TypeScript check before both Vite builds.
       - run: npm run build:linux
       - run: node tests/linux-smoke.mjs
       - run: systemd-analyze verify deploy/market-spread-monitor.service

@@ -2,8 +2,7 @@
 // Run after build:linux: node tests/gold-oil-loading-server.mjs
 // No collectors, notifications, network data sources or persistent files.
 import { createServer } from 'node:http';
-import next from 'next';
-import { registerInitialMarket } from '../server/initial-market.mjs';
+import { createPageHandler } from '../server/page-handler.mjs';
 
 const now = Date.now(), end = Math.floor(now / 900000) * 900000, start = end - 672 * 900000;
 const common = { source: 'Binance', currency: 'USDT', priceBasis: 'mark', status: 'live', fetchedAt: new Date(now).toISOString() };
@@ -31,17 +30,20 @@ const bybitMarket = (market, oilType) => {
 };
 const bybit = { ...bybitMarket({ quote, history, funding }, 'cl'), bz: bybitMarket(bz, 'bz') };
 const snapshots = { quote, history, funding, bz, bybit };
-const release = registerInitialMarket(new Map([['cl-xau', { handle(action) { const exchange = action.startsWith('bybit/') ? bybit : snapshots, name = action.replace(/^bybit\//, ''); return name.startsWith('bz/') ? exchange.bz[name.slice(3)] : exchange[name]; } }]]));
-const app = next({ dev: false, hostname: '127.0.0.1', port: 3190 });
-await app.prepare();
-const handler = app.getRequestHandler();
+const services = new Map([['cl-xau', { handle(action) { const exchange = action.startsWith('bybit/') ? bybit : snapshots, name = action.replace(/^bybit\//, ''); return name.startsWith('bz/') ? exchange.bz[name.slice(3)] : exchange[name]; } }]]);
+const app = await createPageHandler({ services });
+const handler = app.handle;
 const server = createServer((request, response) => {
   if (request.url === '/__fixture') { response.setHeader('content-type', 'application/json'); response.end(JSON.stringify(snapshots)); return; }
   if (request.url === '/__stop' && request.method === 'POST') { response.end('stopped'); void stop(); return; }
-  return handler(request, response);
+  void handler(request, response).catch(error => {
+    console.error('Fixture page handler failed:', error);
+    if (response.headersSent) { response.destroy(error); return; }
+    response.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' }).end('Fixture rendering failed');
+  });
 });
 await new Promise(resolve => server.listen(3190, '127.0.0.1', resolve));
 console.log('Seeded chart fixture ready at http://127.0.0.1:3190');
-async function stop() { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); release(); await app.close(); }
+async function stop() { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await app.close(); }
 process.once('SIGINT', () => void stop());
 process.once('SIGTERM', () => void stop());

@@ -26,7 +26,7 @@ const profiles = new Map();
 const profilePhases = new Set([
   "preflight", "startup_cleanup", "system_packages", "source_identity", "node_runtime", "source_download",
   "fingerprints", "fast_probe", "service_setup", "space_check", "source_copy", "config_check", "deps_copy",
-  "artifact_copy", "compiler_cache", "build_workspace", "deps_install", "next_build", "build_validate",
+  "artifact_copy", "compiler_cache", "build_workspace", "deps_install", "app_build", "build_validate",
   "permissions", "unit_prepare", "service_switch", "health_check", "success_record", "final_cleanup",
   "describe", "rollback", "exit_cleanup",
 ]);
@@ -161,10 +161,10 @@ async function replaceConfig(value) {
 }
 async function buildCount() { return (await run("sudo", ["cat", "/var/cache/market-spread-monitor/install-test-builds"])).stdout.trim().split("\n").length; }
 async function assertLinuxDependencies(release, source) {
-  for (const name of ["vite", "vinext", "wrangler", "eslint", "@cloudflare/vite-plugin"]) {
+  for (const name of ["next", "vinext", "wrangler", "eslint", "@cloudflare/vite-plugin"]) {
     assert.equal(existsSync(join(release, "node_modules", name)), false, `Linux installation must omit ${name}`);
   }
-  for (const name of ["next", "react", "typescript", "tailwindcss", "@tailwindcss/postcss", "tw-animate-css", "@types/node", "@types/react", "@types/react-dom"]) {
+  for (const name of ["vite", "@vitejs/plugin-react", "react", "react-dom", "typescript", "tailwindcss", "@tailwindcss/postcss", "tw-animate-css", "@types/node", "@types/react", "@types/react-dom"]) {
     assert.ok(existsSync(join(release, "node_modules", name, "package.json")), `Linux installation must retain ${name}`);
   }
   for (const name of ["package.json", "package-lock.json"]) {
@@ -182,14 +182,14 @@ async function assertNoWork(output, { release, processId, builds, dependencyTime
   assert.equal((await stat(unitPath)).mtimeMs, unitTime);
 }
 function logBuildEvidence(label, output) {
-  const lines = output.replace(/\u001b\[[0-9;]*m/g, "").split("\n").filter(line => /Installer (cache|compile)|cached modules|built modules|compiled successfully|Compiled successfully|restore cache|pack from cache/i.test(line));
+  const lines = output.replace(/\u001b\[[0-9;]*m/g, "").split("\n").filter(line => /Installer (cache|compile)|modules transformed|built in/i.test(line));
   console.log(`Installer ${label} build evidence:\n${lines.join("\n")}`);
 }
 async function releases() { return (await run("find", ["/opt/market-spread-monitor/releases", "-mindepth", "1", "-maxdepth", "1", "-type", "d"])).stdout.trim().split("\n").sort(); }
 async function copySource(name) {
   const target = join(scratch, name);
   await run("mkdir", ["-p", target]);
-  await run("bash", ["-o", "pipefail", "-c", 'tar --exclude=./.git --exclude=./node_modules --exclude=./.next --exclude=./.sites-runtime -C "$1" -cf - . | tar -xf - -C "$2"', "copy-source", root, target]);
+  await run("bash", ["-o", "pipefail", "-c", 'tar --exclude=./.git --exclude=./node_modules --exclude=./.next --exclude=./dist --exclude=./.build-cache --exclude=./.sites-runtime -C "$1" -cf - . | tar -xf - -C "$2"', "copy-source", root, target]);
   return target;
 }
 async function exhaustedStorageInstaller(kind) {
@@ -214,48 +214,43 @@ try {
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   manifest.scripts["build:linux"] = "node tests/install-build-wrapper.mjs";
   await writeFile(manifestPath, JSON.stringify(manifest));
-  const routePath = join(baseline, "app/install-cache-probe/route.ts");
-  const routeSource = version => `export const dynamic = 'force-dynamic';\nexport function GET() { return Response.json({ version: '${version}' }); }\n`;
-  await mkdir(join(baseline, "app/install-cache-probe"));
-  await writeFile(routePath, routeSource("initial-compiled-route"));
+  const pagePath = join(baseline, "app/page.tsx");
+  const pageSource = await readFile(pagePath, "utf8");
+  assert.ok(pageSource.includes("return <MonitorHub {...props} />;"), "The build probe must wrap the actual SSR page");
+  const pageWithVersion = version => pageSource.replace("return <MonitorHub {...props} />;", `return <><span data-install-version="${version}" /><MonitorHub {...props} /></>;`);
+  await writeFile(pagePath, pageWithVersion("initial-compiled-page"));
   await writeFile(join(baseline, "tests/install-build-wrapper.mjs"), `import assert from 'node:assert/strict';
-import { appendFileSync, existsSync, readFileSync, writeFileSync, cpSync, realpathSync, statSync, readdirSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync, cpSync, realpathSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-assert.equal(realpathSync('.'), '/opt/market-spread-monitor/build', 'Every real Next build must use the same physical directory');
+assert.equal(realpathSync('.'), '/opt/market-spread-monitor/build', 'Every real React/Vite build must use the same physical directory');
 assert.equal(JSON.parse(readFileSync('package.json', 'utf8')).scripts['build:linux'], 'node tests/install-build-wrapper.mjs', 'The original build script must be restored before npm runs it');
 assert.ok(JSON.parse(readFileSync('package-lock.json', 'utf8')).packages[''].devDependencies.eslint, 'The complete source lock must be restored before compilation');
-for (const name of ['vite', 'vinext', 'wrangler', 'eslint', '@cloudflare/vite-plugin']) assert.equal(existsSync('node_modules/' + name), false, 'Linux build must omit ' + name);
-for (const name of ['typescript', 'tailwindcss', '@tailwindcss/postcss']) assert.ok(existsSync('node_modules/' + name + '/package.json'), 'Linux build requires ' + name);
+for (const name of ['next', 'vinext', 'wrangler', 'eslint', '@cloudflare/vite-plugin']) assert.equal(existsSync('node_modules/' + name), false, 'Linux build must omit ' + name);
+for (const name of ['vite', '@vitejs/plugin-react', 'react', 'react-dom', 'typescript', 'tailwindcss', '@tailwindcss/postcss']) assert.ok(existsSync('node_modules/' + name + '/package.json'), 'Linux build requires ' + name);
 appendFileSync('/var/cache/market-spread-monitor/install-test-builds', JSON.stringify({ cwd: realpathSync('.') }) + '\\n');
 const mode = existsSync('install-fixture-mode') ? readFileSync('install-fixture-mode','utf8').trim() : '';
 if (mode === 'check-build-cache') {
-  const previousCache = '/opt/market-spread-monitor/current/.next/cache/';
-  for (const name of ['webpack', '.rscinfo', '.tsbuildinfo']) assert.ok(existsSync('.next/cache/' + name), 'Missing reusable compiler cache: ' + name);
-  for (const name of ['.rscinfo', '.tsbuildinfo']) {
-    assert.equal(readFileSync('.next/cache/' + name, 'utf8'), readFileSync(previousCache + name, 'utf8'), name + ' contents must be preserved before compilation');
-    assert.equal(statSync('.next/cache/' + name).mtimeMs, statSync(previousCache + name).mtimeMs, name + ' modification time must survive the copy');
-    assert.notEqual(statSync('.next/cache/' + name).ino, statSync(previousCache + name).ino, name + ' must not share a writable inode with the running version');
-  }
-  const packs = readdirSync('.next/cache/webpack', { recursive: true }).filter(name => name.endsWith('.pack'));
-  assert.ok(packs.length > 0, 'The warm build must receive actual Webpack cache packs');
-  const pack = 'webpack/' + packs[0];
-  assert.equal(statSync('.next/cache/' + pack).mtimeMs, statSync(previousCache + pack).mtimeMs);
-  assert.notEqual(statSync('.next/cache/' + pack).ino, statSync(previousCache + pack).ino);
-  for (const name of ['images', 'fetch-cache', 'install-unapproved-cache']) assert.equal(existsSync('.next/cache/' + name), false, 'Runtime and unapproved caches must not enter the compiler workspace');
-  console.log('Installer cache: independent Webpack packs, .rscinfo and .tsbuildinfo preserved before compilation');
+  const name = '.build-cache/tsconfig.tsbuildinfo';
+  const previous = '/opt/market-spread-monitor/current/' + name;
+  assert.ok(existsSync(name), 'The type-check cache must survive between builds');
+  assert.equal(readFileSync(name, 'utf8'), readFileSync(previous, 'utf8'), 'Type-check cache contents must survive the independent copy');
+  assert.equal(statSync(name).mtimeMs, statSync(previous).mtimeMs, 'Type-check cache modification time must survive');
+  assert.notEqual(statSync(name).ino, statSync(previous).ino, 'Type-check cache must not share a writable inode with the running release');
+  assert.equal(existsSync('.build-cache/install-unapproved-cache'), false, 'Only the approved type-check cache may be copied');
+  console.log('Installer cache: independent TypeScript incremental cache preserved before compilation');
 }
-if (mode === 'fail-build') { writeFileSync('node_modules/.isolation-probe', 'new release only'); process.exit(42); }
-if (mode === 'reuse-build') { cpSync('/opt/market-spread-monitor/current/.next', '.next', {recursive:true}); }
+if (mode === 'fail-build') { writeFileSync('.isolation-probe', 'new release only'); process.exit(42); }
+if (mode === 'reuse-build') { cpSync('/opt/market-spread-monitor/current/dist', 'dist', {recursive:true}); }
 else {
   const started = Date.now();
-  const result = spawnSync(process.execPath, ['node_modules/next/dist/bin/next','build','--webpack'], {stdio:'inherit', env: {...process.env, NEXT_WEBPACK_LOGGING: '1'}});
+  const result = spawnSync(process.execPath, ['scripts/build.mjs'], {stdio:'inherit'});
   console.log('Installer compile milliseconds:', Date.now() - started);
   process.exit(result.status ?? 1);
 }
 `);
   console.log("Installer: fresh install through stdin and sudo");
   const coldBuild = await install(baseline, true, { profile: true });
-  assertProfilePhases(coldBuild, { completed: ["deps_install", "next_build", "permissions", "health_check", "success_record", "exit_cleanup"] });
+  assertProfilePhases(coldBuild, { completed: ["deps_install", "app_build", "permissions", "health_check", "success_record", "exit_cleanup"] });
   logBuildEvidence("cold", coldBuild);
   await active();
   const originalConfig = await config();
@@ -266,7 +261,7 @@ else {
   headers = { Authorization: `Basic ${Buffer.from(`${values.APP_USERNAME}:${values.APP_PASSWORD}`).toString("base64")}` };
   assert.equal((await fetch(base)).status, 401);
   assert.equal((await fetch(base, { headers })).status, 200);
-  assert.deepEqual(await (await fetch(`${base}/install-cache-probe`, { headers })).json(), { version: "initial-compiled-route" });
+  assert.ok((await (await fetch(base, { headers })).text()).includes('data-install-version="initial-compiled-page"'));
   const initial = await state();
   const persistedFunding = await fetch(`${base}/api/monitors/hynix/funding`, { headers }).then(response => response.json());
   assert.equal(persistedFunding.collection.source, 'database');
@@ -299,7 +294,7 @@ else {
   console.log("Installer: unchanged source (even after touch) performs no build, install, release switch or restart");
   await utimes(join(baseline, "README.md"), new Date(), new Date());
   const unchanged = await install(baseline, true, { profile: true });
-  assertProfilePhases(unchanged, { completed: ["exit_cleanup"], skipped: { deps_install: "reused", next_build: "reused" } });
+  assertProfilePhases(unchanged, { completed: ["exit_cleanup"], skipped: { deps_install: "reused", app_build: "reused" } });
   await active();
   assert.equal(firstRelease, await current());
   assert.equal(firstPid, await pid());
@@ -326,8 +321,8 @@ else {
 
   console.log("Installer: unrelated Sites configuration and development dependency changes require no install, build or restart");
   const noWork = { release: firstRelease, processId: firstPid, builds: 1, dependencyTime: firstDependencyTime, unitTime: firstUnitTime };
-  const viteConfig = join(baseline, "vite.config.ts");
-  await writeFile(viteConfig, (await readFile(viteConfig, "utf8")) + "\n// Sites-only configuration fixture.\n");
+  await mkdir(join(baseline, "build"), { recursive: true });
+  await writeFile(join(baseline, "build/install-ignored-tool.ts"), "// Unused development-tool fixture.\n");
   await assertNoWork(await install(baseline), noWork);
   const developmentManifest = JSON.parse(await readFile(manifestPath, "utf8"));
   const sourceLockPath = join(baseline, "package-lock.json");
@@ -379,18 +374,17 @@ else {
   assert.equal(await current(), firstRelease);
   assert.equal(await buildCount(), 1);
 
-  console.log("Installer: changed TypeScript route reuses independent compiler caches and returns newly compiled code");
-  for (const name of ["images", "fetch-cache", "install-unapproved-cache"]) {
-    await run("sudo", ["mkdir", "-p", join(firstRelease, ".next/cache", name)]);
-    await run("sudo", ["install", "-m", "0644", "/dev/null", join(firstRelease, ".next/cache", name, "install-preserve-marker")]);
+  console.log("Installer: changed page reuses independent type-check cache and returns newly compiled SSR HTML");
+  for (const name of ["install-unapproved-cache"]) {
+    await run("sudo", ["mkdir", "-p", join(firstRelease, ".build-cache", name)]);
+    await run("sudo", ["install", "-m", "0644", "/dev/null", join(firstRelease, ".build-cache", name, "install-preserve-marker")]);
   }
   await writeFile(join(baseline, "install-fixture-mode"), "check-build-cache");
-  await writeFile(routePath, routeSource("upgraded-compiled-route"));
+  await writeFile(pagePath, pageWithVersion("upgraded-compiled-page"));
   await writeFile(join(baseline, "public/install-version-marker.txt"), "upgraded-source");
   const upgraded = await install(baseline, true, { profile: true });
-  assertProfilePhases(upgraded, { completed: ["deps_copy", "compiler_cache", "next_build", "health_check", "success_record", "exit_cleanup"], skipped: { deps_install: "reused" } });
-  assert.match(upgraded, /Installer cache: independent Webpack packs, \.rscinfo and \.tsbuildinfo preserved before compilation/);
-  assert.match(upgraded.replace(/\u001b\[[0-9;]*m/g, ""), /\bcached modules\b[^\r\n]*\b[1-9][0-9]* modules?\b/, "The warm compilation must report actual cached modules, not merely copied cache files");
+  assertProfilePhases(upgraded, { completed: ["deps_copy", "compiler_cache", "app_build", "health_check", "success_record", "exit_cleanup"], skipped: { deps_install: "reused" } });
+  assert.match(upgraded, /Installer cache: independent TypeScript incremental cache preserved before compilation/);
   logBuildEvidence("warm", upgraded);
   const secondRelease = await current();
   assert.notEqual(firstRelease, secondRelease);
@@ -400,10 +394,10 @@ else {
   assert.equal((await stat(unitPath)).mtimeMs, firstUnitTime, "Application upgrades must retain an unchanged service unit");
   await assertLinuxDependencies(secondRelease, baseline);
   assert.equal((await stat(join(secondRelease, "node_modules/.package-lock.json"))).mtimeMs, firstDependencyTime);
-  assert.notEqual((await stat(join(firstRelease, "node_modules/next/package.json"))).ino, (await stat(join(secondRelease, "node_modules/next/package.json"))).ino);
+  assert.notEqual((await stat(join(firstRelease, "node_modules/vite/package.json"))).ino, (await stat(join(secondRelease, "node_modules/vite/package.json"))).ino);
   assert.equal(await (await fetch(`${base}/install-version-marker.txt`, { headers })).text(), "upgraded-source");
-  assert.deepEqual(await (await fetch(`${base}/install-cache-probe`, { headers })).json(), { version: "upgraded-compiled-route" }, "Compiler cache reuse must not serve the previous TypeScript route");
-  for (const name of ["images", "fetch-cache", "install-unapproved-cache"]) await run("sudo", ["test", "-f", join(firstRelease, ".next/cache", name, "install-preserve-marker")]);
+  assert.ok((await (await fetch(base, { headers })).text()).includes('data-install-version="upgraded-compiled-page"'), "SSR must serve the freshly compiled page");
+  for (const name of ["install-unapproved-cache"]) await run("sudo", ["test", "-f", join(firstRelease, ".build-cache", name, "install-preserve-marker")]);
   assert.equal(await config(), expectedConfig);
   const releaseSet = await releases();
   assert.equal(await databaseMarker(), 'persisted', 'Source upgrade preserves the existing SQLite database');
@@ -451,12 +445,12 @@ else {
   await writeFile(join(baseline, "install-fixture-mode"), "fail-build");
   const pidBefore = await pid();
   const failedBuildOutput = await install(baseline, false, { profile: true });
-  assertProfilePhases(failedBuildOutput, { completed: ["deps_copy", "exit_cleanup"], failed: ["next_build"], skipped: { deps_install: "reused" } });
+  assertProfilePhases(failedBuildOutput, { completed: ["deps_copy", "exit_cleanup"], failed: ["app_build"], skipped: { deps_install: "reused" } });
   assert.ok(!failedBuildOutput.includes("正在安装依赖"));
   assert.equal(await current(), secondRelease);
   assert.equal(await pid(), pidBefore);
   assert.deepEqual(await releases(), releaseSet, "Build failure removes the incomplete candidate without removing the rollback release");
-  assert.equal(existsSync(join(secondRelease, "node_modules/.isolation-probe")), false);
+  assert.equal(existsSync(join(secondRelease, ".isolation-probe")), false);
   await active();
   assert.equal(await config(), expectedConfig);
   assert.deepEqual((await state()).config.rules, rules);
@@ -464,7 +458,7 @@ else {
   assert.deepEqual((await oilState()).config, oilConfig);
   assert.deepEqual(await sharedState(), sharedConfig);
   assert.equal(await databaseMarker(), 'persisted', 'Build failure preserves the existing SQLite database');
-  assert.deepEqual(await (await fetch(`${base}/install-cache-probe`, { headers })).json(), { version: "upgraded-compiled-route" });
+  assert.ok((await (await fetch(base, { headers })).text()).includes('data-install-version="upgraded-compiled-page"'), "SSR must serve the freshly compiled page");
 
   console.log("Installer: failed startup restores the old release and service");
   await writeFile(join(baseline, "install-fixture-mode"), "reuse-build");
@@ -502,38 +496,41 @@ else {
   assert.deepEqual(await sharedState(), sharedConfig);
   assert.equal(await databaseMarker(), 'persisted', 'Dependency rebuild preserves the existing SQLite database');
 
-  console.log("Installer: an independent server change reuses the verified Next artifact and preserves its provenance");
+  console.log("Installer: an independent server change reuses the verified React/Vite artifact and preserves its provenance");
   const compiledSource = await readFile(join(thirdRelease, ".install-build-source"), "utf8");
   const buildBeforeBackend = await buildCount();
   await writeFile(join(baseline, "server/linux.mjs"), originalServer + "\n// Independent server entry update.\n");
   const backendOnly = await install(baseline, true, { profile: true });
-  assertProfilePhases(backendOnly, { completed: ["deps_copy", "artifact_copy", "health_check", "success_record", "exit_cleanup"], skipped: { deps_install: "reused", next_build: "reused" } });
+  assertProfilePhases(backendOnly, { completed: ["deps_copy", "artifact_copy", "health_check", "success_record", "exit_cleanup"], skipped: { deps_install: "reused", app_build: "reused" } });
   const backendRelease = await current();
   assert.notEqual(backendRelease, thirdRelease);
-  assert.match(backendOnly, /Next 构建输入未变/);
+  assert.match(backendOnly, /React\/Vite 构建输入未变/);
   assert.equal(await buildCount(), buildBeforeBackend);
   assert.equal(await readFile(join(backendRelease, ".install-build-source"), "utf8"), compiledSource);
-  for (const name of ["webpack", ".rscinfo", ".tsbuildinfo"]) await run("sudo", ["test", "-e", join(backendRelease, ".next/cache", name)]);
+  for (const name of ["tsconfig.tsbuildinfo"]) await run("sudo", ["test", "-e", join(backendRelease, ".build-cache", name)]);
   assert.equal((await fetch(base, { headers })).status, 200);
   assert.equal((await stat(join(backendRelease, "server/linux.mjs"))).uid, 0);
-  assert.equal((await stat(join(backendRelease, "node_modules/next/package.json"))).uid, 0);
+  assert.equal((await stat(join(backendRelease, "node_modules/vite/package.json"))).uid, 0);
   assert.equal((await stat(join(backendRelease, "server/linux.mjs"))).mode & 0o022, 0);
 
-  console.log("Installer: a Next API server import invalidates the build");
-  const summaryFile = join(baseline, "server/hub-summary.mjs");
-  await writeFile(summaryFile, (await readFile(summaryFile, "utf8")) + "\n// Next-facing API implementation update.\n");
+  console.log("Installer: an SSR-shared page input invalidates the build");
+  const summaryFile = join(baseline, "web/page-props.ts");
+  await writeFile(summaryFile, (await readFile(summaryFile, "utf8")) + "\n// SSR shared page input update.\n");
   const importedChange = await install(baseline);
-  assert.ok(!importedChange.includes("Next 构建输入未变"));
+  assert.ok(!importedChange.includes("React/Vite 构建输入未变"));
   assert.equal(await buildCount(), buildBeforeBackend + 1);
 
-  console.log("Installer: a damaged build manifest is rebuilt while valid dependencies remain reusable");
+  console.log("Installer: a missing lazy client chunk is rebuilt while valid dependencies remain reusable");
   const damagedRelease = await current();
-  await run("sudo", ["rm", join(damagedRelease, ".next/build-manifest.json")]);
+  const damagedManifest = JSON.parse(await readFile(join(damagedRelease, "dist/client/.vite/manifest.json"), "utf8"));
+  const lazyChunk = Object.values(damagedManifest).find(entry => entry.isDynamicEntry);
+  assert.ok(lazyChunk, "The client must contain a separately built lazy panel");
+  await run("sudo", ["rm", "--", join(damagedRelease, "dist/client", lazyChunk.file)]);
   const repaired = await install(baseline);
   assert.match(repaired, /依赖未变，复用已安装依赖/);
-  assert.ok(!repaired.includes("Next 构建输入未变"));
+  assert.ok(!repaired.includes("React/Vite 构建输入未变"));
   assert.equal(await buildCount(), buildBeforeBackend + 2);
-  assert.ok(existsSync(join(await current(), ".next/build-manifest.json")));
+  assert.ok(existsSync(join(await current(), "dist/build-manifest.json")));
   assert.equal(await databaseMarker(), 'persisted');
 
   console.log("Installer: legacy dependency, runtime and build fingerprints migrate once, then the next run is a no-op");
@@ -552,7 +549,7 @@ else {
   const migratedRelease = await current();
   assert.notEqual(migratedRelease, beforeMigration);
   assert.match(migrated, /正在安装依赖/);
-  assert.ok(!migrated.includes("Next 构建输入未变"));
+  assert.ok(!migrated.includes("React/Vite 构建输入未变"));
   assert.equal(await buildCount(), buildsBeforeMigration + 1);
   await assertLinuxDependencies(migratedRelease, baseline);
   const migratedDependencyTime = (await stat(join(migratedRelease, "node_modules/.package-lock.json"))).mtimeMs;
@@ -576,7 +573,7 @@ else {
   assert.deepEqual((await state()).config.rules, rules);
   assert.deepEqual((await oilState()).config, oilConfig);
   assert.deepEqual(await sharedState(), sharedConfig);
-  assert.deepEqual(await (await fetch(`${base}/install-cache-probe`, { headers })).json(), { version: "upgraded-compiled-route" });
+  assert.ok((await (await fetch(base, { headers })).text()).includes('data-install-version="upgraded-compiled-page"'), "SSR must serve the freshly compiled page");
   const buildRecords = (await run("sudo", ["cat", "/var/cache/market-spread-monitor/install-test-builds"])).stdout.trim().split("\n").map(line => JSON.parse(line));
   assert.ok(buildRecords.length >= 2);
   assert.ok(buildRecords.every(record => record.cwd === buildWorkspace), "All build attempts, including failed ones, use the stable workspace path");

@@ -145,26 +145,26 @@ test("cache reclamation preserves protected data, source and runtime caches", li
   const linked = await f.release(4);
   const outside = join(f.root, "external-cache");
   for (const path of [
-    join(plain, ".next/cache/webpack"), join(plain, ".next/cache/images"), join(plain, ".next/cache/fetch-cache"),
-    join(data, ".next/cache/webpack/records"), join(source, ".next/cache/webpack/source"),
-    join(linked, ".next/cache"), outside,
+    join(plain, ".build-cache"), join(plain, ".runtime-cache/images"), join(plain, ".runtime-cache/fetch-cache"),
+    join(data, ".build-cache/records"), join(source, ".build-cache/source"),
+    linked, outside,
     ...["_cacache", "_logs", "_npx"].map(name => join(f.root, "npm-cache", name)),
   ]) await mkdir(path, { recursive: true });
   await writeFile(join(outside, "preserve"), "external cache target");
-  await symlink(outside, join(linked, ".next/cache/webpack"));
+  await symlink(outside, join(linked, ".build-cache"));
   const result = await f.run(`
 storage_current="$fixture_root/npm-cache/_cacache/keep"
 storage_running="$fixture_root/npm-cache/_logs/keep"
-storage_data_dir="$base/releases/${data.split("/").at(-1)}/.next/cache/webpack/records"
-source_dir="$base/releases/${source.split("/").at(-1)}/.next/cache/webpack/source"
+storage_data_dir="$base/releases/${data.split("/").at(-1)}/.build-cache/records"
+source_dir="$base/releases/${source.split("/").at(-1)}/.build-cache/source"
 reclaim_caches
 `);
   assert.equal(result.code, 0, result.stderr);
-  assert.equal(existsSync(join(plain, ".next/cache/webpack")), false);
+  assert.equal(existsSync(join(plain, ".build-cache")), false);
   assert.equal(existsSync(join(f.root, "npm-cache/_npx")), false);
   for (const path of [
-    join(plain, ".next/cache/images"), join(plain, ".next/cache/fetch-cache"),
-    join(data, ".next/cache/webpack/records"), join(source, ".next/cache/webpack/source"),
+    join(plain, ".runtime-cache/images"), join(plain, ".runtime-cache/fetch-cache"),
+    join(data, ".build-cache/records"), join(source, ".build-cache/source"),
     join(f.root, "npm-cache/_cacache"), join(f.root, "npm-cache/_logs"),
   ]) assert.equal(existsSync(path), true, `Runtime or protected cache must remain: ${path}`);
   assert.equal(await readFile(join(outside, "preserve"), "utf8"), "external cache target");
@@ -175,14 +175,14 @@ test("cache reclamation never deletes descendants of a configured data root", li
   const f = await fixture(t);
   const release = await f.release(1);
   const npmRoot = join(f.root, "npm-cache");
-  const releaseCache = join(release, ".next/cache");
-  for (const path of [join(npmRoot, "_cacache"), join(npmRoot, "_logs"), join(npmRoot, "_npx"), join(releaseCache, "webpack")]) {
+  const releaseCache = join(release, ".build-cache");
+  for (const path of [join(npmRoot, "_cacache"), join(npmRoot, "_logs"), join(npmRoot, "_npx"), releaseCache]) {
     await mkdir(path, { recursive: true });
     await writeFile(join(path, "data-sentinel"), "configured data must remain");
   }
   const npmResult = await f.run(`
 storage_data_dir="$fixture_root/npm-cache"
-source_dir="$base/releases/${release.split("/").at(-1)}/.next/cache/webpack"
+source_dir="$base/releases/${release.split("/").at(-1)}/.build-cache"
 reclaim_caches
 `);
   assert.equal(npmResult.code, 0, npmResult.stderr);
@@ -190,11 +190,11 @@ reclaim_caches
     assert.equal(await readFile(join(npmRoot, name, "data-sentinel"), "utf8"), "configured data must remain");
   }
   const releaseResult = await f.run(`
-storage_data_dir="$base/releases/${release.split("/").at(-1)}/.next/cache"
+storage_data_dir="$base/releases/${release.split("/").at(-1)}/.build-cache"
 reclaim_caches
 `);
   assert.equal(releaseResult.code, 0, releaseResult.stderr);
-  assert.equal(await readFile(join(releaseCache, "webpack/data-sentinel"), "utf8"), "configured data must remain");
+  assert.equal(await readFile(join(releaseCache, "data-sentinel"), "utf8"), "configured data must remain");
 });
 
 test("capacity checks retry after reclaim and reject insufficient bytes or inodes", linuxOnly, async t => {

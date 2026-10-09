@@ -1,12 +1,6 @@
-import MonitorHub from "./monitor-hub";
-import { readInitialMarket } from "../lib/server-initial-market";
+import MonitorHub from './monitor-hub';
+import type { PageProps } from '../web/page-props';
 
-export const dynamic = "force-dynamic";
-
-export default async function Home({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
-  const [initial, query] = await Promise.all([readInitialMarket(), searchParams]);
-  const initialMonitor = query.monitor === "perpetual" || query.monitor === "hynix" || query.monitor === 'cl-xau' ? query.monitor : "oil";
-  const initialGoldOil = query.goldOil === 'bz' ? 'bz' : 'cl';
-  const initialGoldOilExchange = query.goldOilExchange === 'bybit' ? 'bybit' : 'binance';
-  return <>{initialMonitor === "oil" ? <><link rel="preload" href="/oil/panel.html" as="fetch" crossOrigin="anonymous"/><link rel="preload" href="/oil/styles.css" as="fetch" crossOrigin="anonymous"/></> : initialMonitor === 'cl-xau' ? <link rel="preload" href="/oil/styles.css" as="style"/> : null}<MonitorHub initial={initial} initialMonitor={initialMonitor} initialGoldOil={initialGoldOil} initialGoldOilExchange={initialGoldOilExchange}/></>;
+export default function Home(props: PageProps) {
+  return <MonitorHub {...props} />;
 }

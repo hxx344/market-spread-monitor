@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync, symlinkSync } from "node:fs";
@@ -85,8 +86,8 @@ function linuxFixture(t, extra = {}) {
     private: true,
     type: "module",
     dependencies: { runtime: "1.0.0" },
-    devDependencies: { typescript: "5.9.3", vite: "8.0.0" },
-    scripts: { "build:linux": "next build --webpack", build: "vite build" },
+    devDependencies: { typescript: "5.9.3", vite: "8.0.0", "@vitejs/plugin-react": "6.0.0", eslint: "9.0.0" },
+    scripts: { "build:linux": "node scripts/build.mjs", build: "vite build" },
     ...extra,
   });
   return directory;
@@ -96,23 +97,23 @@ test("Linux keys omit unrelated root development dependencies, scripts and Sites
   const directory = linuxFixture(t);
   const original = installKeys(directory, environment, {});
   const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
-  manifest.devDependencies.vite = "8.0.1";
+  manifest.devDependencies.eslint = "9.0.1";
   manifest.scripts.build = "vite build --mode sites";
   write(directory, "package.json", JSON.stringify(manifest));
   write(directory, "package-lock.json", JSON.stringify(lockFor(manifest)));
-  for (const name of ["vite.config.ts", "drizzle.config.ts", "cloudflare-env.d.ts", "build/sites-vite-plugin.ts", "db/schema.ts"]) write(directory, name, "// changed Sites input");
+  for (const name of ["drizzle.config.ts", "cloudflare-env.d.ts", "build/sites-vite-plugin.ts", "db/schema.ts"]) write(directory, name, "// changed Sites input");
   assert.deepEqual(installKeys(directory, { ...environment, sourceId: "sites-commit" }, {}), original);
 });
 
 test("Linux selected production, build dependencies and locked package versions invalidate all keys", t => {
-  for (const field of ["dependencies", "devDependencies"]) {
+  for (const [field, name] of [["dependencies", "runtime"], ["devDependencies", "typescript"], ["devDependencies", "vite"], ["devDependencies", "@vitejs/plugin-react"]]) {
     const directory = linuxFixture(t);
     const original = installKeys(directory, environment, {});
     const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
-    manifest[field][field === "dependencies" ? "runtime" : "typescript"] = "9.0.0";
+    manifest[field][name] = "9.0.0";
     writeLinuxProfile(directory, manifest);
     const updated = installKeys(directory, environment, {});
-    for (const key of ["dependencies", "runtime", "build"]) assert.notEqual(updated[key], original[key], `${field}: ${key}`);
+    for (const key of ["dependencies", "runtime", "build"]) assert.notEqual(updated[key], original[key], `${name}: ${key}`);
   }
   const directory = linuxFixture(t);
   const original = installKeys(directory, environment, {});
@@ -125,10 +126,10 @@ test("Linux selected production, build dependencies and locked package versions 
   for (const key of ["dependencies", "runtime", "build"]) assert.notEqual(updated[key], original[key], key);
 });
 
-test("Linux Next, TypeScript, runtime metadata and build recipes remain build inputs", t => {
+test("Linux Vite, TypeScript, runtime metadata and build recipes remain build inputs", t => {
   const directory = linuxFixture(t);
   let previous = installKeys(directory, environment, {});
-  for (const name of ["next.config.ts", "tsconfig.json", "tsconfig.linux.json", "postcss.config.mjs"]) {
+  for (const name of ["vite.config.ts", "index.html", "web/entry-client.tsx", "web/entry-server.tsx", "tsconfig.json", "tsconfig.linux.json", "postcss.config.mjs"]) {
     write(directory, name, "// changed relevant input");
     const updated = installKeys(directory, environment, {});
     assert.equal(updated.dependencies, previous.dependencies, name);
@@ -195,7 +196,7 @@ test("Linux explicit root manifest and lock imports hash their original contents
   }
 });
 
-test("Linux independent service imports affect runtime until Next references the entry", t => {
+test("Linux independent service imports affect runtime until SSR references the entry", t => {
   const directory = linuxFixture(t);
   write(directory, "server/linux.mjs", 'import "../db/used.ts";');
   write(directory, "db/used.ts", "export const value = 1;");
@@ -227,7 +228,7 @@ test("installed runtime directory links are excluded before file hashing", t => 
   assert.deepEqual(installKeys(directory, environment, {}), original);
 });
 
-test("Next server and shared-library imports rebuild while independent server entries reuse the build", t => {
+test("SSR and shared-library imports rebuild while independent server entries reuse the build", t => {
   const directory = fixture(t);
   write(directory, "app/api/hub/route.ts", 'import { summary } from "../../../server/hub-summary.mjs";');
   write(directory, "server/hub-summary.mjs", 'export const summary = "first";');
@@ -247,14 +248,14 @@ test("Next server and shared-library imports rebuild while independent server en
   }
   write(directory, "lib/backend.ts", 'import "../server/linux.mjs";');
   before = installKeys(directory, environment, {});
-  write(directory, "server/linux.mjs", 'console.log("now imported by Next");');
+  write(directory, "server/linux.mjs", 'console.log("now imported by SSR");');
   assert.notEqual(installKeys(directory, environment, {}).build, before.build);
 });
 
 test("lock, runtime and public build environment invalidate the appropriate content keys", t => {
   const directory = fixture(t);
   const before = installKeys(directory, environment, {});
-  const envChanged = installKeys(directory, environment, { NEXT_PUBLIC_INSTALL_TEST: "changed" });
+  const envChanged = installKeys(directory, environment, { VITE_INSTALL_TEST: "changed" });
   assert.equal(envChanged.dependencies, before.dependencies);
   assert.equal(envChanged.runtime, before.runtime);
   assert.notEqual(envChanged.build, before.build);
@@ -286,20 +287,91 @@ test("public document-like assets and production dotenv files remain actual buil
   }
 });
 
-test("artifact validation detects incomplete and damaged manifests before build reuse", t => {
+function artifactFixture(t) {
   const directory = fixture(t);
-  assert.equal(validBuild(directory), false);
-  write(directory, ".next/BUILD_ID", "fixture");
-  write(directory, ".next/build-manifest.json", "{}");
-  write(directory, ".next/required-server-files.json", "{}");
-  write(directory, ".next/server/app-paths-manifest.json", '{"/page":"app/page.js"}');
-  assert.equal(validBuild(directory), false);
-  write(directory, ".next/server/app/page.js", "export default {};");
-  assert.equal(validBuild(directory), true);
-  write(directory, ".next/server/app-paths-manifest.json", '{"/page":"../../outside.js"}');
-  assert.equal(validBuild(directory), false);
-  write(directory, ".next/server/app-paths-manifest.json", "malformed");
-  assert.equal(validBuild(directory), false);
+  const manifest = {
+    "index.html": { file: "assets/client.js", isEntry: true, imports: ["_shared.js"], dynamicImports: ["web/panel.tsx"], css: ["assets/main.css"], assets: ["assets/logo.svg"] },
+    "_shared.js": { file: "assets/shared.js" },
+    "web/panel.tsx": { file: "assets/panel.js", imports: ["_shared.js"] },
+  };
+  const files = {
+    "client/index.html": "<div id=app></div>",
+    "client/.vite/manifest.json": JSON.stringify(manifest),
+    "client/assets/client.js": "import './shared.js'; import('./panel.js');",
+    "client/assets/shared.js": "export const value = 1;",
+    "client/assets/panel.js": "export default {};",
+    "client/assets/main.css": "body { color: black }",
+    "client/assets/logo.svg": "<svg/>",
+    "server/entry-server.js": "export function render() { return ''; }",
+    "server/chunks/page.js": "export default {};",
+  };
+  const inventory = { schemaVersion: 1, files: {} };
+  function save(name, value) {
+    write(directory, `dist/${name}`, value);
+    inventory.files[name] = createHash("sha256").update(value).digest("hex");
+  }
+  function seal() { write(directory, "dist/build-manifest.json", JSON.stringify(inventory)); }
+  for (const [name, value] of Object.entries(files)) save(name, value);
+  seal();
+  return { directory, manifest, inventory, save, seal };
+}
+
+test("artifact validation hashes every client and SSR file before reuse", t => {
+  const f = artifactFixture(t);
+  assert.equal(validBuild(f.directory), true);
+  for (const name of ["client/assets/panel.js", "server/chunks/page.js", "client/index.html"]) {
+    const original = readFileSync(join(f.directory, "dist", name));
+    write(f.directory, `dist/${name}`, "damaged");
+    assert.equal(validBuild(f.directory), false, name);
+    write(f.directory, `dist/${name}`, original);
+    assert.equal(validBuild(f.directory), true);
+  }
+  write(f.directory, "dist/server/unlisted.js", "unlisted");
+  assert.equal(validBuild(f.directory), false, "Unlisted output must not enter a reused release");
+});
+
+test("artifact validation checks static, lazy, CSS and asset reference closure", t => {
+  for (const field of ["file", "imports", "dynamicImports", "css", "assets"]) {
+    const f = artifactFixture(t);
+    f.manifest["index.html"][field] = field === "file" ? "assets/absent.js" : ["absent"];
+    f.save("client/.vite/manifest.json", JSON.stringify(f.manifest)); f.seal();
+    assert.equal(validBuild(f.directory), false, field);
+  }
+  for (const name of ["client/assets/panel.js", "server/entry-server.js", "client/.vite/manifest.json"]) {
+    const f = artifactFixture(t);
+    rmSync(join(f.directory, "dist", name));
+    delete f.inventory.files[name]; f.seal();
+    assert.equal(validBuild(f.directory), false, name);
+  }
+});
+
+test("artifact validation rejects traversals, malformed inventories and symlinked trees", t => {
+  for (const path of ["../outside.js", "/outside.js", "assets/../client.js", "assets\\client.js", "C:/outside.js"]) {
+    const f = artifactFixture(t);
+    f.manifest["index.html"].file = path;
+    f.save("client/.vite/manifest.json", JSON.stringify(f.manifest)); f.seal();
+    assert.equal(validBuild(f.directory), false, path);
+  }
+  for (const inventory of [{ schemaVersion: 2, files: {} }, { schemaVersion: 1, files: { "../outside.js": "0".repeat(64) } }, null]) {
+    const f = artifactFixture(t);
+    write(f.directory, "dist/build-manifest.json", JSON.stringify(inventory));
+    assert.equal(validBuild(f.directory), false);
+  }
+  const f = artifactFixture(t);
+  const outside = join(f.directory, "outside");
+  mkdirSync(outside);
+  rmSync(join(f.directory, "dist/server/chunks"), { recursive: true });
+  write(f.directory, "outside/page.js", "export default {};");
+  symlinkSync(outside, join(f.directory, "dist/server/chunks"), process.platform === "win32" ? "junction" : "dir");
+  assert.equal(validBuild(f.directory), false, "Even a matching hash cannot authorize linked output");
+});
+
+test("generated type-check cache and old framework output do not affect content keys", t => {
+  const directory = fixture(t);
+  const original = installKeys(directory, environment, {});
+  for (const name of [".build-cache/tsconfig.tsbuildinfo", "dist/server/entry-server.js", ".next/BUILD_ID"]) write(directory, name, "generated");
+  assert.deepEqual(installKeys(directory, environment, {}), original);
+  assert.notEqual(installKeys(directory, environment, { MONITOR_BUILD_TEST: "changed" }).build, original.build);
 });
 
 test("cached storage measurements require matching dependency and build keys", t => {

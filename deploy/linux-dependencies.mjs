@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 export const LINUX_BUILD_DEPENDENCIES = Object.freeze([
   "@tailwindcss/postcss", "tailwindcss", "tw-animate-css", "typescript",
   "@types/node", "@types/react", "@types/react-dom",
+  "vite", "@vitejs/plugin-react",
 ]);
 
 const lifecycleScripts = ["preinstall", "install", "postinstall", "prepublish", "preprepare", "prepare", "postprepare"];

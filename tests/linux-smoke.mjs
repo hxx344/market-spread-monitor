@@ -47,6 +47,27 @@ try {
     assert.doesNotMatch(card, /加载走势/, `${title} must not wait for a browser history request`);
   }
   assert.match(page.headers.get('cache-control') ?? '', /no-store|private/, 'Database-backed HTML must not be reused as a static build snapshot');
+  assert.match(markup, /id="market-initial-data"/, 'React hydrates the same database snapshot used for SSR');
+  assert.doesNotMatch(markup, /\/_next\//, 'Production HTML must not require Next runtime assets');
+  const scriptPath = markup.match(/<script[^>]+type="module"[^>]+src="([^"]+)"/)?.[1];
+  assert.ok(scriptPath?.startsWith('/assets/'), 'Vite module entry is present');
+  assert.equal((await fetch(`${base}${scriptPath}`)).status, 401, 'Static assets stay behind the same login gate');
+  const script = await fetch(`${base}${scriptPath}`, { headers });
+  assert.equal(script.status, 200);
+  assert.match(script.headers.get('cache-control'), /immutable/);
+  for (const path of ['/server/entry-server.js', '/.vite/manifest.json', '/index.html', '/api/not-a-route', '/not-a-page']) {
+    assert.equal((await fetch(`${base}${path}`, { headers })).status, 404, `Private or unknown path must not fall back to HTML: ${path}`);
+  }
+  for (const monitor of ['oil', 'hynix', 'cl-xau', 'perpetual']) {
+    const selected = await fetch(`${base}/?monitor=${monitor}&goldOil=bz&goldOilExchange=bybit`, { headers });
+    assert.equal(selected.status, 200);
+    const html = await selected.text();
+    const props = JSON.parse(html.match(/<script id="market-initial-data" type="application\/json">([\s\S]*?)<\/script>/)[1]);
+    assert.equal(props.initialMonitor, monitor);
+    assert.equal(props.initialGoldOil, 'bz');
+    assert.equal(props.initialGoldOilExchange, 'bybit');
+    assert.ok(props.initial.renderedAt > 0);
+  }
   for (const id of ["oil", "cl-xau", "hynix"]) assert.ok(markup.includes(`data-alert-monitor="${id}"`), `${id} must render the shared alert editor`);
   const initial = await state();
   assert.equal(initial.available, true); assert.equal(initial.config.enabled, false);

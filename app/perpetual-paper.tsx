@@ -1,14 +1,14 @@
 "use client";
 import { hubChanged } from "../lib/hub-bridge";
 
-import dynamic from 'next/dynamic';
+import { lazyComponent } from '../lib/lazy-component';
 import { memo, useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { startActivityPolling } from '../lib/polling';
 import type { PerpetualExitInput } from '../lib/perpetual-exit';
 import { PERPETUAL_PAPER_LIMITS, type PerpetualPaperPosition, type PerpetualPaperView } from '../lib/perpetual-paper';
 import './perpetual-paper.css';
 
-const ExitCheck = dynamic(() => import('./perpetual-exit').then(module => module.PerpetualExitCheck), { loading: () => <p className="perp-paper-note">正在载入盘口测算…</p> });
+const ExitCheck = lazyComponent(async () => ({ default: (await import('./perpetual-exit')).PerpetualExitCheck }), { loading: () => <p className="perp-paper-note">正在载入盘口测算…</p> });
 const money = (value: number | null | undefined, digits = 3) => typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString('zh-CN', { maximumFractionDigits: digits }) : '—';
 const precision = (value: number) => Number.isFinite(value) && value !== 0 && Math.abs(value) < 1e-8 ? value.toExponential(4) : money(value, 8);
 const percent = (value: number | null | undefined) => typeof value === 'number' && Number.isFinite(value) ? `${value > 0 ? '+' : ''}${money(value)}%` : '—';

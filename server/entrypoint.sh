@@ -6,4 +6,4 @@ data_directory=$("${MONITOR_NODE:-node}" --env-file-if-exists=.env.linux --input
 export ALERT_DATA_DIR="$data_directory"
 mkdir -p "$ALERT_DATA_DIR"
 export MONITOR_EXTERNAL_LOCK=1
-exec flock --no-fork --nonblock --conflict-exit-code 75 "$ALERT_DATA_DIR/instance.lock" "${MONITOR_NODE:-node}" --experimental-strip-types --env-file-if-exists=.env.linux server/linux.mjs
+exec flock --no-fork --nonblock --conflict-exit-code 75 "$ALERT_DATA_DIR/instance.lock" "${MONITOR_NODE:-node}" --experimental-strip-types --env-file-if-exists=.env.linux server/linux.mjs "$@"
