@@ -27,8 +27,8 @@ profile_init() {
 profile_clock() {
   [[ ${profile_enabled:-0} == 1 ]] || return 0
   profile_clock_ms=''
-  local uptime fraction ignored
-  if ! { IFS=' ' read -r uptime ignored < /proc/uptime; } 2>/dev/null; then return 0; fi
+  local uptime fraction
+  if ! { IFS=' ' read -r uptime _ < /proc/uptime; } 2>/dev/null; then return 0; fi
   [[ "$uptime" =~ ^([0-9]+)\.([0-9]+)$ ]] || return 0
   fraction="${BASH_REMATCH[2]}000"
   profile_clock_ms=$((10#${BASH_REMATCH[1]} * 1000 + 10#${fraction:0:3}))
@@ -520,7 +520,7 @@ main() {
     esac
   done
   if (( profile_requested )); then
-    profile_init
+    profile_init /tmp
     trap profile_early_finish EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
