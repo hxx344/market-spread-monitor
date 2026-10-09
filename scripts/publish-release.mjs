@@ -42,7 +42,7 @@ if (release && !release.draft) {
   process.exit(0);
 }
 if (release && release.target_commitish !== commit) throw new Error('Existing draft targets a different immutable commit');
-release ??= await api('/releases', { method: 'POST', body: JSON.stringify({ tag_name: manifest.tag, target_commitish: commit, name: `Deploy ${commit.slice(0, 12)}`, draft: true, prerelease: false, make_latest: 'false', body: 'Verified Linux deployment artifacts. Installers retain configuration and data.' }) });
+release ??= await api('/releases', { method: 'POST', body: JSON.stringify({ tag_name: manifest.tag, target_commitish: commit, name: `Candidate ${commit.slice(0, 12)}`, draft: true, prerelease: true, make_latest: 'false', body: 'Verified Linux deployment artifacts. Installers retain configuration and data.' }) });
 for (const [name, content] of files) {
   const existing = release.assets.find(asset => asset.name === name);
   if (existing) {
@@ -54,16 +54,6 @@ for (const [name, content] of files) {
   const response = await fetch(upload, { method: 'POST', headers: { ...headers, 'Content-Type': 'application/octet-stream' }, body: content, signal: AbortSignal.timeout(300_000) });
   if (!response.ok) throw new Error(`Upload failed (${response.status} ${name}); release remains draft`);
 }
-// The publishing job holds one repository-wide concurrency lock. Every passing
-// main commit gets a complete immutable release, even if a later build fails.
-// Compare against the last published deployment so a delayed run cannot roll
-// latest backwards. Unknown non-deployment releases keep their latest status.
-const latest = await api('/releases/latest');
-let promote = latest === null;
-if (latest && /^deploy-[a-f0-9]{40}$/.test(latest.tag_name)) {
-  const comparison = await api(`/compare/${latest.tag_name.slice(7)}...${commit}`);
-  if (!comparison || !['ahead', 'identical', 'behind', 'diverged'].includes(comparison.status)) throw new Error('Cannot establish deployment ancestry; release remains draft');
-  promote = ['ahead', 'identical'].includes(comparison.status);
-}
-await api(`/releases/${release.id}`, { method: 'PATCH', body: JSON.stringify({ draft: false, prerelease: false, make_latest: String(promote) }) });
-console.log(`Published complete immutable deployment ${manifest.tag}; latest promotion: ${promote}.`);
+// Passing CI creates a candidate; only the explicit promotion workflow changes stable.
+await api(`/releases/${release.id}`, { method: 'PATCH', body: JSON.stringify({ draft: false, prerelease: true, make_latest: 'false' }) });
+console.log(`Published complete CI candidate ${manifest.tag}; stable channel unchanged.`);

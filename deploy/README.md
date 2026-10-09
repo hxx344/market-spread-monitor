@@ -16,7 +16,7 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/market-spread-monitor/main/d
 | 运行代码变化或旧源码安装首次迁移 | 下载固定提交制品、校验 SHA-256、独立解包后切换 |
 | 制品缺失、校验失败或启动失败 | 切换前停止更新，或恢复原服务；保留配置和数据 |
 
-x64 和 ARM64 都在原生 Linux 环境验证解包后的服务；最近成功的构建作为可安装版本，后续失败构建不会覆盖它。详细规则见 [CI 运行包部署](../docs/ci-release.md)。
+x64 和 ARM64 都在原生 Linux 环境验证解包后的服务；成功构建先作为 `prerelease` 候选，经 **Publish stable release** 工作流输入完整 40 位提交 SHA 明确晋级后，才进入默认安装及工作台前端更新使用的正式版。失败构建和未晋级候选不改变现有正式版。详细规则见 [CI 运行包部署](../docs/ci-release.md)。
 
 ## 源码模式的增量构建
 

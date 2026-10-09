@@ -64,7 +64,9 @@ Ubuntu 22.04 / 24.04、Debian 12 / 13，支持 x86_64 和 ARM64：
 curl -fsSL https://raw.githubusercontent.com/hxx344/market-spread-monitor/main/deploy/install.sh | bash
 ```
 
-首次自动准备专用 Node.js、下载并校验已通过 CI 的运行包、生成登录密码、创建 SQLite 行情库、导入已有历史、注册 systemd 并启动采集。服务器不再执行 npm 安装或页面构建。完成后访问 `http://服务器IP:3000`，使用终端显示的账号密码登录。再次执行同一命令即可升级，保留配置与数据库；新版启动失败时自动恢复原服务。详情见 [CI 运行包部署](docs/ci-release.md)。
+首次自动准备专用 Node.js、下载并校验已通过 CI 且明确发布的正式运行包、生成登录密码、创建 SQLite 行情库、导入已有历史、注册 systemd 并启动采集。服务器不再执行 npm 安装或页面构建。完成后访问 `http://服务器IP:3000`，使用终端显示的账号密码登录。再次执行同一命令即可升级，保留配置与数据库；新版启动失败时自动恢复原服务。详情见 [CI 运行包部署](docs/ci-release.md)。
+
+`main` CI 全部通过后，只发布 `deploy-<完整提交号>` 候选 Release（`prerelease`），不改变当前正式版。发布者在 GitHub Actions 选择 **[Publish stable release](.github/workflows/promote-release.yml)**，分支选 `main`，在 `commit` 中填写已通过本仓库 CI 的完整 40 位提交 SHA 后运行；核验清单和部署包后，候选才晋级为最新正式版。默认安装及工作台前端更新只使用正式版，未晋级的候选不会自动安装。
 
 首页由服务器直接读取数据库并渲染已有报价与走势，首次打开即可看到已保存的数据，无需等浏览器启动后再取数。页面启动后继续刷新；旧数据保留原始采集时间，尚未采集到的报价显示为空。
 
