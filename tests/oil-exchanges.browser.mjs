@@ -27,8 +27,8 @@ async page => {
   check((await lighter.innerText()).includes('USDC') && (await lighter.innerText()).includes('+4.000%'), 'Lighter quote unit and spread are correct');
   check((await oil.locator('[data-exchange="okx"]').innerText()).includes('BZ-USDT-SWAP / CL-USDT-SWAP'), 'OKX contracts are explicit');
   check((await variational.innerText()).includes('USDC') && (await variational.innerText()).includes('采集时间：'), 'Variational uses USDC and receipt time');
-  check((await variational.locator('[data-label="做空价差年化"]').innerText()) === '—', 'Unknown funding never becomes zero');
-  check((await variational.innerText()).includes('资金费缺失'), 'Funding limitations are visible without opening details');
+  check((await variational.locator('[data-label="做空价差年化"]').innerText()) !== '—', 'Public Variational funding is available before configuring a token');
+  check(!(await variational.innerText()).includes('资金费缺失'), 'Public funding has no token prerequisite');
   await oil.locator('.exchange-details summary').click();
   const details = oil.locator('.exchange-details article').filter({ has: page.getByText('Lighter', { exact: true }) });
   check((await details.innerText()).includes('指数价格') && (await details.innerText()).includes('推算'), 'Lighter funding notional and estimated settlement are explicit');

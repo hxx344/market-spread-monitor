@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createOilDexReader } from '../lib/oil-dex.ts';
-import { parseVariationalFunding, parseVariationalMark, readVariationalAuthenticatedQuote } from '../lib/variational-market.ts';
+import { parseVariationalFunding, parseVariationalMark, readVariationalAuthenticatedMarks } from '../lib/variational-market.ts';
 import { requestVariational } from '../lib/variational-api.ts';
 import { calculateExchangeSpread } from '../lib/exchange-quotes.ts';
 
@@ -73,7 +73,7 @@ test('frontend annual decimal funding converts to period decimal and preserves s
   ]) assert.throws(() => parseVariationalFunding({ ...funding('BZ'), ...patch }, NOW));
 });
 
-test('reader consumes token on exactly four read-only requests, caches by revision and estimates from current marks', async () => {
+test('reader uses token only for two marks, fetches funding anonymously and estimates from current marks', async () => {
   const fixture = readerFixture();
   const [quote, second] = await Promise.all([fixture.reader('variational'), fixture.reader('variational')]);
   assert.deepEqual(quote, second); assert.equal(fixture.calls.length, 4); assert.equal(fixture.publicCalls(), 0);
@@ -83,7 +83,7 @@ test('reader consumes token on exactly four read-only requests, caches by revisi
   const post = fixture.calls.filter(call => call.options.method === 'POST');
   assert.deepEqual(post.map(call => JSON.parse(call.options.body)), ['BZ', 'CL'].map(symbol => ({ instrument: instrument(symbol), qty: '1' })));
   for (const { options } of fixture.calls) {
-    assert.equal(options.headers.Cookie, `vr-token=${TOKEN}`); assert.equal(options.redirect, 'error');
+    assert.equal(options.headers.Cookie, options.method === 'POST' ? `vr-token=${TOKEN}` : undefined); assert.equal(options.redirect, 'error');
     assert.equal(options.credentials, 'omit'); assert.equal(options.cache, 'no-store');
   }
   assert.deepEqual(fixture.calls.filter(call => call.options.method === 'GET').map(call => call.url), ['BZ', 'CL'].map(symbol => `${ORIGIN}/api/funding/v2?underlying=${symbol}&instrument_type=perpetual_rwa_future`));
@@ -107,16 +107,16 @@ test('one missing or invalid funding leg preserves authenticated marks and remov
     assert.equal(quote.left.price, 102); assert.equal(quote.right.price, 95);
     assert.equal(quote.left.fundingRate, null); assert.equal(quote.right.fundingRate, null); assert.equal(quote.fundingFetchedAt, null);
     assert.equal(calculateExchangeSpread(quote).shortAnnualized, null); assert.equal(fixture.publicCalls(), 0);
-    assert.match(quote.fundingError, /预测资金费/); assert.equal(fixture.reports.at(-1).status, 'unavailable');
+    assert.match(quote.fundingError, /公开资金费/); assert.equal(fixture.reports.at(-1).status, 'ready');
   }
 });
 
-test('a rejected token from any authenticated endpoint falls back to public marks without public or old funding', async () => {
-  const fixture = readerFixture({ response: (path, symbol) => path === '/api/funding/v2' && symbol === 'CL' ? json({ error: TOKEN }, 401) : json(path === '/api/quotes/indicative' ? mark(symbol) : funding(symbol)) });
+test('an explicitly rejected token falls back to public prices and keeps anonymous funding', async () => {
+  const fixture = readerFixture({ response: (path, symbol) => path === '/api/quotes/indicative' && symbol === 'CL' ? Response.json({ error: TOKEN }, { status: 401, headers: { 'x-omni-auth': 'r' } }) : json(path === '/api/quotes/indicative' ? mark(symbol) : funding(symbol)) });
   const quote = await fixture.reader('variational');
   assert.equal(quote.left.price, 101); assert.equal(quote.right.price, 94); assert.equal(quote.timestampBasis, 'received');
-  assert.equal(quote.left.fundingRate, null); assert.equal(quote.right.fundingRate, null); assert.equal(quote.fundingFetchedAt, null);
-  assert.match(quote.fundingError, /token 已失效或被拒绝/); assert.ok(!JSON.stringify(quote).includes(TOKEN));
+  assert.equal(quote.left.fundingRate, 0.2 * 4 / 8760); assert.notEqual(quote.fundingFetchedAt, null);
+  assert.equal(quote.fundingError, ''); assert.ok(!JSON.stringify(quote).includes(TOKEN));
   assert.deepEqual(fixture.reports, [{ revision: 1, status: 'rejected' }]);
   await fixture.reader('variational'); assert.equal(fixture.calls.length, 4);
 });
@@ -131,8 +131,8 @@ test('transient mark failure or mismatched source timestamps uses public marks a
       return json(path === '/api/quotes/indicative' ? mark(symbol) : funding(symbol));
     } });
     const quote = await fixture.reader('variational');
-    assert.equal(quote.left.price, 101); assert.match(quote.fundingError, /认证行情暂不可用/);
-    assert.equal(quote.left.fundingRate, null); assert.equal(quote.fundingFetchedAt, null);
+    assert.equal(quote.left.price, 101); assert.equal(quote.fundingError, '');
+    assert.notEqual(quote.left.fundingRate, null); assert.notEqual(quote.fundingFetchedAt, null);
     assert.deepEqual(fixture.reports, [{ revision: 1, status: 'unavailable' }]);
   }
 });
@@ -142,7 +142,7 @@ test('old successful or rejected in-flight revisions are discarded and retried u
     const gate = delay(), started = delay(); let oldCalls = 0;
     const fixture = readerFixture({ response: async (path, symbol, options) => {
       if (options.headers.Cookie === `vr-token=${TOKEN}`) {
-        if (++oldCalls === 4) started.resolve();
+        if (++oldCalls === 2) started.resolve();
         await gate.promise;
         if (oldDenied) return json({}, 403);
       }
@@ -151,7 +151,8 @@ test('old successful or rejected in-flight revisions are discarded and retried u
     const pending = fixture.reader('variational'); await started.promise;
     fixture.setState({ token: NEXT_TOKEN, revision: 2 }); gate.resolve();
     const quote = await pending;
-    assert.equal(quote.left.price, 102); assert.equal(fixture.calls.length, 8); assert.equal(fixture.publicCalls(), 0);
+    assert.equal(quote.left.price, 102); assert.equal(fixture.calls.length, 6); assert.equal(fixture.publicCalls(), 0);
+    assert.equal(fixture.calls.filter(call => new URL(call.url).pathname === '/api/funding/v2').length, 2, 'public funding is not refetched when token rotates');
     assert.deepEqual(fixture.reports, [{ revision: 2, status: 'ready' }]);
     assert.ok(fixture.keys.includes('variational/oil/authenticated/2'));
   }
@@ -168,18 +169,20 @@ test('a token saved while public fallback is pending supersedes either its stale
   }
 });
 
-test('missing token only calls public stats and explicitly withholds funding', async () => {
+test('missing token fetches public prices and anonymous funding with a calculable annual estimate', async () => {
   const fixture = readerFixture({ initial: { token: null, revision: 0 } });
   const quote = await fixture.reader('variational');
-  assert.equal(fixture.calls.length, 0); assert.equal(fixture.publicCalls(), 1); assert.equal(quote.left.fundingRate, null);
-  assert.match(quote.fundingError, /尚无有效 Var token/);
+  assert.equal(fixture.calls.length, 2); assert.equal(fixture.publicCalls(), 1); assert.equal(quote.left.fundingRate, 0.2 * 4 / 8760);
+  assert.ok(fixture.calls.every(call => call.options.headers.Cookie === undefined));
+  assert.equal(quote.fundingError, ''); assert.ok(Math.abs(calculateExchangeSpread(quote).shortAnnualized - (101 * 0.2 + 94 * 0.1) / 195) < 1e-12);
 });
 
-test('expired and previously rejected sessions remain explicit while using public marks', async () => {
-  for (const [status, reason] of [['expired', /token 已过期/], ['rejected', /token 已失效或被拒绝/]]) {
+test('expired and previously rejected sessions cannot disable public funding', async () => {
+  for (const status of ['expired', 'rejected']) {
     const fixture = readerFixture({ initial: { token: null, revision: 1, status } });
     const quote = await fixture.reader('variational');
-    assert.equal(fixture.calls.length, 0); assert.equal(quote.fundingFetchedAt, null); assert.match(quote.fundingError, reason);
+    assert.equal(fixture.calls.length, 2); assert.notEqual(quote.fundingFetchedAt, null); assert.equal(quote.fundingError, '');
+    assert.ok(fixture.calls.every(call => call.options.headers.Cookie === undefined));
   }
 });
 
@@ -203,5 +206,47 @@ test('funding transport runtime allowlist cannot send credentials to foreign hos
 
 test('no invalid authenticated mark can be relabeled as a mark using bid/ask', async () => {
   const fetcher = transport({ response: (path, symbol) => json(path === '/api/quotes/indicative' ? { ...mark(symbol), mark_price: undefined } : funding(symbol)) });
-  await assert.rejects(readVariationalAuthenticatedQuote(TOKEN, { fetcher, clock: () => NOW }), /数值无效/);
+  await assert.rejects(readVariationalAuthenticatedMarks(TOKEN, { fetcher, clock: () => NOW }), /数值无效/);
+});
+
+test('a gateway challenge keeps the saved session retryable and public funding available', async () => {
+  let challenged = true;
+  const fixture = readerFixture({ response: (path, symbol) => path === '/api/quotes/indicative' && challenged
+    ? new Response('private gateway body', { status: 403, headers: { 'cf-mitigated': 'challenge', 'Content-Type': 'text/html' } })
+    : json(path === '/api/quotes/indicative' ? mark(symbol, NOW + 1500) : funding(symbol)) });
+  const fallback = await fixture.reader('variational');
+  assert.equal(fallback.left.price, 101); assert.notEqual(fallback.left.fundingRate, null);
+  assert.deepEqual(fixture.reports, [{ revision: 1, status: 'unavailable' }]);
+  challenged = false; fixture.setNow(NOW + 1500);
+  const recovered = await fixture.reader('variational');
+  assert.equal(recovered.left.price, 102); assert.notEqual(recovered.left.fundingRate, null);
+  assert.equal(fixture.reports.at(-1).status, 'ready');
+});
+
+test('anonymous funding failure never rejects a valid token and zero funding is preserved', async () => {
+  const fixture = readerFixture({ response: (path, symbol) => path === '/api/funding/v2'
+    ? Response.json({}, { status: 401, headers: { 'x-omni-auth': 'r' } }) : json(mark(symbol)) });
+  const quote = await fixture.reader('variational');
+  assert.equal(quote.left.price, 102); assert.equal(quote.left.fundingRate, null);
+  assert.equal(fixture.reports.at(-1).status, 'ready');
+  const zero = readerFixture({ initial: { token: null, revision: 0 }, response: (_path, symbol) => json({ ...funding(symbol), predicted_funding_rate: '0' }) });
+  assert.equal(calculateExchangeSpread(await zero.reader('variational')).shortAnnualized, 0);
+});
+
+test('a rotation while anonymous funding is still pending cannot publish old authenticated marks', async () => {
+  const gate = delay(), started = delay(); let anonymousCalls = 0;
+  const fixture = readerFixture({ response: async (path, symbol, options) => {
+    if (path === '/api/funding/v2') {
+      if (++anonymousCalls === 2) started.resolve();
+      await gate.promise;
+      return json(funding(symbol));
+    }
+    return json({ ...mark(symbol), mark_price: options.headers.Cookie === `vr-token=${NEXT_TOKEN}` ? '105' : '102' });
+  } });
+  const pending = fixture.reader('variational'); await started.promise;
+  await new Promise(resolve => setImmediate(resolve));
+  fixture.setState({ token: NEXT_TOKEN, revision: 2 }); gate.resolve();
+  const quote = await pending;
+  assert.equal(quote.left.price, 105); assert.equal(fixture.calls.length, 6);
+  assert.equal(anonymousCalls, 2);
 });

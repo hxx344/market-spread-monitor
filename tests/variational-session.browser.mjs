@@ -24,7 +24,7 @@ async page => {
       if (mode === 'upstream-unavailable') { data.status = 'unavailable'; data.configured = true; data.error = '认证行情暂时读取失败。'; }
       return route.fulfill({ json: data });
     }
-    if (mode === 'save-failure') return route.fulfill({ status: 400, json: { error: '测试：token 已失效，请重新获取。' } });
+    if (mode === 'save-failure') return route.fulfill({ status: 502, json: { error: '服务器访问 Variational 被拦截，请稍后重试；这不代表 token 已过期。 原配置未修改。' } });
     if (mode === 'conflict') {
       await route.fetch();
       return route.fulfill({ status: 409, json: { error: '配置已更新。' } });
@@ -58,8 +58,10 @@ async page => {
   await input.fill(token);
   mode = 'save-failure';
   await input.press('Enter');
-  await panel.getByText('测试：token 已失效，请重新获取。', { exact: true }).waitFor();
-  check(await input.inputValue() === token && await save.isEnabled(), 'Rejected token stays available for a deliberate retry');
+  await panel.getByText('服务器访问 Variational 被拦截，请稍后重试；这不代表 token 已过期。 原配置未修改。', { exact: true }).waitFor();
+  check(await input.inputValue() === token && await save.isEnabled(), 'Gateway failure keeps the token available for a deliberate retry');
+  check((await panel.innerText()).includes('公开价格和资金费无需 token'), 'Token editor explains public data availability');
+  check((await oil.locator('[data-exchange="variational"] [data-label="做空价差年化"]').innerText()) !== '—', 'Failed token save leaves public funding visible');
   const stored = await page.evaluate(() => ({ local: JSON.stringify(localStorage), session: JSON.stringify(sessionStorage), url: location.href, text: document.body.innerText }));
   check(Object.values(stored).every(value => !value.includes(token)), 'Token is absent from browser storage, URL and rendered text');
   mode = 'conflict';

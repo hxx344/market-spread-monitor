@@ -33,6 +33,7 @@ test('verification is bounded, fixed-origin, no-redirect and never returns upstr
     assert.equal(init.method, 'GET'); assert.equal(init.headers.Cookie, `vr-token=${candidate}`);
     assert.equal(init.redirect, 'error'); assert.equal(init.credentials, 'omit'); assert.equal(init.cache, 'no-store');
     assert.equal(init.body, undefined); assert.ok(init.signal instanceof AbortSignal);
+    assert.match(init.headers['User-Agent'], /Chrome\/140/); assert.equal(init.headers.Referer, 'https://omni.variational.io/');
     return confirmed();
   };
   await requestVariational('/me', candidate, { fetcher });
@@ -47,6 +48,26 @@ test('verification is bounded, fixed-origin, no-redirect and never returns upstr
     async () => new Response(' '.repeat(2_000_001)),
   ]) {
     await assert.rejects(requestVariational('/me', candidate, { fetcher }), error => !error.message.includes(candidate));
+  }
+});
+
+test('only explicit venue authentication rejection disables a token; challenges and unknown failures remain retryable', async () => {
+  const candidate = token();
+  for (const [status, headers, rejected] of [
+    [401, { 'Content-Type': 'application/json', 'x-omni-auth': 'r' }, true],
+    [401, { 'Content-Type': 'application/json' }, false],
+    [403, { 'Content-Type': 'application/json' }, false],
+    [403, { 'Content-Type': 'text/html', 'cf-mitigated': 'challenge' }, false],
+    [401, { 'Content-Type': 'text/html', 'x-omni-auth': 'r' }, false],
+    [200, { 'Content-Type': 'text/html', 'cf-mitigated': 'challenge' }, false],
+    [429, { 'Content-Type': 'application/json' }, false],
+    [503, { 'Content-Type': 'application/json' }, false],
+  ]) {
+    await assert.rejects(requestVariational('/me', candidate, { fetcher: async () => new Response(candidate, { status, headers }) }), error => {
+      assert.equal(error.rejected, rejected); assert.equal(error.status, rejected ? 400 : 502);
+      assert.equal(error.message.includes(candidate), false);
+      return true;
+    });
   }
 });
 
@@ -83,7 +104,7 @@ test('bad candidate, unconfirmed login and storage failure leave working session
     await assert.rejects(session.update({ revision: 1, token: candidate }));
     assert.deepEqual(session.view(), previous);
   }
-  for (const response of [() => new Response('secret body', { status: 401 }), () => new Response(null, { status: 503 }), () => Response.json({ user: 'anonymous' }), () => Response.json({ token: token(NOW / 1000 - 10) })]) {
+  for (const response of [() => new Response('secret body', { status: 401 }), () => new Response('private challenge', { status: 403, headers: { 'cf-mitigated': 'challenge', 'Content-Type': 'text/html' } }), () => new Response(null, { status: 503 }), () => Response.json({ token: '' }), () => Response.json({ user: 'anonymous' }), () => Response.json({ token: token(NOW / 1000 - 10) })]) {
     now += 3001; upstream = response;
     await assert.rejects(session.update({ revision: 1, token: token(NOW / 1000 + 9000, 'replacement') }));
     assert.deepEqual(session.view(), previous);

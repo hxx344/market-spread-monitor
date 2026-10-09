@@ -49,7 +49,7 @@ export function createVariationalSession(store, { fetcher = fetch, clock = Date.
     const state = store.get(), current = status();
     return { available: true, configured: Boolean(state.token), revision: state.revision,
       expiresAt: state.token ? new Date(variationalTokenExpiry(state.token)).toISOString() : null, updatedAt: state.updatedAt, status: current,
-      error: current === 'expired' ? 'Var token 已过期，请更新。' : current === 'rejected' ? 'Var token 已失效或被拒绝，请更新。' : current === 'unavailable' ? '认证行情暂不可用，后台将自动重试。' : '' };
+      error: current === 'expired' ? 'Var token 已过期，请更新；公开行情不受影响。' : current === 'rejected' ? 'Variational 未通过会话认证，请更新 token；公开行情不受影响。' : current === 'unavailable' ? '认证行情暂不可用，后台将自动重试；公开行情不受影响。' : '' };
   };
   return {
     view,
@@ -67,7 +67,9 @@ export function createVariationalSession(store, { fetcher = fetch, clock = Date.
         if (variationalTokenExpiry(token) <= clock() + 30_000) throw failure('Var token 已过期或即将过期，请重新获取。');
         if (clock() - lastAttempt < 3000) throw failure('验证过于频繁，请稍等 3 秒再试。', 429);
         lastAttempt = clock();
-        const result = await requestVariational('/me', token, { fetcher });
+        let result;
+        try { result = await requestVariational('/me', token, { fetcher }); }
+        catch (error) { throw failure(`${error.message} 原配置未修改。`, error.status || 502); }
         try { if (variationalTokenExpiry(result?.token) <= clock() || variationalTokenExpiry(token) <= clock() + 30_000) throw Error(); }
         catch { throw failure('Variational 未确认有效会话，请重新获取 Var token。'); }
         const next = { version: 1, revision: previous.revision + 1, token, updatedAt: new Date(clock()).toISOString() };

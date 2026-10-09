@@ -13,9 +13,8 @@ function exchangeQuote(exchange, id, now = Date.now()) {
   const result = { exchange, monitorId: id, currency: spec.currency, priceBasis: spec.priceBasis, fundingPriceBasis: spec.fundingPriceBasis, fetchedAt: at, fundingFetchedAt: at, status: 'live',
     left: leg(spec.left, id === 'oil' ? 104 : 180, 0.0001), right: leg(spec.right, id === 'oil' ? 100 : 1200, 0.0002), fundingError: '' };
   if (exchange === 'variational') {
-    result.timestampBasis = 'received'; result.fundingFetchedAt = null;
-    for (const item of [result.left, result.right]) { item.fundingRate = null; item.fundingIntervalHours = null; item.nextFundingAt = null; }
-    result.fundingError = '公开资金费口径未确认，暂不计算年化。';
+    result.timestampBasis = 'received';
+    for (const item of [result.left, result.right]) item.fundingIntervalHours = 4;
   }
   return result;
 }

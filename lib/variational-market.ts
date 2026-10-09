@@ -50,34 +50,39 @@ export function parseVariationalFunding(input: unknown, now = Date.now()) {
 
 const rejected = (error: unknown) => Boolean(error && typeof error === 'object' && 'rejected' in error && error.rejected === true);
 
-export async function readVariationalAuthenticatedQuote(token: string, { fetcher = fetch, clock = Date.now }: { fetcher?: typeof fetch; clock?: () => number } = {}): Promise<{ quote: ExchangeQuote; status: 'ready' | 'unavailable' }> {
+export async function readVariationalPublicFunding({ fetcher = fetch, clock = Date.now }: { fetcher?: typeof fetch; clock?: () => number } = {}) {
+  // These endpoints are public. Never attach a saved token to a funding request.
+  const values = await Promise.all(['BZ', 'CL'].map(symbol => requestVariational(`/funding/v2?underlying=${symbol as Symbol}&instrument_type=perpetual_rwa_future`, null, { fetcher })));
+  const now = clock();
+  return { left: parseVariationalFunding(values[0], now), right: parseVariationalFunding(values[1], now), fetchedAt: new Date(now).toISOString() };
+}
+
+export function withVariationalFunding(quote: ExchangeQuote, funding: Awaited<ReturnType<typeof readVariationalPublicFunding>> | null, now = Date.now()): ExchangeQuote {
+  const valid = funding && [funding.left, funding.right].every(leg => Date.parse(leg.nextFundingAt) > now);
+  return validateExchangeQuote({ ...quote,
+    left: { ...quote.left, ...(valid ? funding.left : { fundingRate: null, nextFundingAt: null }) },
+    right: { ...quote.right, ...(valid ? funding.right : { fundingRate: null, nextFundingAt: null }) },
+    fundingFetchedAt: valid ? funding.fetchedAt : null,
+    fundingError: valid ? '' : funding ? 'Var 预测结算时间已到，等待下一轮公开资金费更新。' : 'Var 公开资金费暂不可用，后台将自动重试；无需更新 token。',
+  }, 'variational', 'oil');
+}
+
+export async function readVariationalAuthenticatedMarks(token: string, { fetcher = fetch, clock = Date.now }: { fetcher?: typeof fetch; clock?: () => number } = {}): Promise<ExchangeQuote> {
   const results = await Promise.allSettled([
     requestVariational('/quotes/indicative', token, { fetcher, body: { instrument: instrument('BZ'), qty: '1' } }),
     requestVariational('/quotes/indicative', token, { fetcher, body: { instrument: instrument('CL'), qty: '1' } }),
-    requestVariational('/funding/v2?underlying=BZ&instrument_type=perpetual_rwa_future', token, { fetcher }),
-    requestVariational('/funding/v2?underlying=CL&instrument_type=perpetual_rwa_future', token, { fetcher }),
   ]);
-  if (results.some(result => result.status === 'rejected' && rejected(result.reason))) throw Object.assign(Error('Var token 已失效或被拒绝，请更新。'), { rejected: true });
-  const [leftMark, rightMark, leftFunding, rightFunding] = results;
+  if (results.some(result => result.status === 'rejected' && rejected(result.reason))) throw Object.assign(Error('Variational 未通过会话认证，请更新 token。'), { rejected: true });
+  const [leftMark, rightMark] = results;
   if (leftMark.status !== 'fulfilled' || rightMark.status !== 'fulfilled') throw Error('Var 认证标记行情暂不可用。');
   const now = clock(), left = parseVariationalMark(leftMark.value, 'BZ', now), right = parseVariationalMark(rightMark.value, 'CL', now);
   if (Math.abs(left.sourceTime - right.sourceTime) > 15_000) throw Error('Var 原油双腿行情不同步。');
-  let funding: [ReturnType<typeof parseVariationalFunding>, ReturnType<typeof parseVariationalFunding>] | null = null;
-  if (leftFunding.status === 'fulfilled' && rightFunding.status === 'fulfilled') {
-    try { funding = [parseVariationalFunding(leftFunding.value, now), parseVariationalFunding(rightFunding.value, now)]; }
-    catch { /* Keep current authenticated marks, but never combine incomplete or old funding. */ }
-  }
-  const leg = (symbol: Symbol, price: number, side: number): ExchangeLeg => ({ symbol, price,
+  const leg = (symbol: Symbol, price: number): ExchangeLeg => ({ symbol, price,
     // For this monitor's explicit current estimate, weight rates by current marks.
     // This is not a statement about the venue's actual payment valuation basis.
-    fundingPrice: price, ...(funding?.[side] ?? { fundingRate: null, fundingIntervalHours: null, nextFundingAt: null }) });
-  return {
-    quote: validateExchangeQuote({ exchange: 'variational', monitorId: 'oil', currency: 'USDC', priceBasis: 'mark', fundingPriceBasis: 'mark',
+    fundingPrice: price, fundingRate: null, fundingIntervalHours: null, nextFundingAt: null });
+  return validateExchangeQuote({ exchange: 'variational', monitorId: 'oil', currency: 'USDC', priceBasis: 'mark', fundingPriceBasis: 'mark',
       fetchedAt: new Date(Math.min(left.sourceTime, right.sourceTime)).toISOString(), timestampBasis: 'source',
-      fundingFetchedAt: funding ? new Date(now).toISOString() : null, status: 'live',
-      left: leg('BZ', left.price, 0), right: leg('CL', right.price, 1),
-      fundingError: funding ? '' : 'Var 预测资金费或结算信息暂不可用，认证标记价格仍正常更新。',
-    }, 'variational', 'oil'),
-    status: funding ? 'ready' : 'unavailable',
-  };
+      fundingFetchedAt: null, status: 'live', left: leg('BZ', left.price), right: leg('CL', right.price), fundingError: '',
+    }, 'variational', 'oil');
 }

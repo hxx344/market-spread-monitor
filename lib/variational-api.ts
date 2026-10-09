@@ -1,5 +1,6 @@
 const ORIGIN = 'https://omni.variational.io';
 const MAX_RESPONSE_BYTES = 2_000_000;
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36';
 
 export type VariationalSession = {
   current: () => { token: string | null; revision: number; status?: 'missing' | 'expired' | 'ready' | 'rejected' | 'unavailable' };
@@ -24,21 +25,28 @@ const READ_PATHS: readonly string[] = ['/me', '/quotes/indicative',
   '/funding/v2?underlying=CL&instrument_type=perpetual_rwa_future'];
 
 /** Credentials only reach these fixed, read-only Variational endpoints. */
-export async function requestVariational(path: VariationalPath, token: string, { fetcher = fetch, body }: { fetcher?: typeof fetch; body?: unknown } = {}): Promise<unknown> {
+export async function requestVariational(path: VariationalPath, token: string | null, { fetcher = fetch, body }: { fetcher?: typeof fetch; body?: unknown } = {}): Promise<unknown> {
   // Keep the runtime allowlist as well as the TypeScript constraint.
   if (!READ_PATHS.includes(path)) throw Error('不支持的 Variational 数据接口。');
-  variationalTokenExpiry(token);
+  if (token !== null) variationalTokenExpiry(token);
+  else if (!path.startsWith('/funding/v2?')) throw Error('此 Variational 接口需要有效会话。');
   const post = path === '/quotes/indicative';
   try {
     const response = await fetcher(`${ORIGIN}/api${path}`, {
       method: post ? 'POST' : 'GET',
-      headers: { Accept: 'application/json', Cookie: `vr-token=${token}`, 'User-Agent': 'Mozilla/5.0', ...(post ? { 'Content-Type': 'application/json' } : {}) },
+      headers: { Accept: 'application/json', ...(token ? { Cookie: `vr-token=${token}` } : {}), 'User-Agent': USER_AGENT, Referer: `${ORIGIN}/`, 'Cache-Control': 'no-cache', ...(post ? { 'Content-Type': 'application/json' } : {}) },
       ...(post ? { body: JSON.stringify(body) } : {}),
       credentials: 'omit', redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(10_000),
     });
-    if (!response.ok) {
+    const challenged = response.headers.get('cf-mitigated') === 'challenge' || /text\/html/i.test(response.headers.get('content-type') || '');
+    if (!response.ok || challenged) {
       await response.body?.cancel();
-      throw Object.assign(Error('Variational 数据请求失败。'), { rejected: response.status === 401 || response.status === 403 });
+      // Official frontend B2Dt0Djp.js only treats 401 + x-omni-auth:r as
+      // session rejection. A gateway challenge says nothing about the token.
+      throw Object.assign(Error('Variational 数据请求失败。'), {
+        rejected: token !== null && !challenged && response.status === 401 && response.headers.get('x-omni-auth') === 'r',
+        blocked: challenged || response.status === 403,
+      });
     }
     const reader = response.body?.getReader();
     if (!reader) throw Error();
@@ -56,6 +64,8 @@ export async function requestVariational(path: VariationalPath, token: string, {
     } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
   } catch (error) {
     const rejected = Boolean(error && typeof error === 'object' && 'rejected' in error && error.rejected === true);
-    throw Object.assign(Error(rejected ? 'Var token 已失效或被拒绝，请更新。' : 'Variational 暂不可用，请稍后重试。'), { rejected });
+    const blocked = Boolean(error && typeof error === 'object' && 'blocked' in error && error.blocked === true);
+    const missingRuntime = Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'VARIATIONAL_PYTHON_MISSING');
+    throw Object.assign(Error(rejected ? 'Variational 未通过会话认证，请更新 token。' : blocked ? '服务器访问 Variational 被拦截，请稍后重试；这不代表 token 已过期。' : missingRuntime ? 'Variational 请求需要 Python 3，请重新运行一键部署或安装 Python 3。' : 'Variational 暂不可用，请稍后重试。'), { rejected, status: rejected ? 400 : 502 });
   }
 }

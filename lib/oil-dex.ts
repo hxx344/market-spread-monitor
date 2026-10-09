@@ -1,6 +1,6 @@
 import { validateExchangeQuote, type ExchangeLeg, type ExchangeQuote } from './exchange-quotes.ts';
 import type { VariationalSession } from './variational-api.ts';
-import { readVariationalAuthenticatedQuote } from './variational-market.ts';
+import { readVariationalAuthenticatedMarks, readVariationalPublicFunding, withVariationalFunding } from './variational-market.ts';
 
 type JsonObject = Record<string, unknown>;
 type LighterMarket = { symbol: 'BRENTOIL' | 'WTI'; marketId: number };
@@ -157,7 +157,7 @@ export function parseVariationalOilQuote(input: unknown, receivedAt = Date.now()
   return validateExchangeQuote({
     exchange: 'variational', monitorId: 'oil', currency: 'USDC', priceBasis: 'mark', fundingPriceBasis: 'mark', fetchedAt: new Date(receivedAt).toISOString(), timestampBasis: 'received',
     fundingFetchedAt: null, status: 'live', left: leg('BZ'), right: leg('CL'),
-    fundingError: '公开接口未明确资金费率时间口径及下次结算时间，暂不计算资金费；行情时间为本地接收时间。',
+    fundingError: '等待公开资金费更新；行情时间为本地接收时间。',
   }, 'variational', 'oil');
 }
 
@@ -167,50 +167,52 @@ export function createOilDexReader({ request, shared, clock = Date.now, WebSocke
     const current = variationalSession!.current();
     return current.revision === before.revision && current.token === before.token;
   };
+  async function variationalMarks(): Promise<{ quote: ExchangeQuote; session: ReturnType<VariationalSession['current']> | null }> {
+    if (!variationalSession) return { quote: await publicVariational(), session: null };
+    // Only authenticated marks depend on the session revision. Public funding
+    // has its own cache and survives missing, rejected, or rotating credentials.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const session = variationalSession.current();
+      if (session.token) {
+        try {
+          const quote = await shared(`variational/oil/authenticated/${session.revision}`, 1_000, () => readVariationalAuthenticatedMarks(session.token!, { fetcher, clock })) as ExchangeQuote;
+          if (!sameSession(session)) continue;
+          variationalSession.report(session.revision, 'ready');
+          return { quote, session };
+        } catch (error) {
+          if (!sameSession(session)) continue;
+          const denied = Boolean(error && typeof error === 'object' && 'rejected' in error && error.rejected === true);
+          variationalSession.report(session.revision, denied ? 'rejected' : 'unavailable');
+        }
+      }
+      const fallbackSession = variationalSession.current();
+      try {
+        const quote = await publicVariational();
+        if (!sameSession(fallbackSession)) continue;
+        return { quote, session: null };
+      } catch (error) {
+        if (!sameSession(fallbackSession)) continue;
+        throw error;
+      }
+    }
+    // Continuous session changes must not interrupt public market data.
+    return { quote: await publicVariational(), session: null };
+  }
   return async (exchange: 'lighter' | 'variational'): Promise<ExchangeQuote> => {
     if (exchange === 'lighter') {
       const markets = await shared('lighter/oil/instruments', 60_000, async () => parseLighterOilMarkets(await request(`${LIGHTER_ORIGIN}/api/v1/orderBookDetails`))) as LighterMarket[];
       return await shared('lighter/oil/quote', 1_000, () => readLighterOilSnapshot(markets, { clock, WebSocketImpl })) as ExchangeQuote;
     }
     if (exchange === 'variational') {
-      if (!variationalSession) return publicVariational();
-      // A token rotation invalidates in-flight work, including public fallback.
-      // Cache identifiers use only revision, never credentials.
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const session = variationalSession.current();
-        let reason = session.status === 'expired' ? 'Var token 已过期，当前使用公开标记价格；请更新 token，资金费暂不可用。'
-          : session.status === 'rejected' ? 'Var token 已失效或被拒绝，当前使用公开标记价格；请更新 token，资金费暂不可用。'
-          : '尚无有效 Var token，当前使用公开标记价格；资金费暂不可用。';
-        if (session.token) {
-          try {
-            const result = await shared(`variational/oil/authenticated/${session.revision}`, 1_000, () => readVariationalAuthenticatedQuote(session.token!, { fetcher, clock })) as Awaited<ReturnType<typeof readVariationalAuthenticatedQuote>>;
-            if (!sameSession(session)) continue;
-            if (result.quote.fundingFetchedAt && [result.quote.left, result.quote.right].some(leg => Date.parse(leg.nextFundingAt!) <= clock())) {
-              variationalSession.report(session.revision, 'unavailable');
-              return { ...result.quote, fundingFetchedAt: null,
-                left: { ...result.quote.left, fundingRate: null }, right: { ...result.quote.right, fundingRate: null },
-                fundingError: 'Var 预测结算时间已到，等待下一轮资金费更新；认证标记价格仍正常更新。' };
-            }
-            variationalSession.report(session.revision, result.status);
-            return result.quote;
-          } catch (error) {
-            if (!sameSession(session)) continue;
-            const denied = Boolean(error && typeof error === 'object' && 'rejected' in error && error.rejected === true);
-            variationalSession.report(session.revision, denied ? 'rejected' : 'unavailable');
-            reason = denied ? 'Var token 已失效或被拒绝，当前使用公开标记价格；请更新 token，资金费暂不可用。' : 'Var 认证行情暂不可用，当前使用公开标记价格；资金费暂不可用。';
-          }
-        }
-        const fallbackSession = variationalSession.current();
-        try {
-          const quote = await publicVariational();
-          if (!sameSession(fallbackSession)) continue;
-          return { ...quote, fundingError: reason };
-        } catch (error) {
-          if (!sameSession(fallbackSession)) continue;
-          throw error;
-        }
-      }
-      throw Error('Var token 正在更新，请稍后重试行情。');
+      const [initialMarks, funding] = await Promise.all([
+        variationalMarks(),
+        shared('variational/oil/public-funding', 1_000, () => readVariationalPublicFunding({ fetcher, clock })).catch(() => null),
+      ]);
+      let marks = initialMarks;
+      // Funding can finish after a rotation even when the old marks finished first.
+      if (marks.session && !sameSession(marks.session)) marks = await variationalMarks();
+      if (marks.session && !sameSession(marks.session)) marks = { quote: await publicVariational(), session: null };
+      return withVariationalFunding(marks.quote, funding as Awaited<ReturnType<typeof readVariationalPublicFunding>> | null, clock());
     }
     throw Error('未知原油交易所');
   };

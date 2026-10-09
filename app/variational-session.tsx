@@ -105,7 +105,7 @@ export default function VariationalSession({ id, now, onClose, onSaved }: Props)
 
   const status = view?.status === "ready" && view.expiresAt && Date.parse(view.expiresAt) <= now ? "expired" : view?.status;
   return <section id={id} className="variational-session" aria-labelledby={`${id}-heading`}>
-    <div className="variational-session-heading"><div><h3 id={`${id}-heading`}>更新 Var token</h3><p id={`${id}-help`}>从已登录 Variational 的浏览器 Cookie 复制 vr-token 的值，不要粘贴整段 Cookie。</p></div><button type="button" className="variational-session-close" onClick={onClose} aria-label="收起 Var token 表单">收起</button></div>
+    <div className="variational-session-heading"><div><h3 id={`${id}-heading`}>更新 Var token</h3><p id={`${id}-help`}>公开价格和资金费无需 token。需要认证报价时，可从已登录 Variational 的浏览器 Cookie 复制 vr-token 的值，不要粘贴整段 Cookie。</p></div><button type="button" className="variational-session-close" onClick={onClose} aria-label="收起 Var token 表单">收起</button></div>
     <div className="variational-session-status" aria-live="polite">
       {view && status ? <><p>{view.available ? statusLabels[status] : "当前环境无法更新会话"}</p>{view.configured ? <p>{view.expiresAt ? `token 声明到期时间：${dateText(view.expiresAt)} 北京时间` : "到期时间未知"}{view.updatedAt ? `；最近保存：${dateText(view.updatedAt)} 北京时间` : ""}</p> : null}{view.error ? <p className="variational-session-warning">{view.error}</p> : null}</> : <p>{busy === "loading" ? "正在读取配置…" : "尚未读取配置"}</p>}
     </div>

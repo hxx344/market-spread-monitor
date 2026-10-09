@@ -26,8 +26,8 @@ export function seedMarketDatabase(store) {
   store.write('oil', OIL_CANDLE_ACTION, oilIntradayArchive, { seed: true });
 }
 
-export function marketJobs({ oilIntervalMs = 30_000, variationalSession } = {}) {
-  const readExchange = createExchangeReader({ variationalSession });
+export function marketJobs({ oilIntervalMs = 30_000, variationalSession, variationalFetcher } = {}) {
+  const readExchange = createExchangeReader({ variationalSession, variationalFetcher });
   const readFundingHistory = createExchangeFundingReader();
   const readHedgePrices = createOilHedgePricesReader();
   const goldOilJobs = GOLD_OIL_VARIANTS.flatMap(({ oilType, exchange }) => {

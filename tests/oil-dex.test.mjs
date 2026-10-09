@@ -133,7 +133,8 @@ test('DEX reader shares public transports and preserves receipt timestamps acros
     const prior = cache.get(key); if (prior && prior.until > now) return prior.promise;
     const promise = Promise.resolve().then(load); cache.set(key, { until: now + ttl, promise }); return promise;
   };
-  const reader = createOilDexReader({ request: async url => { calls++; assert.equal(url, 'https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats'); return stats(); }, shared, clock: () => now });
+  const reader = createOilDexReader({ request: async url => { calls++; assert.equal(url, 'https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats'); return stats(); }, shared, clock: () => now,
+    fetcher: async (_url, options) => { assert.equal(options.headers.Cookie, undefined); return Response.json({ predicted_funding_rate: '0.1', funding_interval_s: 14400, next_funding_time: new Date(now + HOUR).toISOString() }); } });
   const quotes = await Promise.all([reader('variational'), reader('variational')]);
   assert.equal(calls, 1); assert.equal(quotes[0].fetchedAt, quotes[1].fetchedAt);
   now += 500; assert.equal((await reader('variational')).fetchedAt, new Date(NOW).toISOString());

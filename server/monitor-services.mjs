@@ -21,6 +21,7 @@ import { goldOilAlertDefaults, validateGoldOilAlerts, createGoldOilAlertDefiniti
 import { exchangeFundingAction, fundingExchangeFromAction } from '../lib/exchange-funding-history.ts';
 import { OIL_HEDGE_PRICES_ACTION, HEDGE_PRICES_REFRESH_MS } from '../lib/oil-hedge-prices.ts';
 import { createVariationalSession, openVariationalSessionStore } from './variational-session.mjs';
+import { fetchVariational } from './variational-transport.mjs';
 
 const exchangeActions = market => Object.fromEntries(comparisonExchanges(market).map(exchange => [exchangeAction(exchange), ["GET"]]));
 const exchangeFundingActions = Object.fromEntries(comparisonExchanges('oil').map(exchange => [exchangeFundingAction(exchange), ['GET']]));
@@ -38,9 +39,9 @@ export async function createMonitorServices(directory, { externallyLocked = fals
     if (!Number.isInteger(pollSeconds) || pollSeconds < 10 || pollSeconds > 3600) throw new Error("OIL_POLL_INTERVAL_SECONDS 必须为 10–3600 的整数");
     marketStore = await openMarketStore(join(directory, "market.sqlite"));
     seedMarketDatabase(marketStore);
-    const variationalSession = createVariationalSession(await openVariationalSessionStore(directory), variationalSessionOptions);
+    const variationalSession = createVariationalSession(await openVariationalSessionStore(directory), { fetcher: fetchVariational, ...variationalSessionOptions });
     let hynixRunning = false, oilRunning = false, goldOilRunning = false;
-    const collector = createMarketCollector(marketStore, { jobs: marketJobs({ oilIntervalMs: pollSeconds * 1000, variationalSession }), ...marketOptions,
+    const collector = createMarketCollector(marketStore, { jobs: marketJobs({ oilIntervalMs: pollSeconds * 1000, variationalSession, variationalFetcher: fetchVariational }), ...marketOptions,
       onStored(job) {
         if (job.id === 'cl-xau' && goldOilRunning) { const parsed = parseGoldOilAction(job.action); if (parsed?.action === 'quote') return goldOils[goldOilVariantKey(parsed.oilType, parsed.exchange)].tick(); }
         if (job.action === 'quote') { if (job.id === 'hynix' && hynixRunning) return hynix.check(); if (job.id === 'oil' && oilRunning) return oil.tick(); }
