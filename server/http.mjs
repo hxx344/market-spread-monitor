@@ -31,8 +31,13 @@ async function body(request) {
   try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { throw new Error("请求必须是有效 JSON。"); }
 }
 
-export function createHandler({ service, services, username, password, pageHandler, nextHandler = pageHandler }) {
+export function createAuthorization({ username, password }) {
   const credential = Buffer.from(`${username}:${password}`).toString("base64");
+  return request => equal(request.headers.authorization ?? "", `Basic ${credential}`);
+}
+
+export function createHandler({ service, services, username, password, pageHandler, nextHandler = pageHandler }) {
+  const authorize = createAuthorization({ username, password });
   return async (request, response) => {
     try {
       const path = new URL(request.url, "http://localhost").pathname;
@@ -40,7 +45,7 @@ export function createHandler({ service, services, username, password, pageHandl
         const healthy = !services || ([...services.values()].every(service => !service.healthy || service.healthy()) && (!services.notifications || services.notifications.healthy()) && (!services.market || services.market.healthy()));
         return json(response, healthy ? 200 : 503, { status: healthy ? "ok" : "degraded", service: "market-spread-monitor", monitors: services ? [...services.keys()] : ["hynix"] });
       }
-      if (!equal(request.headers.authorization ?? "", `Basic ${credential}`)) {
+      if (!authorize(request)) {
         response.writeHead(401, { "WWW-Authenticate": 'Basic realm="Market Monitor", charset="UTF-8"', "Cache-Control": "no-store" });
         response.end("Authentication required");
         return;

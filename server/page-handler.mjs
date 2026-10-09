@@ -1,4 +1,5 @@
 import { readFile, readdir, realpath } from 'node:fs/promises';
+import { createServer as createHttpServer } from 'node:http';
 import { extname, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { gzip } from 'node:zlib';
@@ -63,13 +64,28 @@ function errorResponse(response, status) {
   response.end(status === 404 ? 'Not found' : status === 405 ? 'Method not allowed' : 'Invalid request');
 }
 
-export async function createPageHandler({ services, root = process.cwd(), development = false }) {
+export async function createPageHandler({ services, root = process.cwd(), development = false, authorize }) {
   root = resolve(root);
-  let vite, template, render;
+  let vite, template, render, handleUpgrade;
   const assets = new Map();
   if (development) {
+    if (typeof authorize !== 'function') throw new Error('Development HMR requires application authorization');
     const { createServer } = await import('vite');
-    vite = await createServer({ root, configLoader: 'runner', server: { middlewareMode: true }, appType: 'custom' });
+    // This server only receives authenticated upgrade events and never listens.
+    // Sharing the application port avoids a separate unauthenticated HMR port.
+    const upgrades = createHttpServer();
+    vite = await createServer({ root, configLoader: 'runner', server: { middlewareMode: true, hmr: { server: upgrades } }, appType: 'custom' });
+    handleUpgrade = (request, socket, head) => {
+      const reject = status => {
+        socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n${status.startsWith('401') ? 'WWW-Authenticate: Basic realm="Market Monitor", charset="UTF-8"\r\n' : ''}\r\n`);
+        socket.destroySoon();
+      };
+      if (!authorize(request)) return reject('401 Unauthorized');
+      let path;
+      try { path = new URL(request.url, 'http://localhost').pathname; } catch { return reject('400 Bad Request'); }
+      if (path !== '/' || !['vite-hmr', 'vite-ping'].includes(request.headers['sec-websocket-protocol'])) return reject('404 Not Found');
+      upgrades.emit('upgrade', request, socket, head);
+    };
   } else {
     const clientRoot = join(root, 'dist/client');
     template = await readFile(join(clientRoot, 'index.html'), 'utf8');
@@ -98,6 +114,7 @@ export async function createPageHandler({ services, root = process.cwd(), develo
   }
 
   return {
+    handleUpgrade,
     async handle(request, response) {
       let path;
       try { path = pathname(request, development); } catch { return errorResponse(response, 400); }

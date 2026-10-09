@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { createMonitorServices } from "./monitor-services.mjs";
-import { createHandler } from "./http.mjs";
+import { createAuthorization, createHandler } from "./http.mjs";
 import { createPageHandler } from './page-handler.mjs';
 
 const host = process.env.HOST ?? "127.0.0.1";
@@ -15,8 +15,9 @@ if (process.platform === "linux" && process.env.MONITOR_EXTERNAL_LOCK !== "1") t
 const services = await createMonitorServices(directory, { externallyLocked: process.env.MONITOR_EXTERNAL_LOCK === "1" });
 let server, pages;
 try {
-pages = await createPageHandler({ services, development: process.argv.includes('--dev') });
+pages = await createPageHandler({ services, development: process.argv.includes('--dev'), authorize: createAuthorization({ username, password }) });
 server = createServer(createHandler({ services, username, password, pageHandler: pages.handle }));
+if (pages.handleUpgrade) server.on('upgrade', pages.handleUpgrade);
 server.requestTimeout = 30_000;
 await new Promise((accept, reject) => { server.once("error", reject); server.listen(port, host, accept); });
 services.market.start();
@@ -30,12 +31,13 @@ async function shutdown() {
   const timeout = setTimeout(() => process.exit(1), 28_000).unref();
   const closed = new Promise(accept => server.close(accept));
   for (const service of services.values()) service.closeStreams?.();
+  // HMR sockets use the application server and must close before it can drain.
+  await pages.close();
   await closed;
   // Drain active configuration requests before stopping persistence or releasing locks.
   await Promise.all([...services.values()].map(service => service.stop()));
   await services.market.stop();
   await services.notifications.stop();
-  await pages.close();
   clearTimeout(timeout);
   process.exit(0);
 }
