@@ -1,4 +1,6 @@
 import { validateExchangeQuote, type ExchangeLeg, type ExchangeQuote } from './exchange-quotes.ts';
+import type { VariationalSession } from './variational-api.ts';
+import { readVariationalAuthenticatedQuote } from './variational-market.ts';
 
 type JsonObject = Record<string, unknown>;
 type LighterMarket = { symbol: 'BRENTOIL' | 'WTI'; marketId: number };
@@ -159,15 +161,56 @@ export function parseVariationalOilQuote(input: unknown, receivedAt = Date.now()
   }, 'variational', 'oil');
 }
 
-export function createOilDexReader({ request, shared, clock = Date.now, WebSocketImpl }: { request: Request; shared: Shared; clock?: () => number; WebSocketImpl?: SocketConstructor }) {
+export function createOilDexReader({ request, shared, clock = Date.now, WebSocketImpl, variationalSession, fetcher = fetch }: { request: Request; shared: Shared; clock?: () => number; WebSocketImpl?: SocketConstructor; variationalSession?: VariationalSession; fetcher?: typeof fetch }) {
+  const publicVariational = async () => await shared('variational/oil/quote', 1_000, async () => parseVariationalOilQuote(await request(VAR_STATS), clock())) as ExchangeQuote;
+  const sameSession = (before: ReturnType<VariationalSession['current']>) => {
+    const current = variationalSession!.current();
+    return current.revision === before.revision && current.token === before.token;
+  };
   return async (exchange: 'lighter' | 'variational'): Promise<ExchangeQuote> => {
     if (exchange === 'lighter') {
       const markets = await shared('lighter/oil/instruments', 60_000, async () => parseLighterOilMarkets(await request(`${LIGHTER_ORIGIN}/api/v1/orderBookDetails`))) as LighterMarket[];
       return await shared('lighter/oil/quote', 1_000, () => readLighterOilSnapshot(markets, { clock, WebSocketImpl })) as ExchangeQuote;
     }
     if (exchange === 'variational') {
-      // Cache the parsed quote, preserving original receipt time on cache hits.
-      return await shared('variational/oil/quote', 1_000, async () => parseVariationalOilQuote(await request(VAR_STATS), clock())) as ExchangeQuote;
+      if (!variationalSession) return publicVariational();
+      // A token rotation invalidates in-flight work, including public fallback.
+      // Cache identifiers use only revision, never credentials.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const session = variationalSession.current();
+        let reason = session.status === 'expired' ? 'Var token 已过期，当前使用公开标记价格；请更新 token，资金费暂不可用。'
+          : session.status === 'rejected' ? 'Var token 已失效或被拒绝，当前使用公开标记价格；请更新 token，资金费暂不可用。'
+          : '尚无有效 Var token，当前使用公开标记价格；资金费暂不可用。';
+        if (session.token) {
+          try {
+            const result = await shared(`variational/oil/authenticated/${session.revision}`, 1_000, () => readVariationalAuthenticatedQuote(session.token!, { fetcher, clock })) as Awaited<ReturnType<typeof readVariationalAuthenticatedQuote>>;
+            if (!sameSession(session)) continue;
+            if (result.quote.fundingFetchedAt && [result.quote.left, result.quote.right].some(leg => Date.parse(leg.nextFundingAt!) <= clock())) {
+              variationalSession.report(session.revision, 'unavailable');
+              return { ...result.quote, fundingFetchedAt: null,
+                left: { ...result.quote.left, fundingRate: null }, right: { ...result.quote.right, fundingRate: null },
+                fundingError: 'Var 预测结算时间已到，等待下一轮资金费更新；认证标记价格仍正常更新。' };
+            }
+            variationalSession.report(session.revision, result.status);
+            return result.quote;
+          } catch (error) {
+            if (!sameSession(session)) continue;
+            const denied = Boolean(error && typeof error === 'object' && 'rejected' in error && error.rejected === true);
+            variationalSession.report(session.revision, denied ? 'rejected' : 'unavailable');
+            reason = denied ? 'Var token 已失效或被拒绝，当前使用公开标记价格；请更新 token，资金费暂不可用。' : 'Var 认证行情暂不可用，当前使用公开标记价格；资金费暂不可用。';
+          }
+        }
+        const fallbackSession = variationalSession.current();
+        try {
+          const quote = await publicVariational();
+          if (!sameSession(fallbackSession)) continue;
+          return { ...quote, fundingError: reason };
+        } catch (error) {
+          if (!sameSession(fallbackSession)) continue;
+          throw error;
+        }
+      }
+      throw Error('Var token 正在更新，请稍后重试行情。');
     }
     throw Error('未知原油交易所');
   };

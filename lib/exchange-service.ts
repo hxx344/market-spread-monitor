@@ -2,6 +2,7 @@ import { exchangeContracts, validateExchangeQuote, oilExchangeQuote, validateCom
 import { fetchMarket as fetchHyperliquidOil } from '../modules/oil/hyperliquid.mjs';
 import { createOilCexReader } from './oil-cex.ts';
 import { createOilDexReader } from './oil-dex.ts';
+import type { VariationalSession } from './variational-api.ts';
 
 type JsonObject = Record<string, unknown>;
 const obj = (value: unknown): JsonObject => { if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid exchange response"); return value as JsonObject; };
@@ -54,7 +55,7 @@ function finish(exchange: ExternalExchange, monitorId: SpreadMarket, fetchedAt: 
 }
 
 /** Share only transport requests; one unavailable pair cannot stop the other market. */
-export function createExchangeReader({ fetcher = fetch, clock = Date.now } = {}) {
+export function createExchangeReader({ fetcher = fetch, clock = Date.now, variationalSession }: { fetcher?: typeof fetch; clock?: () => number; variationalSession?: VariationalSession } = {}) {
   const cache = new Map<string, { value: unknown; until: number }>(), pending = new Map<string, Promise<unknown>>();
   async function request(url: string) {
     const response = await fetcher(url, { cache: "no-store", signal: AbortSignal.timeout(10_000) });
@@ -82,7 +83,7 @@ export function createExchangeReader({ fetcher = fetch, clock = Date.now } = {})
     return items;
   }
   const readOilCex = createOilCexReader({ request, shared, clock });
-  const readOilDex = createOilDexReader({ request, shared, clock });
+  const readOilDex = createOilDexReader({ request, shared, clock, fetcher, variationalSession });
   return async (exchange: Exchange, monitorId: SpreadMarket): Promise<ExchangeQuote> => {
     if (!Object.hasOwn(exchangeContracts, monitorId)) throw new Error("Unknown spread market");
     if (!supportsExchange(monitorId, exchange)) throw new Error('Unsupported exchange comparison market');

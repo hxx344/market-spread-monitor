@@ -45,11 +45,30 @@ const services = new Map(['oil', 'hynix'].map(id => [id, { handle(action) {
   throw Error('Fixture unavailable');
 } }]));
 const release = registerInitialMarket(services);
+let variationalSession = { available: true, configured: false, revision: 0, expiresAt: null, updatedAt: null, status: 'missing', error: '' };
 const app = next({ dev: false, hostname: '127.0.0.1', port: 3192 });
 await app.prepare();
 const handler = app.getRequestHandler();
 const server = createServer((request, response) => {
   if (request.url === '/__stop' && request.method === 'POST') { response.end('stopped'); void stop(); return; }
+  if (request.url === '/api/monitors/oil/exchanges/variational/session') {
+    response.setHeader('Content-Type', 'application/json'); response.setHeader('Cache-Control', 'no-store');
+    if (request.method === 'GET') { response.end(JSON.stringify(variationalSession)); return; }
+    if (request.method === 'PUT') {
+      let body = '';
+      request.setEncoding('utf8'); request.on('data', chunk => { body += chunk; });
+      request.on('end', () => {
+        let input;
+        try { input = JSON.parse(body); } catch { response.writeHead(400).end(JSON.stringify({ error: '请求格式不正确。' })); return; }
+        if (input.revision !== variationalSession.revision) { response.writeHead(409).end(JSON.stringify({ error: '配置已更新，请刷新。' })); return; }
+        if (typeof input.token !== 'string' || !input.token.trim()) { response.writeHead(400).end(JSON.stringify({ error: '请填写 token。' })); return; }
+        variationalSession = { available: true, configured: true, revision: variationalSession.revision + 1, expiresAt: new Date(Date.now() + 3_600_000).toISOString(), updatedAt: new Date().toISOString(), status: 'ready', error: '' };
+        response.end(JSON.stringify(variationalSession));
+      });
+      return;
+    }
+    response.writeHead(405).end(JSON.stringify({ error: 'Method not allowed' })); return;
+  }
   const match = /^\/api\/monitors\/(oil|hynix)\/(exchanges\/[^/]+\/(?:quote|funding-history))$/.exec(request.url);
   if (match) {
     try { response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify(services.get(match[1]).handle(match[2]))); }

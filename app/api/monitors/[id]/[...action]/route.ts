@@ -19,6 +19,7 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
   const capability = goldOil?.action ?? name;
   const headers = { "Cache-Control": "no-store" };
   if (!monitor) return Response.json({ error: "监控模块不存在" }, { status: 404, headers });
+  if (id === 'oil' && name === 'exchanges/variational/session') return Response.json({ available: false, configured: false, revision: 0, expiresAt: null, updatedAt: null, status: 'unavailable', error: '当前为网页预览，连接常驻监控服务后可更新 Var token。' }, { headers });
   if (name === 'runtime') return Response.json({ available: false, monitorId: id, enabled: true, revision: 0, running: false, reason: '当前为网页预览，连接常驻监控服务后可控制开关。' }, { headers });
   if (id === 'perpetual' && name === 'summary') return Response.json(unavailablePerpetualSummary(), { headers });
   if (id === "perpetual" && name === "opportunities") return Response.json(unavailablePerpetualOpportunities(), { headers });

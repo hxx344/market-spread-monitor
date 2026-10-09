@@ -57,6 +57,7 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/market-spread-monitor/main/d
 | 行情数据库 | `/var/lib/market-spread-monitor/market.sqlite`，含最新快照、采集状态和逐条行情/资金费记录 |
 | 海力士状态 | `/var/lib/market-spread-monitor/hynix/alerts.json` |
 | 原油状态 | `/var/lib/market-spread-monitor/oil/monitor.json` |
+| Variational 会话 | `/var/lib/market-spread-monitor/variational-session.json`，页面验证保存后创建，权限 0600 |
 | 单实例锁 | `/var/lib/market-spread-monitor/instance.lock` |
 
 首次生成登录密码，用户名默认 `admin`。端口默认 3000，首次安装可传 `--port 3001`；已有配置始终保留，后续修改配置后重启：
@@ -68,6 +69,8 @@ sudo systemctl restart market-spread-monitor
 ```
 
 在面板顶部“统一飞书告警”保存 Webhook 和可选签名密钥，所有模块立即共用，无需修改环境文件或重启。读取 API 不返回完整 Webhook 或密钥。统一配置保存在 `ALERT_DATA_DIR/notifications.json`（0600），备份数据目录时一并保留。阈值与开关在各模块分别设置；`OIL_POLL_INTERVAL_SECONDS` 默认 30，范围 10–3600。网页关闭后后台继续工作。
+
+Variational 的认证行情可在原油交易所对比行点击“更新 Var token”，填写 Cookie 中 `vr-token` 的值，验证成功后立即保存到上述会话文件。下一轮采集自动使用，无需重启或修改环境配置。旧 token 在验证或保存失败时保留；备份、迁移与升级保留整个数据目录即可保留会话。安装无需 token，未配置时继续获取公开标记价。
 
 旧海力士机器人和旧 `OIL_FEISHU_WEBHOOK_URL` / `OIL_FEISHU_WEBHOOK_SECRET` 只在全局文件首次创建时迁移。两处配置相同或只有一处时直接沿用；不同则在统一设置中选择共用哪一个，选择前暂停发送。之后全局文件优先，清除机器人后不会被旧环境变量重新启用。首次迁移保留旧模块文件用于启动失败回滚；首次主动保存海力士阈值后，模块文件切换为不存储机器人凭据的 v2 格式。开启机器人关键词校验时，请添加“告警”。
 

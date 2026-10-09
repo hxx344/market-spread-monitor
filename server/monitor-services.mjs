@@ -20,12 +20,13 @@ import { GOLD_OIL_QUOTE_MS, GOLD_OIL_HISTORY_MS, GOLD_OIL_FUNDING_MS, GOLD_OIL_V
 import { goldOilAlertDefaults, validateGoldOilAlerts, createGoldOilAlertDefinition, confirmGoldOilTriggers } from './gold-oil/alerts.mjs';
 import { exchangeFundingAction, fundingExchangeFromAction } from '../lib/exchange-funding-history.ts';
 import { OIL_HEDGE_PRICES_ACTION, HEDGE_PRICES_REFRESH_MS } from '../lib/oil-hedge-prices.ts';
+import { createVariationalSession, openVariationalSessionStore } from './variational-session.mjs';
 
 const exchangeActions = market => Object.fromEntries(comparisonExchanges(market).map(exchange => [exchangeAction(exchange), ["GET"]]));
 const exchangeFundingActions = Object.fromEntries(comparisonExchanges('oil').map(exchange => [exchangeFundingAction(exchange), ['GET']]));
 
 /** Runtime adapters own their schedule, storage and API. They share one HTTP server. */
-export async function createMonitorServices(directory, { externallyLocked = false, env = process.env, notificationOptions, hynixOptions, oilOptions, goldOilOptions, marketOptions, perpetualOptions } = {}) {
+export async function createMonitorServices(directory, { externallyLocked = false, env = process.env, notificationOptions, hynixOptions, oilOptions, goldOilOptions, marketOptions, perpetualOptions, variationalSessionOptions } = {}) {
   const oilStore = new FileStore(join(directory, "oil"), externallyLocked);
   const goldOilStores = Object.fromEntries(GOLD_OIL_VARIANTS.map(({ oilType, exchange }) => [goldOilVariantKey(oilType, exchange), new FileStore(join(directory, 'cl-xau', ...(exchange === 'bybit' ? ['bybit'] : []), ...(oilType === 'bz' ? ['bz'] : [])), externallyLocked, { defaults: goldOilAlertDefaults, validate: input => validateGoldOilAlerts(input, oilType, exchange), marketSource: exchange })]));
   await oilStore.acquire();
@@ -37,8 +38,9 @@ export async function createMonitorServices(directory, { externallyLocked = fals
     if (!Number.isInteger(pollSeconds) || pollSeconds < 10 || pollSeconds > 3600) throw new Error("OIL_POLL_INTERVAL_SECONDS 必须为 10–3600 的整数");
     marketStore = await openMarketStore(join(directory, "market.sqlite"));
     seedMarketDatabase(marketStore);
+    const variationalSession = createVariationalSession(await openVariationalSessionStore(directory), variationalSessionOptions);
     let hynixRunning = false, oilRunning = false, goldOilRunning = false;
-    const collector = createMarketCollector(marketStore, { jobs: marketJobs({ oilIntervalMs: pollSeconds * 1000 }), ...marketOptions,
+    const collector = createMarketCollector(marketStore, { jobs: marketJobs({ oilIntervalMs: pollSeconds * 1000, variationalSession }), ...marketOptions,
       onStored(job) {
         if (job.id === 'cl-xau' && goldOilRunning) { const parsed = parseGoldOilAction(job.action); if (parsed?.action === 'quote') return goldOils[goldOilVariantKey(parsed.oilType, parsed.exchange)].tick(); }
         if (job.action === 'quote') { if (job.id === 'hynix' && hynixRunning) return hynix.check(); if (job.id === 'oil' && oilRunning) return oil.tick(); }
@@ -124,8 +126,9 @@ export async function createMonitorServices(directory, { externallyLocked = fals
         actions: { quote: ["GET"], history: ["GET"], funding: ["GET"], ...exchangeActions('hynix'), alerts: ["GET", "PUT"], "alerts/test": ["POST"] },
       }],
       ["oil", {
-        start() { oilRunning = true; oil.start(); }, healthy: () => !oil.storageError, async stop() { oilRunning = false; await oil.stop(); },
+        start() { oilRunning = true; oil.start(); }, healthy: () => !oil.storageError, async stop() { oilRunning = false; await Promise.all([oil.stop(), variationalSession.stop()]); },
         async handle(action, method, input) {
+          if (action === 'exchanges/variational/session') return method === 'PUT' ? variationalSession.update(input) : variationalSession.view();
           if (action === "status" && method === "GET") return { ...oil.status(), available: true, monitorId: "oil" };
           if ((action === OIL_CANDLE_ACTION || action === OIL_HEDGE_PRICES_ACTION) && method === "GET") return read("oil", action);
           if ((["quote", "history", "funding"].includes(action) || exchangeFromAction(action) || fundingExchangeFromAction(action)) && method === "GET") return read("oil", action);
@@ -137,7 +140,7 @@ export async function createMonitorServices(directory, { externallyLocked = fals
           }
           if (action === "test-notification" && method === "POST") { await notifications.test(); return { ok: true }; }
         },
-        actions: { quote: ["GET"], history: ["GET"], funding: ["GET"], [OIL_CANDLE_ACTION]: ["GET"], [OIL_HEDGE_PRICES_ACTION]: ["GET"], ...exchangeActions('oil'), ...exchangeFundingActions, status: ["GET"], config: ["GET", "PUT"], events: ["GET"], "test-notification": ["POST"] },
+        actions: { quote: ["GET"], history: ["GET"], funding: ["GET"], 'exchanges/variational/session': ['GET', 'PUT'], [OIL_CANDLE_ACTION]: ["GET"], [OIL_HEDGE_PRICES_ACTION]: ["GET"], ...exchangeActions('oil'), ...exchangeFundingActions, status: ["GET"], config: ["GET", "PUT"], events: ["GET"], "test-notification": ["POST"] },
       }],
     ]);
     services.notifications = notifications;
