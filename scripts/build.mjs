@@ -24,8 +24,10 @@ await stage('TypeScript', () => new Promise((accept, reject) => {
   child.once('error', reject);
   child.once('exit', code => code === 0 ? accept() : reject(new Error(`TypeScript failed (${code})`)));
 }));
-await stage('Vite client', () => build({ root }));
-await stage('Vite SSR', () => build({ root, build: { ssr: 'web/entry-server.tsx' } }));
+// Reused node_modules are immutable during upgrades. The module runner loads
+// TypeScript config in memory instead of writing node_modules/.vite-temp.
+await stage('Vite client', () => build({ root, configLoader: 'runner' }));
+await stage('Vite SSR', () => build({ root, configLoader: 'runner', build: { ssr: 'web/entry-server.tsx' } }));
 const files = {};
 async function inventory(relative) {
   for (const entry of await readdir(resolve(root, 'dist', relative), { withFileTypes: true })) {

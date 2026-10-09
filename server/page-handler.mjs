@@ -31,9 +31,11 @@ export function pageHtml(template, markup, props) {
   return template.replace(/<!--ssr-(?:outlet|props|preload)-->/g, marker => values[marker]);
 }
 
-function pathname(request) {
+function pathname(request, development) {
   const path = decodeURIComponent(request.url.split('?')[0]);
-  if (!path.startsWith('/') || path.includes('\\') || [...path].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127) || path.split('/').some(part => part === '.' || part === '..' || part.startsWith('.'))) return null;
+  const parts = path.split('/');
+  if (!path.startsWith('/') || path.includes('\\') || [...path].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127) || parts.some((part, index) =>
+    part.startsWith('.') && !(development && index === 2 && part === '.vite' && parts[1] === 'node_modules' && parts[3] === 'deps'))) return null;
   return path;
 }
 
@@ -67,7 +69,7 @@ export async function createPageHandler({ services, root = process.cwd(), develo
   const assets = new Map();
   if (development) {
     const { createServer } = await import('vite');
-    vite = await createServer({ root, server: { middlewareMode: true }, appType: 'custom' });
+    vite = await createServer({ root, configLoader: 'runner', server: { middlewareMode: true }, appType: 'custom' });
   } else {
     const clientRoot = join(root, 'dist/client');
     template = await readFile(join(clientRoot, 'index.html'), 'utf8');
@@ -98,7 +100,7 @@ export async function createPageHandler({ services, root = process.cwd(), develo
   return {
     async handle(request, response) {
       let path;
-      try { path = pathname(request); } catch { return errorResponse(response, 400); }
+      try { path = pathname(request, development); } catch { return errorResponse(response, 400); }
       if (path === null) return errorResponse(response, 404);
       if (request.method !== 'GET' && request.method !== 'HEAD') return errorResponse(response, 405);
       if (path === '/') {
