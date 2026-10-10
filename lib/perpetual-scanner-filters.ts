@@ -98,8 +98,21 @@ function fresh(timestamp: number | null | undefined, now: number, staleAfterMs: 
     && timestamp <= now + 5_000 && now - timestamp <= staleAfterMs;
 }
 
-type RangeValue = number | "pending" | "missing";
-function amountValue(quote: PerpetualQuote, field: "volume24h" | "openInterest", data: ScannerRangeData): RangeValue {
+export type ScannerRangeValue = number | "pending" | "missing";
+
+/** Explicit reference units: range inputs remain USD; table sorting can use USDT. */
+export function scannerCurrencyValue(value: number, currency: string, referenceCurrency: "USD" | "USDT", data: ScannerRangeData): ScannerRangeValue {
+  if (!Number.isFinite(value)) return "missing";
+  if (currency === referenceCurrency) return value;
+  if (!data.fx) return "pending";
+  const from = quoteCurrencyFx(currency, data.fx, data.now), reference = quoteCurrencyFx(referenceCurrency, data.fx, data.now);
+  if (!from || !reference) return "missing";
+  // Dividing both midpoints by two separately avoids an overflowing bid + ask sum.
+  const converted = value * ((from.bid / 2 + from.ask / 2) / (reference.bid / 2 + reference.ask / 2));
+  return Number.isFinite(converted) ? converted : "missing";
+}
+
+export function scannerAmountValue(quote: PerpetualQuote, field: "volume24h" | "openInterest", data: ScannerRangeData, referenceCurrency: "USD" | "USDT" = "USD"): ScannerRangeValue {
   const key = legKey(quote), leg = data.metrics?.[key];
   if (!leg) return "pending";
   if (leg.key !== key || leg.exchange !== quote.exchange || leg.symbol !== quote.symbol) return "missing";
@@ -108,16 +121,10 @@ function amountValue(quote: PerpetualQuote, field: "volume24h" | "openInterest",
   const metric = leg[field];
   if (!metric || metric.error || metric.value === null || !Number.isFinite(metric.value) || metric.value < 0
     || !metric.currency || !fresh(metric.observedAt, data.now, PERPETUAL_MARKET_METRICS_STALE_MS)) return "missing";
-  if (metric.currency === "USD") return metric.value;
-  if (!data.fx) return "pending";
-  const from = quoteCurrencyFx(metric.currency, data.fx, data.now), usd = quoteCurrencyFx("USD", data.fx, data.now);
-  if (!from || !usd) return "missing";
-  // Dividing both midpoints by two separately avoids an overflowing bid + ask sum.
-  const value = metric.value * ((from.bid / 2 + from.ask / 2) / (usd.bid / 2 + usd.ask / 2));
-  return Number.isFinite(value) ? value : "missing";
+  return scannerCurrencyValue(metric.value, metric.currency, referenceCurrency, data);
 }
 
-function historyValue(row: PerpetualSpread, hours: FundingWindowHours, data: ScannerRangeData): RangeValue {
+export function scannerHistoryValue(row: PerpetualSpread, hours: FundingWindowHours, data: ScannerRangeData): ScannerRangeValue {
   const total = data.history?.[scannerHistoryPairKey(row)]?.[hours];
   if (!total || total.status === "pending") return "pending";
   if (total.status !== "ready" || total.hours !== hours || total.netPercent === null || !Number.isFinite(total.netPercent)
@@ -125,14 +132,14 @@ function historyValue(row: PerpetualSpread, hours: FundingWindowHours, data: Sca
   return legKey(row.long) < legKey(row.short) ? total.netPercent : -total.netPercent;
 }
 
-function rangeValue(row: PerpetualSpread, id: ScannerRangeId, data: ScannerRangeData): RangeValue {
-  if (id === "longVolume") return amountValue(row.long, "volume24h", data);
-  if (id === "shortVolume") return amountValue(row.short, "volume24h", data);
-  if (id === "longOpenInterest") return amountValue(row.long, "openInterest", data);
-  if (id === "shortOpenInterest") return amountValue(row.short, "openInterest", data);
+function rangeValue(row: PerpetualSpread, id: ScannerRangeId, data: ScannerRangeData): ScannerRangeValue {
+  if (id === "longVolume") return scannerAmountValue(row.long, "volume24h", data);
+  if (id === "shortVolume") return scannerAmountValue(row.short, "volume24h", data);
+  if (id === "longOpenInterest") return scannerAmountValue(row.long, "openInterest", data);
+  if (id === "shortOpenInterest") return scannerAmountValue(row.short, "openInterest", data);
   if (id === "spread") return Number.isFinite(row.spreadPercent) ? row.spreadPercent : "missing";
   const hours = historyWindows[id];
-  if (hours !== undefined) return historyValue(row, hours, data);
+  if (hours !== undefined) return scannerHistoryValue(row, hours, data);
   const long = normalizedFunding8h(row.long, data.now), short = normalizedFunding8h(row.short, data.now);
   if (long === null || short === null) return "missing";
   const carry = short - long, value = id === "annualized" ? annualizedFundingPercent(carry) : carry * 100;

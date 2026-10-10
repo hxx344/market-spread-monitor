@@ -2,13 +2,14 @@
 
 import { hubNavigate, cleanHubQuery } from "../lib/hub-bridge";
 import { Fragment, Suspense, lazy, memo, useDeferredValue, useEffect, useMemo, useState, type ReactNode } from "react";
-import { Activity, ArrowDown, Bell, ChevronDown, ChevronLeft, ChevronRight, RefreshCw, Search, SlidersHorizontal, Star, X } from "lucide-react";
+import { Activity, Bell, ChevronDown, ChevronLeft, ChevronRight, RefreshCw, Search, SlidersHorizontal, Star, X } from "lucide-react";
 import { usePerpetualFeed } from "../hooks/use-perpetual-feed";
 import { usePerpetualQuality } from "../hooks/use-perpetual-quality";
 import { usePerpetualFundingHistory } from "../hooks/use-perpetual-funding-history";
 import { usePerpetualMarketMetrics } from "../hooks/use-perpetual-market-metrics";
 import { usePerpetualScannerData } from "../hooks/use-perpetual-scanner-data";
-import { createScannerDataPairSelector } from "../lib/perpetual-scanner-data";
+import { createScannerDataPairSelector, scannerDataHistoryForPair } from "../lib/perpetual-scanner-data";
+import { nextScannerSort, parseScannerSort, scannerSortRequirements, sortScannerRows, type ScannerSort, type ScannerSortColumn } from "../lib/perpetual-scanner-sort";
 import { fundingWindowTotal, type PerpetualFundingLeg } from "../lib/perpetual-funding-history";
 import { usePerpetualFx } from "../hooks/use-perpetual-fx";
 import PerpetualCrossExSettings from "./perpetual-crossex-settings";
@@ -42,6 +43,8 @@ type DetailTab = "execution" | "quality" | "exit" | "quotes";
 
 const scannerPreferencesKey = "market-monitor:perpetual-scanner:v1";
 const scannerRangesKey = "market-monitor:perpetual-scanner-ranges:v1";
+const scannerSortKey = "market-monitor:perpetual-scanner-sort:v1";
+const sortableScannerColumns = new Set<string>(["fundingSpread", "annualized", "volume", "openInterest", "quote", "spread", "history24h", "history7d", "history30d"]);
 const preferencesKey = "market-monitor:perpetual:v1";
 const qualityBudgetKey = "market-monitor:perpetual-quality-budget:v1";
 const pageSize = 30;
@@ -211,6 +214,10 @@ function PerpetualPanel({ active = true, interactionActive = active, onSummary, 
   const [preferencesReady, setPreferencesReady] = useState(false);
   const [scanner, setScanner] = useState<ScannerPreferences>(defaultScannerPreferences);
   const [scannerReady, setScannerReady] = useState(false);
+  const [scannerSort, setScannerSort] = useState<ScannerSort | null>(null);
+  const [sortReady, setSortReady] = useState(false);
+  const activeSort = useMemo<ScannerSort>(() => scannerSort ?? { column: filters.sortBy === "funding" ? "fundingSpread" : "spread", direction: "desc" }, [scannerSort, filters.sortBy]);
+  const sortRequirements = useMemo(() => scannerSortRequirements(scannerSort), [scannerSort]);
   const [rangeInputs, setRangeInputs] = useState<ScannerRangeInputs>(() => parseScannerRangeInputs({ spread: { min: "0" } }));
   const [rangesReady, setRangesReady] = useState(false);
   const ranges = useMemo(() => compileScannerRanges(rangeInputs), [rangeInputs]);
@@ -262,7 +269,7 @@ function PerpetualPanel({ active = true, interactionActive = active, onSummary, 
   const selected = useMemo(() => filters.exchanges === null ? null : new Set(filters.exchanges), [filters.exchanges]);
   const favorites = useMemo(() => new Set(filters.favorites), [filters.favorites]);
   const favoritePairs = useMemo(() => new Set(filters.favoritePairs ?? []), [filters.favoritePairs]);
-  const { data: fx, error: fxError } = usePerpetualFx(opportunitiesActive && (filters.crossCurrency || (view === "rank" && ranges.valid && ranges.needsFx)) && !paused);
+  const { data: fx, error: fxError } = usePerpetualFx(opportunitiesActive && (filters.crossCurrency || (view === "rank" && ranges.valid && (ranges.needsFx || sortRequirements.needsFx))) && !paused);
   const netSort = filters.sortBy === "net";
   const fundingSort = filters.sortBy === "funding";
   const selectRanking = useMemo(() => createPerpetualRankingSelector(), []);
@@ -286,9 +293,10 @@ function PerpetualPanel({ active = true, interactionActive = active, onSummary, 
     return { matching, missing };
   }, [paused, categoryRanking, quoteRanges, now]);
   const candidateRanking = quoteRangeSelection.matching;
-  const scannerPairs = useMemo(() => selectScannerPairs(ranges.valid && (ranges.needsMetrics || ranges.historyHours.length) ? candidateRanking : emptySpreads), [selectScannerPairs, candidateRanking, ranges.valid, ranges.needsMetrics, ranges.historyHours.length]);
-  const scannerRequirements = useMemo(() => ({ metrics: ranges.needsMetrics, historyHours: ranges.historyHours }), [ranges]);
-  const { report: scannerData, loading: scannerLoading, error: scannerError } = usePerpetualScannerData(scannerPairs, scannerRequirements, opportunitiesActive && view === "rank" && rangesReady && ranges.valid && (ranges.needsMetrics || ranges.historyHours.length > 0) && !paused);
+  const scannerRequirements = useMemo(() => ({ metrics: ranges.needsMetrics || sortRequirements.metrics, historyHours: [...new Set([...ranges.historyHours, ...sortRequirements.historyHours])].sort((a, b) => a - b) }), [ranges, sortRequirements]);
+  const needsScannerData = scannerRequirements.metrics || scannerRequirements.historyHours.length > 0;
+  const scannerPairs = useMemo(() => selectScannerPairs(ranges.valid && needsScannerData ? candidateRanking : emptySpreads), [selectScannerPairs, candidateRanking, ranges.valid, needsScannerData]);
+  const { report: scannerData, loading: scannerLoading, error: scannerError } = usePerpetualScannerData(scannerPairs, scannerRequirements, opportunitiesActive && view === "rank" && rangesReady && sortReady && ranges.valid && needsScannerData && !paused);
   const rangeSelection = useMemo(() => {
     const matching: PerpetualSpread[] = [];
     let pending = 0, missing = quoteRangeSelection.missing;
@@ -300,7 +308,12 @@ function PerpetualPanel({ active = true, interactionActive = active, onSummary, 
     }
     return { matching, pending, missing };
   }, [candidateRanking, quoteRangeSelection.missing, paused, ranges, scannerData, fx, now]);
-  const ranking = rangeSelection.matching;
+  // Frozen rows keep their order while details are open; sorting always covers
+  // the full matching set before the page is selected.
+  const ranking = useMemo(() => paused || !scannerSort ? rangeSelection.matching : sortScannerRows(rangeSelection.matching, scannerSort, {
+    metrics: scannerData?.metrics, history: scannerData?.history, fx, now, net: netSort,
+    priceMode: filters.priceMode, staleAfterMs: data?.staleAfterMs ?? 30_000,
+  }), [paused, scannerSort, rangeSelection.matching, scannerData, fx, now, netSort, filters.priceMode, data?.staleAfterMs]);
   if (paused && !ranking.some(row => perpetualSpreadKey(row) === inspection.key)) setInspection(null);
   const categoryQuotes = useMemo(() => quotes.filter(quote => categorySet.has(scannerQuoteCategory(quote))), [quotes, categorySet]);
   const quoteSelection = useMemo(() => selectQuotes(categoryQuotes, rankingFilters), [categoryQuotes, rankingFilters, selectQuotes]);
@@ -340,6 +353,19 @@ function PerpetualPanel({ active = true, interactionActive = active, onSummary, 
   useEffect(() => {
     if (scannerReady) { try { localStorage.setItem(scannerPreferencesKey, JSON.stringify(scanner)); } catch { /* Storage is optional. */ } }
   }, [scanner, scannerReady]);
+  useEffect(() => {
+    const restore = (event?: StorageEvent) => {
+      if (event && event.key !== scannerSortKey) return;
+      setInspection(null); setPage(1);
+      try { setScannerSort(parseScannerSort(localStorage.getItem(scannerSortKey))); } catch { /* Storage is optional. */ }
+      setSortReady(true);
+    };
+    restore(); window.addEventListener("storage", restore);
+    return () => window.removeEventListener("storage", restore);
+  }, []);
+  useEffect(() => {
+    if (sortReady) { try { localStorage.setItem(scannerSortKey, JSON.stringify(scannerSort)); } catch { /* Sorting remains available without storage. */ } }
+  }, [scannerSort, sortReady]);
   useEffect(() => {
     function restoreRanges(event?: StorageEvent) {
       if (event && event.key !== scannerRangesKey) return;
@@ -427,7 +453,13 @@ function PerpetualPanel({ active = true, interactionActive = active, onSummary, 
     if (data) setInspection(previous => previous ? { ...previous, key, base } : { key, base, snapshot: data, ranking, page: visiblePage, blockedKey });
     requestAnimationFrame(() => { const table = document.querySelector(".scanner-table-wrap"); if (table) table.scrollLeft = 0; });
   }
-  function updateFilters(update: Partial<PerpetualFilters>) { setInspection(null); setFilters(previous => ({ ...previous, ...update })); setPage(1); }
+  function updateFilters(update: Partial<PerpetualFilters>) {
+    setInspection(null); setFilters(previous => ({ ...previous, ...update })); setPage(1);
+    if (Object.hasOwn(update, "sortBy")) setScannerSort(null);
+  }
+  function changeScannerSort(column: ScannerSortColumn, leg?: "long" | "short") {
+    setInspection(null); setPage(1); setScannerSort(nextScannerSort(activeSort, column, leg));
+  }
   function updateRange(id: ScannerRangeId, bound: "min" | "max", value: string) {
     setInspection(null); setPage(1); setRangeInputs(previous => ({ ...previous, [id]: { ...previous[id], [bound]: value } }));
   }
@@ -514,19 +546,29 @@ function PerpetualPanel({ active = true, interactionActive = active, onSummary, 
       {!ranges.valid ? <span className="scanner-filter-pending">请修正无效范围</span> : <><span>筛选范围：全部 {categoryRanking.length} 个候选组合</span><span>匹配 {ranking.length}</span>{rangeSelection.pending > 0 ? <span className="scanner-filter-pending">{!ranges.needsMetrics && ranges.historyHours.length === 1 && ranges.historyHours[0] === 720 ? "30天历史待补齐" : "待采集"} {rangeSelection.pending}{scannerLoading ? " · 自动补齐中" : ""}</span> : null}{rangeSelection.missing > 0 ? <span>缺失或过期 {rangeSelection.missing}</span> : null}{(scannerData?.progress?.deferred ?? 0) > 0 ? <span>部分数据稍后重试</span> : null}</>}
     </div> : null}
     {problem ? <div className="perp-notice" role="status">{problem}</div> : null}
+    {view === "rank" && scannerSort ? <div className="scanner-filter-progress" role="status" aria-label="全量排序状态"><span>排序：{SCANNER_COLUMNS.find(column => column.id === scannerSort.column)?.label}{scannerSort.leg ? ` · ${scannerSort.leg === "long" ? "多腿" : "空腿"}` : ""} · {scannerSort.direction === "desc" ? "从高到低" : "从低到高"}</span><span>{sortRequirements.needsFx ? "按 USDT 等值比较，显示保留原币；" : ""}缺失或过期置后</span>{needsScannerData && (scannerData?.progress?.pending ?? 0) > 0 ? <span className="scanner-filter-pending">排序数据待采集 {scannerData?.progress?.pending}{scannerLoading ? " · 自动补齐中" : ""}</span> : null}</div> : null}
     {data?.storageError ? <div className="perp-notice" role="status">快照保存异常：{data.storageError}</div> : null}
     {crossex.error || crossex.saveError ? <div className="perp-notice" role="alert">{crossex.saveError || crossex.error}</div> : null}
     {crossex.data?.config.requireSpotTransfer ? <p className="scanner-data-note">现货充提筛选已开启：仅显示已核验的合格组合。</p> : null}
     {view === "rank" && scannerError ? <p className="perp-quality-notice" role="status">{scannerError}</p> : null}
     {view === "rank" && ranges.needsFx && fxError && !filters.crossCurrency ? <p className="perp-quality-notice" role="status">金额筛选所需汇率暂不可用，缺失汇率的组合暂不匹配。</p> : null}
+    {view === "rank" && sortRequirements.needsFx && fxError && !filters.crossCurrency ? <p className="perp-quality-notice" role="status">排序所需汇率暂不可用，缺失汇率的组合排在末尾。</p> : null}
     {view === "rank" && fundingHistoryError ? <p className="perp-quality-notice" role="status">{fundingHistoryError}</p> : null}
     {view === "rank" && marketMetricsError ? <p className="perp-quality-notice" role="status">{marketMetricsError}</p> : null}
     {filters.crossCurrency ? <p className="perp-currency-warning">{fxError || (fx ? `汇率快照 ${stamp(fx.generatedAt)} · 仅纳入有新鲜买卖汇率的组合；USD 等缺失汇率不假定等于 1。换汇手续费另计。` : "正在读取现货汇率，缺失汇率的跨币组合暂不参与排名。")}</p> : null}
     {filters.crossCurrency && fx ? <details className="perp-fx-details"><summary>查看每条汇率的来源时间与买卖价</summary><div>{["USDC", "USD1", "USDG", "USD"].map(currency => { const rate = fx.rates[currency]; return <p key={currency}><strong>{currency} / USDT</strong> · {rate ? <>买 {rate.bid.toFixed(6)} / 卖 {rate.ask.toFixed(6)} · 源时间 {stamp(rate.at)}{now - rate.at > fx.staleAfterMs ? " · 已过期" : ""}</> : "未纳入"}{fx.reasons?.[currency] ? <span> · {fx.reasons[currency]}</span> : null}</p>; })}</div></details> : null}
     {view === "quotes" ? <><p className="perp-quotes-caption">平台组合与价差阈值仅影响排名。此处保留原始合约单位，独立合约不参与跨所比较。</p><div className="perp-table-wrap"><QuoteDetails crossex={crossex} quotes={quoteRows} venues={venues} mode={filters.priceMode} now={now} staleAfterMs={data?.staleAfterMs ?? 30_000} standalone/>{!quoteRows.length ? <div className="perp-empty"><strong>暂无符合条件的报价</strong><p>{!data || !quotes.length ? emptyMessage : "可以调整币种搜索或交易所筛选。"}</p></div> : null}</div></> : <div className="perp-table-wrap scanner-table-wrap" tabIndex={0} role="region" aria-label="套利组合表格，可横向滚动"><table className="perp-table perp-scanner-table"><thead><tr><th scope="col">币种</th>{visibleColumns.map(column => {
-      const sortable = column.id === "spread" || column.id === "fundingSpread" || column.id === "annualized";
-      const sorted = column.id === "spread" ? !fundingSort : column.id === "fundingSpread" ? fundingSort : false;
-      return <th scope="col" key={column.id} data-column={column.id} aria-sort={sortable && sorted ? "descending" : undefined}>{sortable ? <button type="button" className="scanner-sort-column" onClick={() => updateFilters({ sortBy: column.id === "spread" ? netSort ? "net" : "gross" : "funding" })}>{column.id === "spread" ? netSort ? "净价差" : filters.priceMode === "mark" ? "标记价差" : column.label : column.label}{sorted ? <ArrowDown size={11}/> : null}</button> : column.label}{column.id === "fundingSpread" ? <small>/ 8h</small> : column.id === "annualized" ? <small>当前费率估算</small> : column.id === "quote" ? <small>{filters.priceMode === "book" ? "多卖一 / 空买一" : "标记价 · 仅供参考"}</small> : null}</th>;
+      const sortable = sortableScannerColumns.has(column.id) ? column.id as ScannerSortColumn : null;
+      const sorted = activeSort.column === column.id;
+      const dualLeg = column.id === "volume" || column.id === "openInterest" || column.id === "quote";
+      const label = column.id === "spread" ? netSort ? "净价差" : filters.priceMode === "mark" ? "标记价差" : column.label : column.label;
+      const nextDirection = (leg?: "long" | "short") => sorted && activeSort.direction === "desc" && (!dualLeg || activeSort.leg === (leg ?? "long")) ? "升序" : "降序";
+      const arrow = sorted ? activeSort.direction === "desc" ? "↓" : "↑" : "↕";
+      return <th scope="col" key={column.id} data-column={column.id} aria-sort={sortable && sorted ? activeSort.direction === "desc" ? "descending" : "ascending" : undefined}>
+        {sortable ? <button type="button" className="scanner-sort-column" aria-label={`${label}，${dualLeg ? "多腿，" : ""}点击按${nextDirection()}排序`} onClick={() => changeScannerSort(sortable, dualLeg ? "long" : undefined)}>{label}<span aria-hidden="true">{arrow}</span></button> : label}
+        {dualLeg && sortable ? <div className="scanner-sort-legs">{(["long", "short"] as const).map(leg => <button type="button" key={leg} data-sort-leg={leg} aria-pressed={sorted && activeSort.leg === leg} aria-label={`${label}，${leg === "long" ? "多腿" : "空腿"}，点击按${nextDirection(leg)}排序`} onClick={() => changeScannerSort(sortable, leg)}>{leg === "long" ? "多" : "空"}{sorted && activeSort.leg === leg ? <span aria-hidden="true">{arrow}</span> : null}</button>)}</div> : null}
+        {column.id === "fundingSpread" ? <small>/ 8h</small> : column.id === "annualized" ? <small>当前费率估算</small> : column.id === "quote" ? <small>{filters.priceMode === "book" ? "多卖一 / 空买一" : "标记价 · 仅供参考"}</small> : null}
+      </th>;
     })}<th scope="col"><span className="perp-sr-only">展开组合详情</span></th></tr></thead>
       <tbody>{rows.map(row => {
         const rowKey = perpetualSpreadKey(row), isExpanded = expanded === rowKey;
@@ -543,19 +585,22 @@ function PerpetualPanel({ active = true, interactionActive = active, onSummary, 
         const category = scannerPairCategory(row);
         const categoryLabel = SCANNER_CATEGORIES.find(item => item.id === category)?.label ?? "未分类";
         const annualized = annualizedFundingPercent(fundingSpread);
+        const historyPair = { base: row.base, longKey: `${row.long.exchange}:${row.long.symbol}`, shortKey: `${row.short.exchange}:${row.short.symbol}` };
+        const longMetric = scannerRequirements.metrics ? scannerData?.metrics[historyPair.longKey] : marketMetricsReport?.legs[historyPair.longKey];
+        const shortMetric = scannerRequirements.metrics ? scannerData?.metrics[historyPair.shortKey] : marketMetricsReport?.legs[historyPair.shortKey];
         const cells: Record<ScannerColumnId, ReactNode> = {
           type: <span className="scanner-type-tag" title={categoryLabel} aria-label={categoryLabel}>{category === "crypto" ? "C" : category === "unknown" ? "?" : "R"}</span>,
           pair: <button type="button" className="scanner-pair scanner-chart-link" aria-label={`创建价差图表：${pairLabel}`} onClick={() => openChart(row)}><ScannerLeg quote={row.long} name={venues.get(row.long.exchange)?.name ?? row.long.exchange} side="long" now={now}/><ScannerLeg quote={row.short} name={venues.get(row.short.exchange)?.name ?? row.short.exchange} side="short" now={now}/></button>,
           funding: <><ScannerFundingRate quote={row.long} now={now}/><ScannerFundingRate quote={row.short} now={now}/></>,
           fundingSpread: <span className={scannerPolarity(fundingSpread)}>{scannerPercent(fundingSpread === null ? null : fundingSpread * 100)}</span>,
           annualized: <span className={scannerPolarity(annualized)} title="当前 8h 资金费差 × 3 × 365；按单腿等名义本金简单外推，未扣费用，不复利">{scannerPercent(annualized, 1)}</span>,
-          volume: <ScannerMarketMetric long={marketMetricsReport?.legs[`${row.long.exchange}:${row.long.symbol}`]} short={marketMetricsReport?.legs[`${row.short.exchange}:${row.short.symbol}`]} metricName="volume24h" now={now}/>,
-          openInterest: <ScannerMarketMetric long={marketMetricsReport?.legs[`${row.long.exchange}:${row.long.symbol}`]} short={marketMetricsReport?.legs[`${row.short.exchange}:${row.short.symbol}`]} metricName="openInterest" now={now}/>,
+          volume: <ScannerMarketMetric long={longMetric} short={shortMetric} metricName="volume24h" now={now}/>,
+          openInterest: <ScannerMarketMetric long={longMetric} short={shortMetric} metricName="openInterest" now={now}/>,
           quote: <div className="scanner-stack"><div title={String(row.buyPrice)}>{price(row.buyPrice)} <small>{row.long.quoteCurrency}</small></div><div title={String(row.sellPrice)}>{price(row.sellPrice)} <small>{row.short.quoteCurrency}</small></div>{now - row.updatedAt > (data?.staleAfterMs ?? 30_000) ? <small className="scanner-stale">报价已过期</small> : null}</div>,
           spread: <div className={scannerPolarity(primarySpread)} title={historicalDeviation === null ? undefined : `较 1h 均值 ${historicalDeviation.toFixed(1)} bp`}><strong>{percent(primarySpread)}</strong><small className="secondary">{netSort ? "毛" : "净"} {percent(netSort ? row.spreadPercent : row.netSpreadPercent ?? null)}</small></div>,
-          history24h: <ScannerHistory long={fundingHistoryReport?.legs[`${row.long.exchange}:${row.long.symbol}`]} short={fundingHistoryReport?.legs[`${row.short.exchange}:${row.short.symbol}`]} now={now}/>,
-          history7d: <ScannerHistory long={fundingHistoryReport?.legs[`${row.long.exchange}:${row.long.symbol}`]} short={fundingHistoryReport?.legs[`${row.short.exchange}:${row.short.symbol}`]} now={now} hours={168}/>,
-          history30d: <ScannerHistory long={fundingHistoryReport?.legs[`${row.long.exchange}:${row.long.symbol}`]} short={fundingHistoryReport?.legs[`${row.short.exchange}:${row.short.symbol}`]} now={now} hours={720}/>,
+          history24h: <ScannerHistory long={fundingHistoryReport?.legs[historyPair.longKey]} short={fundingHistoryReport?.legs[historyPair.shortKey]} total={scannerRequirements.historyHours.includes(24) ? scannerDataHistoryForPair(scannerData, historyPair, 24) ?? null : undefined} now={now}/>,
+          history7d: <ScannerHistory long={fundingHistoryReport?.legs[historyPair.longKey]} short={fundingHistoryReport?.legs[historyPair.shortKey]} total={scannerRequirements.historyHours.includes(168) ? scannerDataHistoryForPair(scannerData, historyPair, 168) ?? null : undefined} now={now} hours={168}/>,
+          history30d: <ScannerHistory long={fundingHistoryReport?.legs[historyPair.longKey]} short={fundingHistoryReport?.legs[historyPair.shortKey]} total={scannerRequirements.historyHours.includes(720) ? scannerDataHistoryForPair(scannerData, historyPair, 720) ?? null : undefined} now={now} hours={720}/>,
           time: <div className="scanner-time"><time dateTime={new Date(row.updatedAt).toISOString()}>{stamp(row.updatedAt)}</time><small>{age(row.updatedAt, now)}{paused ? now - row.updatedAt > (data?.staleAfterMs ?? 30_000) ? " · 已过期" : " · 已暂停" : ""}</small></div>,
           quality: <QualityCell quality={quality} pairLabel={pairLabel} onInspect={() => inspect(row, false, "quality")}/>,
         };
@@ -575,7 +620,7 @@ function PerpetualPanel({ active = true, interactionActive = active, onSummary, 
       {!rows.length ? <div className="perp-empty"><span aria-hidden="true">—</span><strong>{!data || data.status === "connecting" ? "等待实时报价" : fundingSort ? "暂无符合条件的资金费机会" : "暂无符合条件的价差"}</strong><p>{rangeEmptyMessage || emptyMessage}</p>{quotes.length > 0 ? <button type="button" onClick={resetFilters}>重置筛选</button> : null}</div> : null}
     </div>}
     <div className="perp-pagination"><span>{totalItems ? `${(visiblePage - 1) * pageSize + 1}–${Math.min(visiblePage * pageSize, totalItems)} / ${totalItems} ${view === "rank" ? "组合" : "报价"}` : `0 ${view === "rank" ? "组合" : "报价"}`}<small>每页 {pageSize} 条</small></span><div><button type="button" aria-label="上一页" disabled={visiblePage <= 1} onClick={() => changePage(visiblePage - 1)}><ChevronLeft size={16}/></button><span>{visiblePage} / {totalPages}</span><button type="button" aria-label="下一页" disabled={visiblePage >= totalPages} onClick={() => changePage(visiblePage + 1)}><ChevronRight size={16}/></button></div></div>
-    {view === "rank" ? <p className="scanner-data-note">资金费差统一折算 / 8h；年化按当前费率简单外推。24h、7 天和 30 天实际为已结算资金费净累计，非账户盈亏。成交额与持仓金额按多腿 / 空腿排列，保留来源计价币，点击数值查看来源时间；数据每 5 分钟更新，首次历史回补期间显示采集状态。展开组合可查看双腿累计与成本估算。</p> : null}
+    {view === "rank" ? <p className="scanner-data-note">点击数值列表头切换升降序，成交额、持仓量和报价可分别按多腿 / 空腿排序；排序覆盖全部筛选结果。资金费差统一折算 / 8h；年化按当前费率简单外推。24h、7 天和 30 天实际为已结算资金费净累计，非账户盈亏。成交额与持仓金额保留来源计价币，点击数值查看来源时间；指标以 30 秒为更新目标，历史每 5 分钟更新，首次回补期间显示采集状态。展开组合可查看双腿累计与成本估算。</p> : null}
     <details className="scanner-tools" open={toolsOpen} onToggle={event => setToolsOpen(event.currentTarget.open)}><summary>监控工具与设置<ChevronDown size={14}/></summary><div className="scanner-tools-content">
       <details className="scanner-advanced-filters"><summary>更多筛选与排序设置</summary>
         <div className="perp-filter-fields">

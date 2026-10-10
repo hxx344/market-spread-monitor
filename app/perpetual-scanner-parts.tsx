@@ -2,7 +2,7 @@ import { useCallback, useId, useLayoutEffect, useRef, useState, type ReactNode }
 import { createPortal } from "react-dom";
 import type { PerpetualQuote } from "../lib/perpetual-types";
 import { normalizedFunding8h } from "../lib/perpetual-spreads";
-import { fundingWindowTotal, type FundingWindowTotal, type PerpetualFundingLeg } from "../lib/perpetual-funding-history";
+import { fundingWindowTotal, PERPETUAL_FUNDING_STALE_MS, type FundingWindowTotal, type PerpetualFundingLeg } from "../lib/perpetual-funding-history";
 import { PERPETUAL_MARKET_METRICS_STALE_MS, type PerpetualMarketMetricsLeg } from "../lib/perpetual-market-metrics";
 
 const dateFormat = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
@@ -40,8 +40,10 @@ export function ScannerFundingRate({ quote, now }: { quote: PerpetualQuote; now:
   </div>;
 }
 
-export function ScannerHistory({ long, short, now, hours = 24 }: { long: PerpetualFundingLeg | undefined; short: PerpetualFundingLeg | undefined; now: number; hours?: FundingWindowTotal["hours"] }) {
-  const value = fundingWindowTotal(long, short, hours, now);
+export function ScannerHistory({ long, short, now, hours = 24, total }: { long: PerpetualFundingLeg | undefined; short: PerpetualFundingLeg | undefined; now: number; hours?: FundingWindowTotal["hours"]; total?: FundingWindowTotal | null }) {
+  const source = total === undefined ? fundingWindowTotal(long, short, hours, now) : total ?? fundingWindowTotal(undefined, undefined, hours, now);
+  const value: FundingWindowTotal = source.status === "ready" && (source.asOf === null || source.asOf > now + 5_000 || now - source.asOf > PERPETUAL_FUNDING_STALE_MS)
+    ? { ...source, status: "stale", reason: "历史已过期，保留上次累计" } : source;
   const labels = { pending: "采集中", partial: "历史不足", stale: "已过期", error: "更新失败", unsupported: "不支持", ready: "" };
   return <div className="scanner-history" data-history-hours={hours} title={`已结算资金费净累计 = 空腿 − 多腿；单腿等名义本金${value.asOf === null ? "" : `；截止 ${dateFormat.format(value.asOf)} 北京时间`}。${value.reason}`}>
     <strong className={scannerPolarity(value.netPercent)}>{scannerPercent(value.netPercent)}</strong>

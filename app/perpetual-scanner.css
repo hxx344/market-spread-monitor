@@ -318,9 +318,19 @@
 .perp-scanner .perp-scanner-table > tbody > tr:not(.perp-detail-row) > .perp-expand-cell { width: 36px; padding: 0 3px; border-right: 0; }
 .perp-scanner .perp-scanner-table .perp-expand-cell > button { width: 30px; min-height: 36px; padding: 9px 5px; color: var(--scanner-muted); }
 .perp-scanner .perp-scanner-table .perp-expand-cell > button:hover { background: #3b392f; color: var(--scanner-text); }
-.perp-scanner .scanner-sort-column { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; min-height: 24px; padding: 0; border: 0; background: transparent; color: inherit; font-size: inherit; white-space: nowrap; }
+.perp-scanner .scanner-sort-column { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; min-height: 32px; padding: 2px 0; border: 0; background: transparent; color: inherit; font-size: inherit; white-space: nowrap; cursor: pointer; }
 .perp-scanner th[aria-sort]:not([aria-sort="none"]) .scanner-sort-column { color: var(--scanner-text); }
 .perp-scanner .scanner-sort-column:hover { color: var(--scanner-focus); }
+.perp-scanner .scanner-sort-column > span { width: 11px; color: var(--scanner-muted); }
+.perp-scanner th[aria-sort] .scanner-sort-column > span { color: var(--scanner-focus); }
+.perp-scanner .scanner-sort-legs { display: flex; justify-content: flex-end; gap: 3px; }
+.perp-scanner .scanner-sort-legs button { display: inline-flex; align-items: center; justify-content: center; gap: 2px; min-width: 32px; min-height: 28px; padding: 2px 5px; border: 1px solid var(--scanner-border); border-radius: 3px; background: transparent; color: var(--scanner-muted); font-size: 10px; cursor: pointer; }
+.perp-scanner .scanner-sort-legs button[aria-pressed="true"] { border-color: #776b39; background: #343229; color: var(--scanner-focus); }
+.perp-scanner .scanner-sort-legs button:hover { border-color: var(--scanner-focus); color: var(--scanner-text); }
+@media (max-width: 700px) {
+  .perp-scanner .scanner-sort-column { min-height: 40px; }
+  .perp-scanner .scanner-sort-legs button { min-width: 36px; min-height: 36px; }
+}
 .perp-scanner .perp-scanner-table > thead .perp-th-note { margin: 2px 0 0; color: #979689; font-size: 9px; }
 .perp-scanner .perp-scanner-table .perp-mobile-label { display: none; }
 
