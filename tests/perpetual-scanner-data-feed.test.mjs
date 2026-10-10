@@ -70,7 +70,7 @@ test('all candidates beyond thirty pairs and five hundred contracts remain avail
   f.feed.stop(); assert.equal(f.time.timers.size, 0);
 });
 
-test('pending batch holds its place, polls only remaining requirements, then lets the next batch start', async () => {
+test('completed positions refill immediately while a pending item keeps its place and remaining requirements', async () => {
   let ready = false;
   const f = fixture(async request => {
     const report = response(request);
@@ -79,11 +79,57 @@ test('pending batch holds its place, polls only remaining requirements, then let
   });
   const pairs = Array.from({ length: 31 }, (_, index) => pair(index));
   f.feed.setSelection(pairs, { metrics: true, historyHours: [720] }); f.feed.setActive(true); await settle();
+  assert.equal(f.requests.length, 2);
+  assert.equal(f.requests[1].request.pairs.length, 2); assert.equal(f.requests[1].request.metrics, true);
+  assert.equal(f.reports.at(-1).progress.completed, 30);
   await f.time.advance(6000);
-  assert.equal(f.requests.length, 3); assert.equal(f.requests[1].request.pairs.length, 1); assert.equal(f.requests[1].request.metrics, false);
-  assert.equal(new Set(f.requests.flatMap(({ request }) => request.pairs.map(pair => pair.base))).size, 30);
+  assert.equal(f.requests.length, 4); assert.equal(f.requests[2].request.pairs.length, 1); assert.equal(f.requests[2].request.metrics, false);
+  assert.deepEqual(f.requests[2].request.historyHours, [720]);
+  assert.equal(new Set(f.requests.flatMap(({ request }) => request.pairs.map(pair => pair.base))).size, 31);
   ready = true; await f.time.advance(3000);
   assert.equal(f.reports.at(-1).progress.completed, 31); assert.equal(f.requests.length, 5);
+  f.feed.stop();
+});
+
+test('one slow 30-day history cannot hide a later candidate matching at least 0.5 percent', async () => {
+  let active = 0, maxActive = 0;
+  const pairs = Array.from({ length: 91 }, (_, index) => pair(index));
+  const f = fixture(async request => {
+    maxActive = Math.max(maxActive, ++active); await Promise.resolve();
+    const report = response(request);
+    for (const candidate of request.pairs) report.history[scannerDataPairKey(candidate)][720] = candidate.base === 'C0'
+      ? total(720, 'pending', 20) : { ...total(720), netPercent: candidate.base === 'C90' ? 0.75 : 0.1 };
+    active--; return report;
+  });
+  f.feed.setSelection(pairs, { metrics: false, historyHours: [720] }); f.feed.setActive(true); await settle();
+  const report = f.reports.at(-1);
+  assert.deepEqual(pairs.filter(candidate => {
+    const value = scannerDataHistoryForPair(report, candidate, 720);
+    return value?.status === 'ready' && value.netPercent >= 0.5;
+  }), [pair(90)]);
+  assert.equal(report.progress.completed, 90); assert.equal(report.progress.pending, 1);
+  assert.equal(maxActive, 1); assert.ok(f.requests.every(({ request }) => request.pairs.length <= 30));
+  assert.ok(f.requests.every(({ request }) => request.pairs.some(candidate => candidate.base === 'C0')));
+  f.feed.stop();
+});
+
+test('membership changes and refilled metrics do not restart an existing history no-progress deadline', async () => {
+  const f = fixture(async request => {
+    const report = response(request);
+    if (request.pairs.some(candidate => candidate.base === 'C0')) report.history[scannerDataPairKey(pair(0))][720] = total(720, 'pending', 20);
+    return report;
+  }, { noProgressMs: 90_000 });
+  const requirements = { metrics: true, historyHours: [720] };
+  f.feed.setSelection([pair(0), pair(1)], requirements); f.feed.setActive(true); await settle();
+  for (let index = 2; index <= 3; index++) {
+    await f.time.advance(30_000);
+    f.feed.setSelection([pair(index), pair(0)], requirements); await settle();
+    assert.equal(f.requests.at(-1).request.metrics, true);
+    assert.equal(f.reports.at(-1).progress.deferred, 0);
+  }
+  await f.time.advance(30_000);
+  assert.equal(f.reports.at(-1).progress.deferred, 1);
+  assert.equal(f.reports.at(-1).history[scannerDataPairKey(pair(0))][720].status, 'pending');
   f.feed.stop();
 });
 
@@ -119,6 +165,27 @@ test('steady backfill progress has no arbitrary total deadline', async () => {
   await time.advance(31 * 60_000);
   assert.equal(new Set(f.requests.flatMap(({ request }) => request.pairs.map(pair => pair.base))).size, 30);
   assert.equal(f.reports.at(-1).progress.deferred, 0); f.feed.stop();
+});
+
+test('a newer tail cutoff without additional history cannot indefinitely block the remaining candidates', async () => {
+  const time = runtime();
+  const f = fixture(async request => {
+    const report = response(request);
+    for (const candidate of request.pairs) if (candidate.base !== 'C9') report.history[scannerDataPairKey(candidate)][720] = {
+      ...total(720, 'pending', 96), asOf: NOW + Math.floor((time.now() - NOW) / 300_000) * 300_000,
+    };
+    return report;
+  }, { time });
+  // Canonical ordering puts C9 after the first thirty candidates.
+  f.feed.setSelection(Array.from({ length: 31 }, (_, index) => pair(index)), { metrics: false, historyHours: [720] });
+  f.feed.setActive(true); await settle();
+  await time.advance(19 * 60_000);
+  assert.equal(new Set(f.requests.flatMap(({ request }) => request.pairs.map(candidate => candidate.base))).size, 30);
+  await time.advance(46 * 60_000);
+  assert.equal(new Set(f.requests.flatMap(({ request }) => request.pairs.map(candidate => candidate.base))).size, 31);
+  assert.equal(f.reports.at(-1).progress.completed, 1);
+  assert.equal(f.reports.at(-1).history[scannerDataPairKey(pair(0))][720].status, 'pending');
+  assert.ok(f.reports.some(report => report.progress.deferred > 0)); f.feed.stop();
 });
 
 test('sorting, reversing direction and fresh hide/show or remount do not restart completed work', async () => {
@@ -185,7 +252,7 @@ test('failed refresh keeps numeric evidence and original timestamps but marks it
   assert.equal(window.netPercent, 1); assert.equal(window.asOf, NOW); assert.equal(window.status, 'error'); f.feed.stop();
 });
 
-test('real bounded collectors finish and persist the active batch before later contracts can evict it', async t => {
+test('refilling with real bounded collectors preserves unfinished legs and persists completed contracts', async t => {
   const time = runtime(), pairs = Array.from({ length: 61 }, (_, index) => pair(index));
   const markets = pairs.flatMap(pair => [pair.longKey, pair.shortKey].map(key => {
     const [exchange, symbol] = key.split(':'); return { exchange, symbol, base: pair.base, quoteCurrency: 'USDT', comparable: true };
@@ -209,9 +276,12 @@ test('real bounded collectors finish and persist the active batch before later c
   const f = fixture(async request => {
     const newlySeen = request.pairs.filter(pair => !visited.has(scannerDataPairKey(pair)));
     if (newlySeen.length && visited.size) {
-      const previous = f.reports.at(-1);
-      for (const key of visited) assert.notEqual(previous.history[key]?.[720]?.status, 'pending', 'new registration would evict unfinished backfill');
+      const previous = f.reports.at(-1), protectedPairs = new Set(request.pairs.map(scannerDataPairKey));
+      for (const key of visited) if (previous.history[key]?.[720]?.status === 'pending') {
+        assert.ok(protectedPairs.has(key), 'new registration must retain unfinished backfill in the protected request');
+      }
     }
+    assert.ok(request.pairs.length <= 30);
     for (const pair of request.pairs) visited.add(scannerDataPairKey(pair));
     return service.read(request);
   }, { time });

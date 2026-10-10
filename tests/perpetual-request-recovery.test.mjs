@@ -123,6 +123,27 @@ test('manual refresh can recover immediately after timeout and remains single-fl
   assert.equal(f.data[0].generatedAt, 4000); assert.equal(f.states.at(-1), 'polling');
 });
 
+test('manual refresh waits for an existing snapshot request so its result can display immediately', async t => {
+  const f = fixture(); t.after(() => f.feed.stop());
+  const completion = f.feed.refresh();
+  assert.equal(f.feed.refresh(), completion); assert.equal(f.requests.length, 1);
+  let flushed = false;
+  void completion.then(() => { flushed = true; });
+  await tick(); assert.equal(flushed, false);
+  f.requests[0].resolve(snapshot(4500)); await completion;
+  assert.equal(flushed, true); assert.equal(f.data.at(-1).generatedAt, 4500);
+});
+
+test('the twenty-second display interval also controls fallback polling and its retry message', async t => {
+  const f = fixture({ pollIntervalMs: () => 20_000 }); t.after(() => f.feed.stop());
+  f.requests[0].reject(Error('offline')); await tick();
+  assert.match(f.errors.at(-1), /20 秒后/);
+  assert.equal([...f.timers].some(timer => timer.delay === 5000), false);
+  f.run(20_000); assert.equal(f.requests.length, 2);
+  f.requests[1].resolve(snapshot(4000)); await tick();
+  assert.equal(f.data.at(-1).generatedAt, 4000);
+});
+
 test('stopping an uncooperative request releases all timers without an error or late update', async () => {
   const f = fixture(); f.feed.stop(); await tick();
   assert.equal(f.requests[0].signal.aborted, true); assert.equal(f.timers.size, 0);

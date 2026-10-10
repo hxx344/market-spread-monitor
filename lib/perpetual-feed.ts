@@ -145,6 +145,7 @@ export function startPerpetualFeed(options: FeedOptions) {
   let stream: SnapshotStream | null = null;
   let pollingTimer: unknown, reconnectTimer: unknown, watchdogTimer: unknown;
   let request: AbortController | null = null;
+  let requestCompletion: Promise<void> | null = null;
   let requestTimer: unknown;
   let requestStartedAt = 0, streamActivityAt = 0, resumedAt = -Infinity;
   const accumulate = createPerpetualSnapshotAccumulator();
@@ -169,7 +170,14 @@ export function startPerpetualFeed(options: FeedOptions) {
   };
   const clear = (timer: unknown) => { if (timer !== undefined) cancel(timer); };
 
-  async function loadSnapshot() {
+  function loadSnapshot(): Promise<void> {
+    if (stopped) return Promise.resolve();
+    if (request && requestCompletion) return requestCompletion;
+    requestCompletion = readSnapshot();
+    return requestCompletion;
+  }
+
+  async function readSnapshot() {
     if (stopped || request) return;
     const controller = new AbortController();
     const requestVersion = acceptedVersion;
@@ -194,7 +202,7 @@ export function startPerpetualFeed(options: FeedOptions) {
       if (!stopped && request === controller && !streaming) {
         fallback = true;
         options.onConnection("error");
-        options.onError((error instanceof PerpetualRequestError ? error.message : "无法更新行情，请检查价差服务与连接。") + " 5 秒后自动重试，过期报价不参与排名。");
+        options.onError((error instanceof PerpetualRequestError ? error.message : "无法更新行情，请检查价差服务与连接。") + ` ${(options.pollIntervalMs?.() ?? 5_000) / 1000} 秒后自动重试，过期报价不参与排名。`);
       }
     } finally {
       clear(timeout);
@@ -262,7 +270,7 @@ export function startPerpetualFeed(options: FeedOptions) {
   // A buffered SSE connection must not delay the first visible snapshot.
   void loadSnapshot();
   return {
-    refresh: () => { clear(pollingTimer); void loadSnapshot(); },
+    refresh: () => { clear(pollingTimer); return loadSnapshot(); },
     resume() {
       if (stopped) return;
       const now = monotonic();

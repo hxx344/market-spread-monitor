@@ -96,8 +96,8 @@ function failedWindow(hours: FundingWindowHours, reason: string, previous?: Fund
   return { hours, asOf: null, longPercent: null, shortPercent: null, netPercent: null, longCount: 0, shortCount: 0, ...previous, status: 'error', reason };
 }
 
-/** One queue per browser cache. Subscriber count, candidate count and durable
- * server capacity are separate: only completed batches release the next batch. */
+/** One queue per browser cache. Keep unfinished registrations in the bounded
+ * batch while completed positions immediately admit the next candidates. */
 export class PerpetualScannerDataCache {
   private entries = new Map<string, Entry>();
   private subscribers = new Set<Subscriber>();
@@ -192,18 +192,23 @@ export class PerpetualScannerDataCache {
       }
       if (!this.batch.items.size) this.batch = null;
     }
-    if (!this.batch) {
-      const candidates = [...demands].map(([key, demand]) => ({ key, ...demand, needed: this.needs(demand.entry, demand.requirements) })).filter(item => enabled(item.needed));
+    if (!this.batch || this.batch.items.size < 30) {
+      const candidates = [...demands].filter(([key]) => !this.batch?.items.has(key))
+        .map(([key, demand]) => ({ key, ...demand, needed: this.needs(demand.entry, demand.requirements) })).filter(item => enabled(item.needed));
       candidates.sort((a, b) => {
         const slotsA = this.slots(a.entry, a.needed), slotsB = this.slots(b.entry, b.needed);
         return Number(slotsB.some(slot => !slot)) - Number(slotsA.some(slot => !slot))
           || Math.min(...slotsA.map(slot => slot?.nextReadAt ?? 0)) - Math.min(...slotsB.map(slot => slot?.nextReadAt ?? 0)) || a.entry.lastUsed - b.entry.lastUsed;
       });
       if (candidates.length) {
-        const requirements = candidates[0].needed, signature = scannerDataRequirementsKey(requirements);
-        const selected = candidates.filter(item => scannerDataRequirementsKey(item.needed) === signature).slice(0, 30);
-        this.batch = { requirements, nextReadAt: now, items: new Map(selected.map(item => [item.key, { identity: item.entry.identity, progressAt: now, fingerprint: '' }])) };
-      } else {
+        const batch = this.batch ?? { requirements: emptyRequirements(), nextReadAt: now, items: new Map<string, BatchItem>() };
+        for (const item of candidates.slice(0, 30 - batch.items.size)) {
+          batch.items.set(item.key, { identity: item.entry.identity, progressAt: now, fingerprint: '' });
+          batch.requirements = union(batch.requirements, item.needed);
+        }
+        batch.nextReadAt = now;
+        this.batch = batch;
+      } else if (!this.batch) {
         const times = [...demands.values()].flatMap(({ entry, requirements }) => this.slots(entry, requirements).map(slot => slot?.nextReadAt ?? 0));
         if (times.length) this.timer = this.schedule(this.pump, Math.max(1, times.reduce((earliest, time) => Math.min(earliest, time), Infinity) - now));
         this.publish(); return;
@@ -237,7 +242,6 @@ export class PerpetualScannerDataCache {
       for (const [key, item] of batch.items) {
         const entry = this.entries.get(key);
         if (!entry || entry.identity !== item.identity) { batch.items.delete(key); continue; }
-        const fingerprint: unknown[] = [];
         if (requirements.metrics) {
           const legs = [entry.pair.longKey, entry.pair.shortKey].map(legKey => {
             if (report.metrics[legKey]) return report.metrics[legKey];
@@ -246,16 +250,27 @@ export class PerpetualScannerDataCache {
           const terminal = legs.every(leg => leg.status !== 'pending' || Boolean(leg.error));
           const value = Object.fromEntries(legs.map(leg => [leg.key, mergeLeg(entry.metrics?.value?.[leg.key], leg)]));
           entry.metrics = { value, terminal, nextReadAt: now + (terminal ? REFRESH_MS : POLL_MS), receivedAt: now };
-          fingerprint.push(legs.map(leg => leg ? [leg.status, leg.error, leg.volume24h.observedAt, leg.openInterest.observedAt] : null));
         }
         for (const hours of requirements.historyHours) {
           const incoming = report.history[key]?.[hours] ?? failedWindow(hours, '接口未返回该组合窗口', entry.history.get(hours)?.value);
           const terminal = incoming.status !== 'pending';
           entry.history.set(hours, { value: mergeWindow(entry.history.get(hours)?.value, incoming), terminal, nextReadAt: now + (terminal ? REFRESH_MS : POLL_MS), receivedAt: now });
-          fingerprint.push([hours, incoming.status, incoming.asOf, incoming.longCount, incoming.shortCount, incoming.reason]);
         }
         const effective = intersect(batch.requirements, currentDemands.get(key)?.requirements ?? emptyRequirements());
         if (this.slots(entry, effective).every(slot => slot?.terminal)) { entry.deferred = false; batch.items.delete(key); continue; }
+        // Refilling another position can reintroduce already completed metrics
+        // or windows. Only this item's unfinished work measures its progress.
+        const fingerprint: unknown[] = [];
+        if (effective.metrics && !entry.metrics?.terminal) fingerprint.push(['metrics',
+          [entry.pair.longKey, entry.pair.shortKey].map(legKey => {
+            const leg = entry.metrics?.value?.[legKey];
+            return leg ? [leg.status, leg.error, leg.volume24h.observedAt, leg.openInterest.observedAt] : null;
+          })]);
+        for (const hours of effective.historyHours) {
+          const slot = entry.history.get(hours), value = slot?.value;
+          // A newer tail cutoff alone does not fill an older history gap.
+          if (!slot?.terminal) fingerprint.push([hours, value?.status, value?.longCount, value?.shortCount, value?.reason]);
+        }
         const serialized = JSON.stringify(fingerprint);
         if (serialized !== item.fingerprint) { item.fingerprint = serialized; item.progressAt = now; }
         else if (now - item.progressAt >= (this.environment?.noProgressMs ?? NO_PROGRESS_MS)) {
