@@ -1,4 +1,7 @@
-export const PERPETUAL_MARKET_METRICS_REFRESH_MS = 300_000;
+import { MARKET_METRICS_POLL_MS } from '../modules/perpetual/collection-policy.mjs';
+
+export const PERPETUAL_MARKET_METRICS_REFRESH_MS = MARKET_METRICS_POLL_MS;
+// Observation cadence does not change five-minute source publications.
 export const PERPETUAL_MARKET_METRICS_STALE_MS = 615_000;
 
 /** Amounts retain the source denomination; stablecoins are not silently USD. */

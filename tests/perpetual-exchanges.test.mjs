@@ -524,7 +524,7 @@ test('Hyperliquid WS info snapshots confirm exact BBO and expose post or partial
   const [book] = parseMessage('hyperliquid', payload, markets, NOW);
   assert.equal(book.bid, 100.01); assert.equal(book.ask, null); assert.equal(book.sourceTime, NOW);
   const spec = createSubscriptions('hyperliquid', markets)[0];
-  assert.equal(spec.poll.intervalMs, 20000);
+  assert.equal(spec.poll.intervalMs, 30000);
   assert.deepEqual(spec.poll.messages[0].request.payload, { type: 'l2Book', coin: 'BTC' });
   assert.ok(spec.subscribe.some(message => message.subscription.type === 'bbo'));
   assert.throws(() => parseMessage('hyperliquid', { channel: 'post', data: { response: { type: 'error', payload: '429 Too Many Requests' } } }, markets), /429/);

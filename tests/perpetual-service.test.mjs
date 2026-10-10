@@ -194,12 +194,109 @@ function setup(overrides = {}) {
     exchanges: [{ id: 'test', name: 'Test', kind: 'cex' }],
     discover: async () => [update()], subscriptions: (_id, markets) => [{ url: 'wss://example.invalid', subscribe: [{ subscribe: true }], markets }],
     parse: (_id, payload) => Array.isArray(payload) ? payload : [], control: () => null,
-    WebSocketImpl: Socket, saveIntervalMs: 5, broadcastIntervalMs: 10, retryMs: 5,
+    WebSocketImpl: Socket, saveIntervalMs: 5, broadcastIntervalMs: 10, observationIntervalMs: 0, retryMs: 5,
     store: { load: () => [], save: values => saved.push(...values), prune() {}, close() {} }, ...overrides,
   });
   return { service, sockets, saved };
 }
 async function until(check) { for (let i = 0; i < 100; i++) { if (check()) return; await delay(5); } assert.fail('Condition did not become true'); }
+
+async function sampledSetup(t, overrides = {}) {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  let now = 1_789_820_000_000;
+  const startedAt = now;
+  const fixture = setup({ clock: () => now, observationIntervalMs: undefined, saveIntervalMs: 60_000, broadcastIntervalMs: 500, ...overrides });
+  t.after(() => fixture.service.stop()); fixture.service.start();
+  await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(0);
+  for (const socket of fixture.sockets) socket.open();
+  return { ...fixture, startedAt, now: () => now, async advance(ms) { now += ms; t.mock.timers.tick(ms); await new Promise(resolve => setImmediate(resolve)); t.mock.timers.tick(0); } };
+}
+
+test('one-second observations merge sparse updates once per contract without clients or renewed timestamps', async t => {
+  const f = await sampledSetup(t);
+  const socket = f.sockets[0], firstAt = f.now();
+  socket.message([update({ sourceTime: firstAt }), update({ symbol: 'ETHUSDT', base: 'ETH', sourceTime: firstAt })]);
+  await f.advance(200);
+  socket.message([update({ bid: 100.5, ask: undefined, sourceTime: f.now() })]);
+  await f.advance(200);
+  socket.message([update({ bid: undefined, ask: undefined, fundingRate: 0, sourceTime: f.now() })]);
+  assert.equal(f.service.snapshot().quotes.length, 0);
+  assert.equal(f.service.metrics().pendingObservations, 2);
+  assert.equal(f.service.metrics().updates, 4);
+  assert.equal(f.service.metrics().venues[0].lastMessageAt, f.now(), 'Watchdog health is recorded before sampling');
+  await f.advance(599); assert.equal(f.service.metrics().observations, 0);
+  await f.advance(1);
+  const quote = f.service.snapshot().quotes.find(row => row.symbol === 'BTCUSDT');
+  assert.equal(quote.bid, 100.5); assert.equal(quote.ask, 101); assert.equal(quote.fundingRate, 0);
+  assert.equal(quote.bidAt, firstAt + 200); assert.equal(quote.askAt, firstAt);
+  assert.equal(quote.bidAskAt, firstAt); assert.equal(quote.fundingAt, firstAt + 400);
+  assert.equal(quote.receivedAt, firstAt + 400); assert.equal(quote.sourceTime, firstAt + 400);
+  assert.equal(f.service.metrics().observations, 2); assert.equal(f.service.metrics().clients, 0);
+  await f.advance(31_000);
+  assert.deepEqual(f.service.snapshot().quotes.find(row => row.symbol === 'BTCUSDT'), quote);
+  assert.equal(f.service.snapshot().exchanges[0].quoteCount, 0, 'Sampling never renews an old source');
+  assert.equal(f.service.metrics().observations, 2);
+});
+
+test('pending observations use current catalog metadata and cannot resurrect removed or reidentified contracts', async t => {
+  let catalog = [update({ takerFeeRate: 0.001, takerFeeAt: 1000 })];
+  const f = await sampledSetup(t, { discoveryIntervalMs: 500, discover: async () => catalog });
+  const oldSocket = f.sockets[0];
+  oldSocket.message([update({ sourceTime: f.now() })]);
+  catalog = [update({ takerFeeRate: 0.002, takerFeeAt: f.now() })];
+  await f.advance(500); await f.advance(500);
+  assert.equal(f.service.snapshot().quotes[0].takerFeeRate, 0.002);
+  assert.equal(f.service.snapshot().quotes[0].receivedAt, f.startedAt);
+  oldSocket.message([update({ bid: 102, ask: 103, sourceTime: f.now() })]);
+  catalog = [update({ symbol: 'ETHUSDT', base: 'ETH' })];
+  await f.advance(500);
+  oldSocket.message([update({ bid: 104, ask: 105, sourceTime: f.now() })]);
+  await f.advance(500);
+  assert.equal(f.service.snapshot().quotes.length, 0); assert.equal(f.service.metrics().pendingObservations, 0);
+  const nextSocket = f.sockets.at(-1); nextSocket.open();
+  nextSocket.message([update({ symbol: 'ETHUSDT', base: 'ETH', sourceTime: f.now() })]);
+  catalog = [update({ symbol: 'ETHUSDT', base: 'DIFFERENT', multiplier: 1000 })];
+  await f.advance(500); await f.advance(500);
+  assert.equal(f.service.snapshot().quotes.length, 0, 'Buffered data from an old contract identity is discarded');
+});
+
+test('shutdown persists the last accepted observation and late socket messages cannot revive it', async t => {
+  const f = await sampledSetup(t);
+  f.sockets[0].message([update({ sourceTime: f.now() })]);
+  assert.equal(f.saved.length, 0); assert.equal(f.service.snapshot().quotes.length, 0);
+  await f.service.stop();
+  assert.equal(f.saved.length, 1); assert.equal(f.saved[0].receivedAt, f.startedAt);
+  f.sockets[0].message([update({ bid: 104, ask: 105, sourceTime: f.now() })]);
+  await f.advance(2000);
+  assert.equal(f.saved.length, 1); assert.equal(f.service.snapshot().quotes[0].bid, 100);
+  assert.equal(f.service.metrics().pendingObservations, 0);
+});
+
+test('SSE joins and backpressure retain their baseline across independent observation intervals', async t => {
+  const f = await sampledSetup(t);
+  const reader = () => Object.assign(new EventEmitter(), {
+    packets: [], writableLength: 0, writableNeedDrain: false, destroyed: false, writableEnded: false,
+    writeHead() {}, write(message) { this.packets.push(JSON.parse(message.split('data: ')[1].trim())); },
+    end() { this.writableEnded = true; this.emit('close'); }, destroy() { this.destroyed = true; this.emit('close'); },
+  });
+  const existing = reader(); f.service.stream({ headers: {} }, existing);
+  f.sockets[0].message([update({ sourceTime: f.now() })]);
+  await f.advance(500); assert.equal(existing.packets.at(-1).patches.length, 0);
+  await f.advance(500); assert.equal(existing.packets.at(-1).patches[0][1].bid, 100);
+  f.sockets[0].message([update({ bid: 100.5, sourceTime: f.now() })]);
+  const joining = reader(); f.service.stream({ headers: {} }, joining);
+  assert.equal(joining.packets[0].quotes[0].bid, 100);
+  f.sockets[0].message([update({ sourceTime: f.now() })]);
+  await f.advance(1000);
+  assert.ok(joining.packets.slice(1).every(packet => !packet.patches.some(([, row]) => row.bid === 100.5)));
+  existing.writableNeedDrain = true;
+  f.sockets[0].message([update({ bid: 100.25, sourceTime: f.now() })]);
+  await f.advance(1000); existing.writableNeedDrain = false;
+  await f.advance(500);
+  assert.equal(existing.packets.at(-1).type, undefined);
+  assert.equal(existing.packets.at(-1).quotes[0].bid, 100.25);
+  for (let index = 1; index < joining.packets.length; index++) assert.equal(joining.packets[index].baseSequence, joining.packets[index - 1].sequence);
+});
 
 test('cached metric action is wired to current catalogs, persists once and does not renew quote times', async t => {
   const now = Date.UTC(2026, 9, 8), savedMetrics = [], savedHistory = [];

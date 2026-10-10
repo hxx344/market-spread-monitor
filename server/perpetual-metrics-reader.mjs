@@ -2,6 +2,7 @@ import { PERPETUAL_MARKET_METRICS_REFRESH_MS } from '../lib/perpetual-market-met
 
 const STEP = 300_000, DAY = 86_400_000;
 const LIGHTER_HOSTS = { lighter: 'https://mainnet.zklighter.elliot.ai', 'rh-lighter': 'https://api.rh.lighter.xyz' };
+const API_HOSTS = { binance: 'fapi.binance.com', bybit: 'api.bybit.com', okx: 'www.okx.com', bitget: 'api.bitget.com', gate: 'api.gateio.ws', kraken: 'futures.kraken.com', hyperliquid: 'api.hyperliquid.xyz', entropy: 'api.hyperliquid.xyz', aster: 'fapi.asterdex.com', lighter: 'mainnet.zklighter.elliot.ai', 'rh-lighter': 'api.rh.lighter.xyz' };
 const SUPPORTED = new Set(['binance', 'bybit', 'okx', 'bitget', 'gate', 'kraken', 'hyperliquid', 'entropy', 'aster', ...Object.keys(LIGHTER_HOSTS)]);
 const amount = value => (typeof value === 'number' || (typeof value === 'string' && value.trim() !== '')) && Number.isFinite(Number(value)) && Number(value) >= 0 ? Number(value) : null;
 const positive = value => { const n = amount(value); return n > 0 ? n : null; };
@@ -72,7 +73,7 @@ export function sanitizePerpetualMetricsReaderState(state, market, now) {
  * Aster: https://asterdex.github.io/aster-api-website/futures/market-data/
  */
 export function createPerpetualMetricsReader({ fetchImpl = fetch, clock = Date.now, cacheMs = PERPETUAL_MARKET_METRICS_REFRESH_MS, cacheLimit = 800, maxConcurrent = 3, hostSpacingMs = 150 } = {}) {
-  const cache = new Map(), queue = [], activeHosts = new Set(), hostUntil = new Map(), candleCache = new Map();
+  const cache = new Map(), queue = [], activeHosts = new Set(), hostUntil = new Map(), rateLimitUntil = new Map(), candleCache = new Map();
   let active = 0, timer;
   const observed = (value, fallback) => {
     if (value === undefined || value === null) return fallback;
@@ -85,6 +86,12 @@ export function createPerpetualMetricsReader({ fetchImpl = fetch, clock = Date.n
     for (let index = 0; index < queue.length && active < maxConcurrent;) {
       const job = queue[index], now = clock();
       if (job.signal.aborted) { queue.splice(index, 1); job.reject(aborted()); continue; }
+      const blockedUntil = rateLimitUntil.get(job.host) ?? 0;
+      if (blockedUntil > now) {
+        queue.splice(index, 1);
+        job.reject(Object.assign(Error('指标主机仍在限流退避期'), { status: 429, retryAfterMs: blockedUntil - now }));
+        continue;
+      }
       if (activeHosts.has(job.host)) { index++; continue; }
       const delay = (hostUntil.get(job.host) ?? 0) - now;
       if (delay > 0) { wait = Math.min(wait, delay); index++; continue; }
@@ -109,14 +116,17 @@ export function createPerpetualMetricsReader({ fetchImpl = fetch, clock = Date.n
         const error = Object.assign(Error(`合约指标请求失败（HTTP ${response.status}）`), { status: response.status });
         const retry = response.headers?.get?.('retry-after');
         if (retry) { const value = /^\d+(?:\.\d+)?$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - clock(); if (Number.isFinite(value) && value >= 0) error.retryAfterMs = value; }
-        if ([418, 429].includes(response.status)) hostUntil.set(new URL(url).host, clock() + Math.max(60_000, Math.min(900_000, error.retryAfterMs ?? 60_000)));
+        if ([418, 429].includes(response.status)) {
+          const host = new URL(url).host, until = clock() + Math.max(60_000, Math.min(900_000, error.retryAfterMs ?? 60_000));
+          hostUntil.set(host, until); rateLimitUntil.set(host, until);
+        }
         throw error;
       }
       const data = await response.json(); requestSignal.throwIfAborted();
       return { data, fetchedAt: clock() };
     });
   }
-  function cached(key, url, init, signal) {
+  function cached(key, url, init, signal, ttl = cacheMs) {
     signal?.throwIfAborted();
     let entry = cache.get(key);
     if (entry && !entry.promise && clock() >= entry.expires) { cache.delete(key); entry = null; }
@@ -127,7 +137,7 @@ export function createPerpetualMetricsReader({ fetchImpl = fetch, clock = Date.n
       entry = { controller: new AbortController(), users: 0, expires: Infinity, promise: null };
       cache.set(key, entry);
       entry.promise = request(url, init, entry.controller.signal).then(value => {
-        entry.value = value; entry.expires = clock() + cacheMs; return value;
+        entry.value = value; entry.expires = clock() + ttl; return value;
       }, error => {
         entry.error = error; entry.expires = clock() + Math.max(60_000, Math.min(900_000, error.retryAfterMs ?? 60_000)); throw error;
       }).finally(() => { entry.promise = null; if (entry.controller.signal.aborted && cache.get(key) === entry) cache.delete(key); });
@@ -144,7 +154,21 @@ export function createPerpetualMetricsReader({ fetchImpl = fetch, clock = Date.n
       if (signal?.aborted) cancel();
     });
   }
-  const get = (key, url, signal) => cached(key, url, {}, signal);
+  const get = (key, url, signal, ttl) => cached(key, url, {}, signal, ttl);
+  const sourceBucket = () => Math.floor(clock() / STEP) * STEP;
+  const keysFor = market => {
+    const ex = market.exchange;
+    if (ex === 'binance') return ['binance:tickers', `binance:oi:${market.symbol}:${sourceBucket()}`];
+    if (ex === 'okx') return ['okx:oi', `okx:candles:${market.symbol}:${sourceBucket()}`];
+    if (ex === 'bybit') return ['bybit:linear'];
+    if (ex === 'bitget') return [`bitget:${market.productType}`];
+    if (ex === 'gate') return ['gate:usdt'];
+    if (ex === 'kraken') return ['kraken:tickers'];
+    if (ex === 'hyperliquid' || ex === 'entropy') return [`hyperliquid:${ex === 'entropy' ? 'io' : ''}`];
+    if (Object.hasOwn(LIGHTER_HOSTS, ex)) return [`${ex}:details`];
+    if (ex === 'aster') return ['aster:tickers'];
+    return [];
+  };
   async function okxVolume(market, signal, state) {
     const key = `${market.symbol}:${market.quoteCurrency}`, end = Math.floor(clock() / STEP) * STEP;
     let saved = candleCache.get(key) ?? sanitizePerpetualMetricsReaderState(state, market, clock());
@@ -157,7 +181,7 @@ export function createPerpetualMetricsReader({ fetchImpl = fetch, clock = Date.n
     const contiguous = candles.size && newest - oldest === (candles.size - 1) * STEP;
     const limit = newest && contiguous && oldest <= end - DAY ? Math.min(300, Math.ceil((end - newest) / STEP) + 2) : 300;
     const source = 'OKX 288 根已完成 5 分钟 K 线 volCcyQuote 合计；截至上一完整 5 分钟';
-    const fetched = await get(`okx:candles:${market.symbol}:${end}`, `https://www.okx.com/api/v5/market/candles?${new URLSearchParams({ instId: market.symbol, bar: '5m', limit: String(limit) })}`, signal);
+    const fetched = await get(`okx:candles:${market.symbol}:${end}`, `https://www.okx.com/api/v5/market/candles?${new URLSearchParams({ instId: market.symbol, bar: '5m', limit: String(limit) })}`, signal, STEP);
     const rows = list(success(fetched.data, 'okx').data), seen = new Map();
     for (const row of rows) {
       if (!Array.isArray(row) || row.length < 9) throw Error('OKX 成交额 K 线格式异常');
@@ -185,7 +209,7 @@ export function createPerpetualMetricsReader({ fetchImpl = fetch, clock = Date.n
     if (ex === 'binance') {
       const results = await Promise.allSettled([
         get('binance:tickers', 'https://fapi.binance.com/fapi/v1/ticker/24hr', signal),
-        get(`binance:oi:${symbol}`, `https://fapi.binance.com/futures/data/openInterestHist?${new URLSearchParams({ symbol, period: '5m', limit: '1' })}`, signal),
+        get(`binance:oi:${symbol}:${sourceBucket()}`, `https://fapi.binance.com/futures/data/openInterestHist?${new URLSearchParams({ symbol, period: '5m', limit: '1' })}`, signal, STEP),
       ]);
       signal?.throwIfAborted();
       if (results.every(row => row.status === 'rejected')) throw results[0].reason;
@@ -263,6 +287,13 @@ export function createPerpetualMetricsReader({ fetchImpl = fetch, clock = Date.n
     row = indexRows(fetched.data, 'symbol').get(symbol); if (!row) throw Error('Aster 批量接口未返回该合约');
     return { volume24h: metric(row.quoteVolume, currency, observed(row.closeTime, fetched.fetchedAt), 'Aster 24h ticker quoteVolume'), openInterest: missing('Aster 官方市场接口文档尚无可核实的持仓金额字段', 'Aster 官方市场数据接口') };
   };
+  // Only already settled responses qualify for the collector's bounded fast
+  // path. A cold per-contract request still uses the ordinary host queue.
+  read.isCached = market => {
+    const keys = keysFor(market), now = clock();
+    return keys.length > 0 && keys.every(key => { const entry = cache.get(key); return entry && !entry.promise && !entry.error && !entry.controller.signal.aborted && now < entry.expires; });
+  };
+  read.retryAt = market => rateLimitUntil.get(API_HOSTS[market.exchange]) ?? 0;
   read.stop = () => { clearTimeout(timer); for (const entry of cache.values()) if (entry.promise) entry.controller.abort(); for (const job of queue.splice(0)) job.reject(aborted()); };
   read.metrics = () => ({ cacheEntries: cache.size, queued: queue.length, inFlight: active, candleEntries: candleCache.size });
   return read;

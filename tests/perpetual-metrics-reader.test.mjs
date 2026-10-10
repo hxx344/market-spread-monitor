@@ -21,7 +21,9 @@ test('Bybit shares one bulk request across contracts and preserves zero, currenc
   assert.equal(f.calls.length, 1); assert.equal(btc.volume24h.value, 0); assert.equal(btc.openInterest.value, 125);
   assert.equal(eth.volume24h.currency, 'USDC'); assert.equal(eth.openInterest.value, 400); assert.match(eth.openInterest.source, /双边值 ÷ 2/);
   await f.reader(market('bybit')); assert.equal(f.calls.length, 1);
-  f.advance(STEP + 1); await f.reader(market('bybit')); assert.equal(f.calls.length, 2);
+  f.advance(29_999); await f.reader(market('bybit')); assert.equal(f.calls.length, 1);
+  f.advance(1); const repeated = await f.reader(market('bybit')); assert.equal(f.calls.length, 2);
+  assert.equal(repeated.openInterest.observedAt, NOW, 'A successful recheck cannot replace the unchanged source timestamp');
 });
 
 test('Binance volume is bulk, OI requests are deduplicated by symbol, and source time is retained', async () => {
@@ -37,6 +39,20 @@ test('Binance partial OI failure leaves valid turnover available without repeate
   const result = await f.reader(market('binance'));
   assert.equal(result.volume24h.value, 50); assert.equal(result.openInterest.value, null); assert.match(result.openInterest.error, /失败/);
   await f.reader(market('binance')); assert.equal(f.calls.length, 2);
+});
+
+test('thirty-second Binance observation refreshes bulk volume while five-minute OI keeps its own publication time and cache', async () => {
+  const f = fixture((url, _init, now) => url.includes('ticker/24hr')
+    ? reply([{ symbol: 'BTCUSDT', quoteVolume: '500', closeTime: now }])
+    : reply([{ symbol: 'BTCUSDT', sumOpenInterestValue: '70', timestamp: Math.floor(now / STEP) * STEP - STEP }]));
+  await f.reader(market('binance')); assert.equal(f.calls.length, 2); assert.equal(f.reader.isCached(market('binance')), true);
+  f.advance(30_000); assert.equal(f.reader.isCached(market('binance')), false);
+  const next = await f.reader(market('binance'));
+  assert.equal(next.volume24h.observedAt, NOW + 30_000); assert.equal(next.openInterest.observedAt, NOW - STEP);
+  assert.equal(f.calls.filter(call => call.url.includes('openInterestHist')).length, 1);
+  f.advance(STEP - 30_000); const later = await f.reader(market('binance'));
+  assert.equal(f.calls.filter(call => call.url.includes('openInterestHist')).length, 2);
+  assert.equal(later.openInterest.observedAt, NOW);
 });
 
 test('Bitget requests one snapshot per product and never reapplies token normalization to money', async () => {
@@ -108,6 +124,16 @@ test('OKX adds 288 complete quote-volume candles and incrementally fetches only 
   assert.ok(Number(new URL(f.calls.at(-1).url).searchParams.get('limit')) <= 4);
 });
 
+test('OKX thirty-second OI observations reuse complete five-minute volume candles without changing their cutoff', async () => {
+  const f = okxFixture(); await f.reader(okx());
+  f.advance(30_000); const next = await f.reader(okx());
+  assert.equal(next.volume24h.observedAt, NOW); assert.equal(next.openInterest.observedAt, NOW + 30_000);
+  assert.equal(f.calls.filter(call => call.url.includes('candles')).length, 1);
+  assert.equal(f.calls.filter(call => call.url.includes('open-interest')).length, 2);
+  f.advance(STEP - 30_000); const later = await f.reader(okx());
+  assert.equal(later.volume24h.observedAt, NOW + STEP); assert.equal(f.calls.filter(call => call.url.includes('candles')).length, 2);
+});
+
 test('OKX incomplete or unconfirmed history is missing, not zero or base volume times last price', async () => {
   const f = okxFixture({ hole: NOW - 140 * STEP }), result = await f.reader(okx());
   assert.equal(result.volume24h.value, null); assert.match(result.volume24h.error, /完整/); assert.equal(result.openInterest.value, 300);
@@ -146,5 +172,14 @@ test('failed bulk requests are cached, honor retry-after, and malformed market i
   for (let n = 0; n < 2; n++) await assert.rejects(f.reader(market('bybit')), error => error.status === 429 && error.retryAfterMs === 120000);
   assert.equal(f.calls.length, 1);
   await assert.rejects(f.reader(market('bybit', 'BTC?host=evil')), /元数据/); assert.equal(f.calls.length, 1);
+  f.reader.stop();
+});
+
+test('a rate-limited first Binance request promptly rejects queued sibling work without waiting out the host ban', async () => {
+  const f = fixture(() => ({ ok: false, status: 429, headers: { get: () => '120' } }));
+  const result = f.reader(market('binance'));
+  const bounded = await Promise.race([result.then(() => 'resolved', error => error), turn().then(() => 'still pending')]);
+  assert.equal(bounded.status, 429); assert.equal(bounded.retryAfterMs, 120_000);
+  assert.equal(f.calls.length, 1); assert.equal(f.reader.metrics().queued, 0); assert.equal(f.reader.retryAt(market('binance')), NOW + 120_000);
   f.reader.stop();
 });

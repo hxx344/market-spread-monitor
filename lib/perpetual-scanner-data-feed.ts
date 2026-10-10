@@ -1,11 +1,11 @@
 import type { FundingWindowHours, FundingWindowTotal } from './perpetual-funding-history.ts';
 import { backgroundReadDelay } from './read-activity.ts';
 import { isPerpetualMarketMetricsReport } from './perpetual-market-metrics-feed.ts';
-import type { PerpetualMarketMetricsLeg } from './perpetual-market-metrics.ts';
+import { PERPETUAL_MARKET_METRICS_REFRESH_MS, type PerpetualMarketMetricsLeg } from './perpetual-market-metrics.ts';
 import { canonicalScannerDataPair, scannerDataPairKey, scannerDataRequirementsKey, scannerDataSelectionKey,
   type PerpetualScannerDataReport, type ScannerDataPair, type ScannerDataRequest, type ScannerDataRequirements } from './perpetual-scanner-data.ts';
 
-const REFRESH_MS = 300_000, POLL_MS = 3_000, FAILURE_MS = 60_000, NO_PROGRESS_MS = 20 * 60_000;
+const HISTORY_REFRESH_MS = 300_000, POLL_MS = 3_000, FAILURE_MS = 60_000, NO_PROGRESS_MS = 20 * 60_000;
 const HOURS: FundingWindowHours[] = [24, 72, 168, 720];
 const emptyRequirements = (): ScannerDataRequirements => ({ metrics: false, historyHours: [] });
 const enabled = (requirements: ScannerDataRequirements) => requirements.metrics || requirements.historyHours.length > 0;
@@ -189,6 +189,7 @@ export class PerpetualScannerDataCache {
       for (const [key, item] of this.batch.items) {
         const demand = demands.get(key);
         if (!demand || demand.entry.identity !== item.identity || !enabled(intersect(demand.requirements, this.batch.requirements))) this.batch.items.delete(key);
+        else this.batch.requirements = union(this.batch.requirements, this.needs(demand.entry, demand.requirements));
       }
       if (!this.batch.items.size) this.batch = null;
     }
@@ -222,10 +223,15 @@ export class PerpetualScannerDataCache {
     if (!owner) return;
     this.lastReadAt = this.now();
     let requirements = emptyRequirements();
+    const requested = new Map<string, ScannerDataRequirements>();
     const pairs = [...batch.items.keys()].flatMap(key => {
       const demand = demands.get(key);
       if (!demand) return [];
-      requirements = union(requirements, intersect(demand.requirements, batch.requirements));
+      const needed = this.needs(demand.entry, intersect(demand.requirements, batch.requirements));
+      if (enabled(needed)) requested.set(key, needed);
+      requirements = union(requirements, needed);
+      // Retain unfinished pairs in the registration batch even when another
+      // pair supplies this read's due fields, so server LRU cannot evict them.
       return [demand.entry.pair];
     });
     const controller = new AbortController();
@@ -242,22 +248,27 @@ export class PerpetualScannerDataCache {
       for (const [key, item] of batch.items) {
         const entry = this.entries.get(key);
         if (!entry || entry.identity !== item.identity) { batch.items.delete(key); continue; }
-        if (requirements.metrics) {
+        const needed = requested.get(key);
+        if (!needed) continue;
+        if (needed.metrics) {
           const legs = [entry.pair.longKey, entry.pair.shortKey].map(legKey => {
             if (report.metrics[legKey]) return report.metrics[legKey];
             return failedLeg(legKey, '接口未返回该合约指标', entry.metrics?.value?.[legKey]);
           });
           const terminal = legs.every(leg => leg.status !== 'pending' || Boolean(leg.error));
           const value = Object.fromEntries(legs.map(leg => [leg.key, mergeLeg(entry.metrics?.value?.[leg.key], leg)]));
-          entry.metrics = { value, terminal, nextReadAt: now + (terminal ? REFRESH_MS : POLL_MS), receivedAt: now };
+          entry.metrics = { value, terminal, nextReadAt: now + (terminal ? PERPETUAL_MARKET_METRICS_REFRESH_MS : POLL_MS), receivedAt: now };
         }
-        for (const hours of requirements.historyHours) {
+        for (const hours of needed.historyHours) {
           const incoming = report.history[key]?.[hours] ?? failedWindow(hours, '接口未返回该组合窗口', entry.history.get(hours)?.value);
           const terminal = incoming.status !== 'pending';
-          entry.history.set(hours, { value: mergeWindow(entry.history.get(hours)?.value, incoming), terminal, nextReadAt: now + (terminal ? REFRESH_MS : POLL_MS), receivedAt: now });
+          entry.history.set(hours, { value: mergeWindow(entry.history.get(hours)?.value, incoming), terminal, nextReadAt: now + (terminal ? HISTORY_REFRESH_MS : POLL_MS), receivedAt: now });
         }
         const effective = intersect(batch.requirements, currentDemands.get(key)?.requirements ?? emptyRequirements());
-        if (this.slots(entry, effective).every(slot => slot?.terminal)) { entry.deferred = false; batch.items.delete(key); continue; }
+        if (this.slots(entry, effective).every(slot => slot?.terminal)) {
+          if (this.slots(entry, currentDemands.get(key)?.requirements ?? emptyRequirements()).every(slot => slot?.terminal)) entry.deferred = false;
+          batch.items.delete(key); continue;
+        }
         // Refilling another position can reintroduce already completed metrics
         // or windows. Only this item's unfinished work measures its progress.
         const fingerprint: unknown[] = [];
@@ -274,7 +285,9 @@ export class PerpetualScannerDataCache {
         const serialized = JSON.stringify(fingerprint);
         if (serialized !== item.fingerprint) { item.fingerprint = serialized; item.progressAt = now; }
         else if (now - item.progressAt >= (this.environment?.noProgressMs ?? NO_PROGRESS_MS)) {
-          this.postpone(entry, effective, REFRESH_MS, false); entry.deferred = true; batch.items.delete(key);
+          const unfinished = { metrics: effective.metrics && !entry.metrics?.terminal,
+            historyHours: effective.historyHours.filter(hours => !entry.history.get(hours)?.terminal) };
+          this.postpone(entry, unfinished, HISTORY_REFRESH_MS, false); entry.deferred = true; batch.items.delete(key);
         }
       }
       if ([...this.demands(false).values()].some(({ entry }) => entry.deferred)) this.failure = '部分组合长时间未取得完整数据，已继续检查其余组合；缺失数据稍后重试。';
@@ -291,12 +304,14 @@ export class PerpetualScannerDataCache {
       for (const [key, item] of batch.items) {
         const entry = this.entries.get(key);
         if (!entry || entry.identity !== item.identity) continue;
+        const needed = requested.get(key);
+        if (!needed) continue;
         const reason = '筛选数据读取失败，保留上次数据并稍后重试';
-        if (requirements.metrics) entry.metrics = { ...entry.metrics, nextReadAt: 0, terminal: true, receivedAt: this.now(),
+        if (needed.metrics) entry.metrics = { ...entry.metrics, nextReadAt: 0, terminal: true, receivedAt: this.now(),
           value: Object.fromEntries([entry.pair.longKey, entry.pair.shortKey].map(legKey => [legKey, failedLeg(legKey, reason, entry.metrics?.value?.[legKey])])) };
-        for (const hours of requirements.historyHours) entry.history.set(hours, { ...entry.history.get(hours), nextReadAt: 0, terminal: true, receivedAt: this.now(),
+        for (const hours of needed.historyHours) entry.history.set(hours, { ...entry.history.get(hours), nextReadAt: 0, terminal: true, receivedAt: this.now(),
           value: failedWindow(hours, reason, entry.history.get(hours)?.value) });
-        this.postpone(entry, requirements, FAILURE_MS, true);
+        this.postpone(entry, needed, FAILURE_MS, true);
       }
       this.failure = '筛选数据暂时无法更新，已继续检查其余组合，稍后重试。'; this.batch = null; this.rebuild();
     } finally {

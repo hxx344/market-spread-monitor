@@ -5,6 +5,7 @@
  */
 import { ADDITIONAL_EXCHANGES, discoverAdditionalMarkets, createAdditionalSubscriptions, parseAdditionalMessage, getAdditionalControlResponse } from './additional-exchanges.mjs';
 import { KRAKEN_EXCHANGE, discoverKrakenMarkets, createKrakenSubscriptions, parseKrakenMessage } from './kraken.mjs';
+import { AUXILIARY_BOOK_POLL_MS, BULK_BOOK_CONFIRM_MS, LIGHTER_BOOK_CONFIRM_MS } from './collection-policy.mjs';
 
 export const EXCHANGES = Object.freeze([
   { id: 'binance', name: 'Binance', type: 'cex', website: 'https://www.binance.com', docsUrl: 'https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/ws-streams/public' },
@@ -294,14 +295,14 @@ export function createSubscriptions(exchangeId, inputMarkets) {
     // book is the resource-bounded fallback; funding remains a 3s WS stream.
     return [connection('wss://fstream.asterdex.com/ws', markets,
       [{ method: 'SUBSCRIBE', params: ['!markPrice@arr'], id: 1 }],
-      { snapshot: options => fetchBookSnapshots(exchangeId, markets, options), snapshotIntervalMs: 5_000 })];
+      { snapshot: options => fetchBookSnapshots(exchangeId, markets, options), snapshotIntervalMs: BULK_BOOK_CONFIRM_MS })];
   }
   if (exchangeId === 'bybit') {
     return chunks(markets, 150).map((group, index) => connection('wss://stream.bybit.com/v5/public/linear', group,
       chunks(group, 30).map(batch => ({ op: 'subscribe', args: batch.map(row => `tickers.${row.symbol}`) })), { heartbeat: { op: 'ping' }, heartbeatMs: 20_000, startDelayMs: index * 350,
         // One snapshot for the entire venue confirms unchanged ticker fields,
         // avoiding the duplicate 10ms level-1 subscription for every symbol.
-        ...(index === 0 ? { snapshot: options => fetchBookSnapshots(exchangeId, markets, options), snapshotIntervalMs: 5_000 } : {}) }));
+        ...(index === 0 ? { snapshot: options => fetchBookSnapshots(exchangeId, markets, options), snapshotIntervalMs: BULK_BOOK_CONFIRM_MS } : {}) }));
   }
   if (exchangeId === 'okx') {
     return chunks(markets, 60).map((group, index) => connection('wss://ws.okx.com:8443/ws/v5/public', group,
@@ -316,7 +317,7 @@ export function createSubscriptions(exchangeId, inputMarkets) {
     if (!streaming.length) streaming.push(markets[0]);
     return [connection('wss://ws.bitget.com/v2/ws/public', markets,
       [{ op: 'subscribe', args: streaming.map(row => ({ instType: row.productType || `${row.quoteCurrency}-FUTURES`, channel: 'ticker', instId: row.symbol })) }],
-      { heartbeat: 'ping', heartbeatMs: 25_000, snapshot: options => fetchBookSnapshots(exchangeId, markets, options), snapshotIntervalMs: 5_000 })];
+      { heartbeat: 'ping', heartbeatMs: 25_000, snapshot: options => fetchBookSnapshots(exchangeId, markets, options), snapshotIntervalMs: BULK_BOOK_CONFIRM_MS })];
   }
   if (exchangeId === 'gate') {
     return chunks(markets, 150).map((group, index) => connection('wss://fx-ws.gateio.ws/v4/ws/usdt', group,
@@ -332,7 +333,7 @@ export function createSubscriptions(exchangeId, inputMarkets) {
         // polling produced real 429s. The service shares this 60/min budget
         // with Entropy by host and backs off polling without dropping BBO.
         // Preserve exact ticks by omitting nSigFigs/mantissa aggregation.
-        poll: { messages: group.map((row, id) => ({ method: 'post', id, request: { type: 'info', payload: { type: 'l2Book', coin: row.symbol } } })), intervalMs: 20_000, sendIntervalMs: 100, staleBookAfterMs: 15_000, maxPerMinute: 60 } }));
+        poll: { messages: group.map((row, id) => ({ method: 'post', id, request: { type: 'info', payload: { type: 'l2Book', coin: row.symbol } } })), intervalMs: AUXILIARY_BOOK_POLL_MS, sendIntervalMs: 100, staleBookAfterMs: 15_000, maxPerMinute: 60 } }));
   }
   if (exchangeId === 'lighter') {
     // Request unchanged real BBOs with room for CrossEx's 5s pair-time gap.
@@ -340,7 +341,7 @@ export function createSubscriptions(exchangeId, inputMarkets) {
     return [connection('wss://mainnet.zklighter.elliot.ai/stream', markets,
       [{ type: 'subscribe', channel: 'market_stats/all' }],
       { heartbeat: { type: 'ping' }, heartbeatMs: 30_000, sendIntervalMs: 400,
-        poll: { messages: [{ type: 'unsubscribe', channel: 'market_stats/all' }, { type: 'subscribe', channel: 'market_stats/all' }], intervalMs: 3_000, sendIntervalMs: 400 } })];
+        poll: { messages: [{ type: 'unsubscribe', channel: 'market_stats/all' }, { type: 'subscribe', channel: 'market_stats/all' }], intervalMs: LIGHTER_BOOK_CONFIRM_MS, sendIntervalMs: 400 } })];
   }
   throw new Error(`Unsupported exchange: ${exchangeId}`);
 }

@@ -1,5 +1,6 @@
 // Public feeds only. Robinhood Lighter is a separate deployment and order book;
 // Entropy is the `io` HIP-3 namespace, not Hyperliquid's native perpetual venue.
+import { AUXILIARY_BOOK_POLL_MS, RH_LIGHTER_BOOK_CONFIRM_MS } from './collection-policy.mjs';
 export const ADDITIONAL_EXCHANGES = [
   { id: 'rh-lighter', name: 'rh-Lighter', type: 'dex', website: 'https://robinhoodchain.lighter.xyz', docsUrl: 'https://apidocs.rh.lighter.xyz/docs/websocket', description: 'Robinhood Chain 独立盘口 · USDG · WS 买卖一档' },
   { id: 'entropy', name: 'Entropy', type: 'dex', website: 'https://entropy.io', docsUrl: 'https://docs.entropy.io', description: 'Hyperliquid HIP-3 io · USDC · WS 买卖一档；非标准合约独立展示' },
@@ -73,7 +74,7 @@ export function createAdditionalSubscriptions(exchangeId, markets) {
     // The official market_stats stream carries current best_bid/ask_price.
     // Refresh its snapshot for unchanged markets without per-market tickers.
     return [{ url: `${RH_API.replace('https:', 'wss:')}/stream?readonly=true`, markets: selected, context: {}, subscribe: [{ type: 'subscribe', channel: 'market_stats/all' }], sendIntervalMs: 400, heartbeat: { type: 'ping' }, heartbeatMs: 30000,
-      poll: { messages: [{ type: 'unsubscribe', channel: 'market_stats/all' }, { type: 'subscribe', channel: 'market_stats/all' }], intervalMs: 10000, sendIntervalMs: 400 } }];
+      poll: { messages: [{ type: 'unsubscribe', channel: 'market_stats/all' }, { type: 'subscribe', channel: 'market_stats/all' }], intervalMs: RH_LIGHTER_BOOK_CONFIRM_MS, sendIntervalMs: 400 } }];
   }
   if (exchangeId === 'entropy') {
     const chunks = [];
@@ -82,7 +83,7 @@ export function createAdditionalSubscriptions(exchangeId, markets) {
       chunks.push({ url: 'wss://api.hyperliquid.xyz/ws', markets: batch, context: {}, subscribe: batch.flatMap(market => ['bbo', 'activeAssetCtx'].map(type => ({ method: 'subscribe', subscription: { type, coin: market.symbol } }))), sendIntervalMs: 50, startDelayMs: chunks.length * 1500, heartbeat: { method: 'ping' }, heartbeatMs: 30000,
         // Share Hyperliquid's host-wide auxiliary budget; active BBO needs no
         // extra request. Rate-limit backoff must not drop its live subscription.
-        poll: { messages: batch.map((market, id) => ({ method: 'post', id, request: { type: 'info', payload: { type: 'l2Book', coin: market.symbol } } })), intervalMs: 20000, sendIntervalMs: 100, staleBookAfterMs: 15000, maxPerMinute: 60 } });
+        poll: { messages: batch.map((market, id) => ({ method: 'post', id, request: { type: 'info', payload: { type: 'l2Book', coin: market.symbol } } })), intervalMs: AUXILIARY_BOOK_POLL_MS, sendIntervalMs: 100, staleBookAfterMs: 15000, maxPerMinute: 60 } });
     }
     return chunks;
   }

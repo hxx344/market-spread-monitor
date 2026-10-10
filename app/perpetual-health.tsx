@@ -26,6 +26,7 @@ function PerpetualHealth({ active = true, defaultOpen = false }: { active?: bool
     <button type="button" className="perp-diagnostics-heading" onClick={() => setOpen(!open)} aria-expanded={open} aria-controls="perp-diagnostics-body"><span><Activity size={17}/><strong>报价健康</strong><small>{data ? `${data.venues.filter(venue => venue.status === 'live').length} / ${data.venues.length} 平台在线` : '按需诊断'}</small></span><ChevronDown size={16}/></button>
     {open ? <div id="perp-diagnostics-body" className="perp-diagnostics-body">
       <p className="perp-diagnostics-caption">{data ? `诊断时间 ${stamp(data.generatedAt)} 北京时间` : '正在读取后台指标'} · 每 5 秒更新，收起或隐藏页面即暂停。盘口有效率以已发现合约为分母。</p>
+      {data?.collection ? <p className="perp-diagnostics-caption">官方接口直连 · 行情观测 {data.collection.observationIntervalMs / 1000} 秒 · 成交额 / 持仓量目标 {data.collection.marketMetricsIntervalMs / 1000} 秒 · 合约目录 {data.collection.discoveryIntervalMs / 60000} 分钟 · 非活跃盘口补查 {data.collection.auxiliaryBookIntervalMs / 1000} 秒。必要的快速盘口确认保留，限流时排队；来源时间不会因采样而更新。</p> : null}
       {error ? <p role="status" className="perp-diagnostics-warning">{error}</p> : null}
       {data ? <><div className="perp-diagnostics-metrics">{[
         ['CPU', value(data.cpuPercent, '%')], ['进程内存', value(data.rssMb, ' MiB')], ['事件循环 P99', value(data.eventLoopP99Ms, ' ms')], ['行情消息', `${data.messagesPerSecond} / 秒`], ['广播耗时', value(data.lastPublishMs, ' ms')], ['最近写盘', value(data.lastWriteMs, ' ms')],

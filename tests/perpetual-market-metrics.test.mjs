@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setImmediate as turn } from 'node:timers/promises';
 import { createPerpetualMarketMetricsService, perpetualMetricsIdentity } from '../server/perpetual-market-metrics.mjs';
+import { createPerpetualMetricsReader } from '../server/perpetual-metrics-reader.mjs';
 
 const NOW = Date.UTC(2026, 9, 8, 12), STEP = 300000;
 const quote = (exchange, symbol = 'BTCUSDT', extra = {}) => ({ exchange, symbol, base: 'BTC', quoteCurrency: 'USDT', comparable: true, multiplier: 1, ...extra });
@@ -13,13 +14,15 @@ function memoryStore() {
   return { rows, loadContractMetrics: (key, limit = 500) => structuredClone([...rows.values()].filter(row => !key || row.key === key).slice(0, limit)), saveContractMetrics: entry => rows.set(entry.key, structuredClone(entry)) };
 }
 function fixture(t, options = {}) {
-  let now = NOW, calls = 0;
+  let now = options.now ?? NOW, calls = 0;
   const quotes = options.quotes ?? [quote('binance'), quote('bybit')], markets = new Map(quotes.map(row => [`${row.exchange}:${row.symbol}`, { ...row }]));
   const store = options.store ?? memoryStore();
+  const reader = Object.assign(async (...args) => { calls++; return options.reader ? options.reader(...args) : result(); },
+    { isCached: options.reader?.isCached, retryAt: options.reader?.retryAt, stop: options.reader?.stop });
   const service = createPerpetualMarketMetricsService({ getSnapshot: () => ({ quotes }), getMarket: (exchange, symbol) => markets.get(`${exchange}:${symbol}`), clock: () => now, store, hostSpacingMs: 0,
-    reader: async (...args) => { calls++; return options.reader ? options.reader(...args) : result(); }, ...options.service });
+    reader, ...options.service });
   if (options.start !== false) service.start(); t.after(() => service.stop());
-  return { service, quotes, markets, store, read: (pairs = [pair(quotes[0], quotes[1])]) => service.read({ pairs }), advance: ms => { now += ms; }, calls: () => calls };
+  return { service, quotes, markets, store, read: (pairs = [pair(quotes[0], quotes[1])]) => service.read({ pairs }), advance: ms => { now += ms; }, now: () => now, calls: () => calls };
 }
 
 test('reads return immediately, merge repeated legs across pairs, and perform no upstream work before background collection', async t => {
@@ -32,9 +35,10 @@ test('reads return immediately, merge repeated legs across pairs, and perform no
 
 test('registered contracts keep refreshing after the browser leaves and do not use the former 120-second watch timeout', async t => {
   const f = fixture(t); f.read(); await f.service.collect();
-  f.advance(120001); await f.service.collect(); assert.equal(f.calls(), 2);
-  f.advance(STEP); await f.service.collect(); assert.equal(f.calls(), 4);
-  f.advance(STEP); await f.service.collect(); assert.equal(f.calls(), 6);
+  f.advance(29_999); await f.service.collect(); assert.equal(f.calls(), 2);
+  f.advance(1); await f.service.collect(); assert.equal(f.calls(), 4);
+  f.advance(120001); await f.service.collect(); assert.equal(f.calls(), 6);
+  f.advance(30_000); await f.service.collect(); assert.equal(f.calls(), 8);
 });
 
 test('expired cache-hit HTTP reads only return old snapshots and never wake an upstream refresh', async t => {
@@ -49,7 +53,8 @@ test('persisted registrations and successful snapshot TTL survive restart before
   const first = fixture(t); first.read(); await first.service.collect(); await first.service.stop();
   const second = fixture(t, { store: first.store });
   await second.service.collect(); assert.equal(second.calls(), 0); assert.equal(second.read().legs['binance:BTCUSDT'].volume24h.value, 10);
-  second.advance(STEP + 1); await second.service.collect(); assert.equal(second.calls(), 2);
+  second.advance(29_999); await second.service.collect(); assert.equal(second.calls(), 0);
+  second.advance(1); await second.service.collect(); assert.equal(second.calls(), 2);
 });
 
 test('restored registrations on a saturated host all refresh before earlier entries repeat', async t => {
@@ -76,6 +81,28 @@ test('restored registrations on a saturated host all refresh before earlier entr
   assert.equal(Math.max(...calls.values()) - Math.min(...calls.values()), 1);
 });
 
+test('five hundred registered bulk metrics drain in at most thirty reads per turn using one shared upstream response', async t => {
+  const quotes = Array.from({ length: 500 }, (_, index) => quote('bybit', `BTC${index}USDT`)), store = memoryStore();
+  for (const market of quotes) {
+    const key = `${market.exchange}:${market.symbol}`, identity = perpetualMetricsIdentity(market);
+    store.saveContractMetrics({ key, identity, market, retryAt: NOW, failures: 0, lastAccessAt: NOW,
+      value: { key, exchange: market.exchange, symbol: market.symbol, identity, status: 'ready', fetchedAt: NOW - STEP,
+        volume24h: metric(10, { observedAt: NOW - STEP }), openInterest: metric(0, { observedAt: NOW - STEP }), error: '' } });
+  }
+  let requests = 0, f;
+  const reader = createPerpetualMetricsReader({ clock: () => f.now(), hostSpacingMs: 0, fetchImpl: async () => {
+    requests++;
+    return { ok: true, status: 200, json: async () => ({ retCode: 0, time: NOW, result: { list: quotes.map(row => ({ symbol: row.symbol, turnover24h: '100', singleOpenInterestValue: '200' })) } }) };
+  } });
+  f = fixture(t, { quotes, store, reader, service: { hostSpacingMs: 350, intervalMs: 60_000 } });
+  for (let tick = 0; tick < 17; tick++) {
+    const before = f.calls(); await Promise.all([f.service.collect(), f.service.collect()]);
+    assert.ok(f.calls() - before <= 30, 'Concurrent collection triggers share the same bounded turn'); f.advance(1000);
+  }
+  assert.equal(f.calls(), 500); assert.equal(requests, 1);
+  assert.ok([...store.rows.values()].every(entry => entry.value.volume24h.value === 100 && entry.value.volume24h.observedAt === NOW));
+});
+
 test('failed updates retain both source timestamps and successful fetchedAt with bounded retry', async t => {
   let fail = false;
   const f = fixture(t, { reader: async () => { if (fail) throw Error('transport'); return result(); } });
@@ -83,6 +110,25 @@ test('failed updates retain both source timestamps and successful fetchedAt with
   const cached = f.read().legs['binance:BTCUSDT'];
   assert.equal(cached.status, 'error'); assert.equal(cached.volume24h.value, 10); assert.equal(cached.volume24h.observedAt, NOW); assert.equal(cached.fetchedAt, NOW);
   await f.service.collect(); assert.equal(f.calls(), 4); f.advance(60001); await f.service.collect(); assert.equal(f.calls(), 6);
+});
+
+test('thirty-second successes do not shorten transport failures, restart retry deadlines or unsupported waits', async t => {
+  let fail = false;
+  const first = fixture(t, { reader: async () => { if (fail) throw Error('offline'); return result(); } });
+  first.read(); await first.service.collect(); fail = true; first.advance(30_000); await first.service.collect();
+  const cached = first.read().legs['binance:BTCUSDT'];
+  assert.equal(cached.volume24h.observedAt, NOW); assert.equal(cached.fetchedAt, NOW);
+  await first.service.stop();
+  const restarted = fixture(t, { store: first.store, now: NOW + 40_000, reader: async () => { throw Error('offline'); } });
+  restarted.advance(49_999); await restarted.service.collect(); assert.equal(restarted.calls(), 0);
+  restarted.advance(1); await restarted.service.collect(); assert.equal(restarted.calls(), 2);
+  assert.equal(restarted.store.rows.get('binance:BTCUSDT').retryAt, NOW + 90_000 + 120_000);
+
+  const unsupported = fixture(t, { reader: async () => { throw Object.assign(Error('unsupported'), { code: 'UNSUPPORTED' }); } });
+  unsupported.read(); await unsupported.service.collect(); await unsupported.service.stop();
+  const restored = fixture(t, { store: unsupported.store });
+  restored.advance(3_599_999); await restored.service.collect(); assert.equal(restored.calls(), 0);
+  restored.advance(1); await restored.service.collect(); assert.equal(restored.calls(), 2);
 });
 
 test('one failed metric retains its old amount and source while the successful metric advances', async t => {
@@ -157,11 +203,53 @@ test('host budgets share Hyperliquid/Entropy and stop is safe even for a reader 
   const count = f.calls(); await f.service.collect(); assert.equal(f.calls(), count);
 });
 
+test('one stalled host cannot occupy idle slots or block later observation ticks for healthy hosts', async t => {
+  const quotes = ['binance', 'bybit', 'gate', 'okx', 'bitget'].map(exchange => quote(exchange)), seen = [];
+  const f = fixture(t, { quotes, reader: async market => {
+    seen.push(market.exchange); return market.exchange === 'binance' ? new Promise(() => {}) : result();
+  } });
+  f.read(quotes.slice(1).map(other => pair(quotes[0], other))); await f.service.collect();
+  assert.deepEqual(seen, ['binance', 'bybit', 'gate', 'okx', 'bitget']); assert.equal(f.service.metrics().inFlight, 1);
+  f.advance(35_000); await f.service.collect();
+  assert.deepEqual(seen.slice(5), ['bybit', 'gate', 'okx', 'bitget']); assert.equal(f.service.metrics().inFlight, 1);
+});
+
 test('rate limits hold all registered contracts sharing the host', async t => {
   const quotes = ['hyperliquid', 'entropy', 'bybit'].map(exchange => quote(exchange));
-  const f = fixture(t, { quotes, reader: async market => { if (market.exchange === 'hyperliquid') throw Object.assign(Error('limit'), { status: 429, retryAfterMs: 180000 }); return result(); } });
+  const hosts = [];
+  const f = fixture(t, { quotes, reader: async market => { hosts.push(market.exchange); if (market.exchange === 'hyperliquid') throw Object.assign(Error('limit'), { status: 429, retryAfterMs: 180000 }); return result(); } });
   f.read([pair(quotes[0], quotes[2]), pair(quotes[1], quotes[2])]); await f.service.collect(); await f.service.collect(); assert.equal(f.calls(), 2);
-  f.advance(60000); await f.service.collect(); assert.equal(f.calls(), 2);
+  f.advance(60000); await f.service.collect(); assert.deepEqual(hosts, ['hyperliquid', 'bybit', 'bybit']);
+});
+
+test('a host rate-limit deadline survives restart for both the failing registration and its unqueried peers', async t => {
+  const quotes = ['hyperliquid', 'entropy', 'bybit'].map(exchange => quote(exchange));
+  const first = fixture(t, { quotes, reader: async market => {
+    if (market.exchange === 'hyperliquid') throw Object.assign(Error('limited'), { status: 429, retryAfterMs: 180_000 }); return result();
+  } });
+  first.read([pair(quotes[0], quotes[2]), pair(quotes[1], quotes[2])]); await first.service.collect(); await first.service.stop();
+  assert.equal(first.store.rows.get('entropy:BTCUSDT').hostRetryAt, NOW + 180_000);
+  const hosts = [], next = fixture(t, { quotes, store: first.store, now: NOW + 30_000, reader: async market => { hosts.push(market.exchange); return result(); } });
+  next.advance(149_999); await next.service.collect(); assert.deepEqual(hosts, ['bybit']);
+  next.advance(1); await next.service.collect(); await next.service.collect();
+  assert.ok(hosts.includes('hyperliquid')); assert.ok(hosts.includes('entropy'));
+});
+
+test('partial Binance success persists a reader rate limit without freshening retained source data', async t => {
+  let f;
+  const reader = createPerpetualMetricsReader({ clock: () => f.now(), hostSpacingMs: 0, fetchImpl: async url => {
+    if (url.includes('openInterestHist')) return { ok: false, status: 429, headers: { get: () => '120' } };
+    return { ok: true, status: 200, json: async () => url.includes('bybit')
+      ? { retCode: 0, time: NOW, result: { list: [{ symbol: 'BTCUSDT', turnover24h: '10', singleOpenInterestValue: '20' }] } }
+      : [{ symbol: 'BTCUSDT', quoteVolume: '10', closeTime: NOW - STEP }] };
+  } });
+  f = fixture(t, { reader }); f.read(); await f.service.collect();
+  const value = f.read().legs['binance:BTCUSDT'];
+  assert.equal(value.status, 'ready'); assert.equal(value.volume24h.observedAt, NOW - STEP); assert.equal(value.openInterest.value, null);
+  assert.equal(f.store.rows.get('binance:BTCUSDT').hostRetryAt, NOW + 120_000); await f.service.stop();
+  const hosts = [], next = fixture(t, { store: f.store, reader: async market => { hosts.push(market.exchange); return result(); } });
+  next.advance(119_999); await next.service.collect(); assert.deepEqual(hosts, ['bybit']);
+  next.advance(1); await next.service.collect(); assert.ok(hosts.includes('binance'));
 });
 
 test('bounded memory may restore evicted snapshots from disk without another upstream read', async t => {
@@ -177,7 +265,7 @@ test('storage failures remain visible without losing usable memory data', async 
   assert.match(report.storageError, /写入失败/); assert.equal(report.legs['binance:BTCUSDT'].volume24h.value, 10);
 });
 
-test('disk recovery retries dirty writes independently of the five-minute upstream refresh', async t => {
+test('disk recovery retries dirty writes independently of the thirty-second upstream refresh', async t => {
   const backing = memoryStore(); let failed = true, writes = 0;
   const store = { loadContractMetrics: backing.loadContractMetrics, saveContractMetrics(entry) { writes++; if (failed) throw Error('disk full'); backing.saveContractMetrics(entry); } };
   const f = fixture(t, { store }); f.read(); await f.service.collect();

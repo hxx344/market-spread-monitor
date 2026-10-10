@@ -9,6 +9,8 @@ export interface PerpetualDiagnostics {
   messagesPerSecond: number; lastWriteMs: number; lastPublishMs: number;
   pendingWrites: number; quotes: number; clients: number; connections: number;
   lastPatchVisitedQuotes: number; storageError: string | null;
+  observations?: number; pendingObservations?: number;
+  collection?: { observationIntervalMs: number; discoveryIntervalMs: number; marketMetricsIntervalMs: number; auxiliaryBookIntervalMs: number };
   venues: PerpetualVenueHealth[];
   events: { id: number; exchange: string; kind: string; reason: string; at: number }[];
 }

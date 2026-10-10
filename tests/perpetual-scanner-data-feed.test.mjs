@@ -133,6 +133,40 @@ test('membership changes and refilled metrics do not restart an existing history
   f.feed.stop();
 });
 
+test('pending history polls do not renew completed metrics and thirty-second observations survive a history no-progress delay', async () => {
+  const time = runtime(), seen = [];
+  const f = fixture(async request => {
+    seen.push({ at: time.now(), request });
+    const report = response(request);
+    for (const leg of Object.values(report.metrics)) { leg.fetchedAt = time.now(); leg.volume24h.observedAt = time.now(); leg.openInterest.observedAt = time.now(); }
+    if (request.historyHours.includes(720)) report.history[scannerDataPairKey(pair(0))][720] = total(720, 'pending', 20);
+    return report;
+  }, { time, noProgressMs: 90_000 });
+  f.feed.setSelection([pair(0)], { metrics: true, historyHours: [720] }); f.feed.setActive(true); await settle();
+  await time.advance(90_000);
+  assert.deepEqual(seen.filter(row => row.request.metrics).map(row => row.at - NOW), [0, 30_000, 60_000, 90_000]);
+  assert.equal(f.reports.at(-1).progress.deferred, 1);
+  await time.advance(30_000);
+  assert.equal(f.reports.at(-1).metrics[pair(0).longKey].volume24h.observedAt, NOW + 120_000);
+  assert.equal(seen.at(-1).request.metrics, true); assert.deepEqual(seen.at(-1).request.historyHours, []);
+  assert.equal(f.reports.at(-1).progress.deferred, 1); f.feed.stop();
+});
+
+test('completed funding windows retain a five-minute cadence while another window is backfilling and metrics refresh every thirty seconds', async () => {
+  const f = fixture(async request => {
+    const report = response(request);
+    if (request.historyHours.includes(720)) report.history[scannerDataPairKey(pair(0))][720] = total(720, 'pending', 20);
+    return report;
+  });
+  f.feed.setSelection([pair(0)], { metrics: true, historyHours: [24, 720] }); f.feed.setActive(true); await settle();
+  await f.time.advance(299_999);
+  assert.equal(f.requests.filter(({ request }) => request.historyHours.includes(24)).length, 1);
+  assert.equal(f.requests.filter(({ request }) => request.metrics).length, 10);
+  await f.time.advance(1);
+  assert.equal(f.requests.filter(({ request }) => request.historyHours.includes(24)).length, 2);
+  assert.equal(f.requests.filter(({ request }) => request.metrics).length, 11); f.feed.stop();
+});
+
 test('upstream error or busy pending entries yield to later batches instead of blocking the queue', async () => {
   const f = fixture(async request => {
     const report = response(request);
@@ -196,7 +230,11 @@ test('sorting, reversing direction and fresh hide/show or remount do not restart
   f.feed.stop();
   const next = fixture(undefined, { cache, time }); next.feed.setSelection(pairs, all); next.feed.setActive(true); await settle();
   assert.equal(next.requests.length, 0); assert.equal(next.reports.at(-1).progress.completed, 2);
-  await time.advance(290000); assert.equal(next.requests.length, 1); next.feed.stop();
+  await time.advance(19999); assert.equal(next.requests.length, 0);
+  await time.advance(1); assert.equal(next.requests.length, 1); assert.equal(next.requests[0].request.metrics, true); assert.deepEqual(next.requests[0].request.historyHours, []);
+  await time.advance(270000); assert.equal(next.requests.length, 10);
+  assert.ok(next.requests.slice(0, 9).every(({ request }) => request.historyHours.length === 0));
+  assert.deepEqual(next.requests.at(-1).request.historyHours, all.historyHours); next.feed.stop();
 });
 
 test('adding a window reads only the new requirement, removing a pending window releases the batch, and identity changes invalidate amounts', async () => {
@@ -221,7 +259,7 @@ test('multiple hooks share a single in-flight request and only the last subscrib
   await settle(); assert.equal(first.requests.length, 1); assert.equal(second.requests.length, 0);
   first.feed.stop(); assert.equal(first.requests[0].signal.aborted, false); release(); await settle();
   assert.equal(second.reports.at(-1).progress.completed, 1);
-  await time.advance(300000); assert.equal(second.requests.length, 1); second.feed.stop();
+  await time.advance(30000); assert.equal(second.requests.length, 1); second.feed.stop();
   const stalled = fixture(() => new Promise(() => {}), { cache: createPerpetualScannerDataCache() });
   stalled.feed.setSelection([pair(1)], all); stalled.feed.setActive(true); await settle(); stalled.feed.stop();
   assert.equal(stalled.requests[0].signal.aborted, true); assert.equal(stalled.time.timers.size, 0);
@@ -231,7 +269,8 @@ test('failed reads preserve prior values, let unvisited candidates proceed and r
   const f = fixture(async request => { if (request.pairs.some(pair => pair.base === 'C0')) throw Error('HTTP unavailable'); return response(request); });
   f.feed.setSelection(Array.from({ length: 31 }, (_, index) => pair(index)), all); f.feed.setActive(true); await settle();
   assert.equal(f.requests.length, 2); assert.equal(f.reports.at(-1).progress.completed, 31);
-  await f.time.advance(60000); assert.equal(f.requests.length, 3); f.feed.stop();
+  await f.time.advance(59999); assert.equal(f.requests.filter(({ request }) => request.pairs.some(pair => pair.base === 'C0')).length, 1);
+  await f.time.advance(1); assert.equal(f.requests.filter(({ request }) => request.pairs.some(pair => pair.base === 'C0')).length, 2); f.feed.stop();
 });
 
 test('missing response legs and windows become terminal errors with visible reasons', async () => {

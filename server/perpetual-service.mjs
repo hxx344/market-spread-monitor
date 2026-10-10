@@ -15,6 +15,7 @@ import { createPerpetualPriceHistoryService } from './perpetual-price-history.mj
 import { createPerpetualMarketMetricsService } from './perpetual-market-metrics.mjs';
 import { createPerpetualScannerDataService } from './perpetual-scanner-data.mjs';
 import { perpetualPriceIdentity } from '../lib/perpetual-price-history.ts';
+import { STREAM_OBSERVATION_MS, MARKET_CATALOG_MS, MARKET_METRICS_POLL_MS, AUXILIARY_BOOK_POLL_MS } from '../modules/perpetual/collection-policy.mjs';
 
 export const PERPETUAL_STALE_MS = 30_000;
 const MAX_FUTURE_MS = 5_000;
@@ -166,13 +167,13 @@ function withMarketMetadata(quote, market) {
     ? quote : { ...quote, delisting, delistingAt, takerFeeRate, takerFeeAt, takerFeeSource };
 }
 
-export function createPerpetualService({ store, exchanges = EXCHANGES, discover = discoverMarkets, subscriptions = createSubscriptions, parse = parseMessage, control = getControlResponse, WebSocketImpl = PerpetualWebSocket, clock = Date.now, staleAfterMs = PERPETUAL_STALE_MS, retryMs = 5_000, discoveryIntervalMs = 5 * 60_000, saveIntervalMs = 15_000, broadcastIntervalMs = 1_000, watchdogIntervalMs = 10_000, quoteTimeoutMs = 45_000, qualityOptions, fundingHistoryOptions, priceHistoryOptions, marketMetricsOptions, alertOptions, paperOptions, notifications, executionOptions, crossexOptions, fxIntervalMs = exchanges === EXCHANGES ? 60000 : 0 } = {}) {
+export function createPerpetualService({ store, exchanges = EXCHANGES, discover = discoverMarkets, subscriptions = createSubscriptions, parse = parseMessage, control = getControlResponse, WebSocketImpl = PerpetualWebSocket, clock = Date.now, staleAfterMs = PERPETUAL_STALE_MS, retryMs = 5_000, discoveryIntervalMs = MARKET_CATALOG_MS, saveIntervalMs = 15_000, observationIntervalMs = STREAM_OBSERVATION_MS, broadcastIntervalMs = STREAM_OBSERVATION_MS, watchdogIntervalMs = 10_000, quoteTimeoutMs = 45_000, qualityOptions, fundingHistoryOptions, priceHistoryOptions, marketMetricsOptions, alertOptions, paperOptions, notifications, executionOptions, crossexOptions, fxIntervalMs = exchanges === EXCHANGES ? 60000 : 0 } = {}) {
   let sourceRevision = 0;
   const readOpportunitiesV2 = createOpportunitiesV2Reader();
   const crossex = createCrossExFilterService({ clock, ...crossexOptions });
-  const quotes = new Map(), dirty = new Map(), pendingPrunes = new Map(), connections = new Set(), clients = new Map(), timers = new Set(), discoveries = new Map(), publishedQuotes = new Map(), publishDirty = new Set(), pollBudgets = new Map();
+  const quotes = new Map(), pendingQuotes = new Map(), dirty = new Map(), pendingPrunes = new Map(), connections = new Set(), clients = new Map(), timers = new Set(), discoveries = new Map(), publishedQuotes = new Map(), publishDirty = new Set(), pollBudgets = new Map();
   const states = new Map(exchanges.map(exchange => [exchange.id, { ...exchange, kind: exchange.kind ?? exchange.type, marketCount: 0, lastMessageAt: null, lastSourceLagMs: null, rejectedFuture: 0, error: null, discovering: false }]));
-  let running = false, storageError = null, broadcastTimer, saveTimer, refreshTimer, metricsTimer, fxTimer, sequence = 0;
+  let running = false, storageError = null, observationTimer, broadcastTimer, saveTimer, refreshTimer, metricsTimer, fxTimer, sequence = 0;
   const quality = store?.saveQualitySample ? createPerpetualQualityService({ getSnapshot: snapshot, store, clock, shouldDeferAuxiliary: () => metrics.eventLoopP99Ms > 80 || metrics.cpuPercent > 160, ...qualityOptions }) : null;
   const fundingHistory = createPerpetualFundingHistoryService({ getSnapshot: snapshot, getMarket: (exchange, symbol) => states.get(exchange)?.markets?.get(symbol), store, clock, ...fundingHistoryOptions });
   const priceHistory = createPerpetualPriceHistoryService({ getSnapshot: snapshot, getMarket: (exchange, symbol) => states.get(exchange)?.markets?.get(symbol), store, clock, ...priceHistoryOptions });
@@ -182,7 +183,7 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
   const execution = createPerpetualExecutionService({ getQuote: (exchange, symbol) => quotes.get(`${exchange}:${symbol}`), getMarket: (exchange, symbol) => states.get(exchange)?.markets?.get(symbol), clock, ...executionOptions });
   const paper = createPerpetualPaperService({ getQuote: key => quotes.get(key), isVenueLive: id => [...connections].some(connection => connection.exchange === id && connection.socket?.readyState === 1), clock, ...paperOptions });
   const streamId = randomUUID(), eventLoop = monitorEventLoopDelay({ resolution: 20 });
-  const metrics = { lastWriteMs: 0, lastPublishMs: 0, frames: 0, fullFrames: 0, frameBytes: 0, lastFrameUpdates: 0, lastPatchVisitedQuotes: 0, messages: 0, updates: 0, messagesPerSecond: 0, cpuPercent: 0, eventLoopP99Ms: 0, eventLoopMaxMs: 0 };
+  const metrics = { lastWriteMs: 0, lastPublishMs: 0, frames: 0, fullFrames: 0, frameBytes: 0, lastFrameUpdates: 0, lastPatchVisitedQuotes: 0, messages: 0, updates: 0, observations: 0, messagesPerSecond: 0, cpuPercent: 0, eventLoopP99Ms: 0, eventLoopMaxMs: 0 };
   const healthEvents = [];
   let healthEventId = 0;
   function recordHealth(exchange, kind, reason) {
@@ -192,6 +193,14 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
     healthEvents.length = Math.min(healthEvents.length, 60);
   }
   function changedQuote(key, quote) { sourceRevision++; quotes.set(key, quote); dirty.set(key, quote); if (clients.size) publishDirty.add(key); }
+  function observe() {
+    for (const [key, quote] of pendingQuotes) {
+      // Catalog metadata may change after receipt but before this observation.
+      changedQuote(key, withMarketMetadata(quote, states.get(quote.exchange)?.markets?.get(quote.symbol)));
+      metrics.observations++;
+    }
+    pendingQuotes.clear();
+  }
   let cpuBaseline = process.cpuUsage(), sampledAt = performance.now(), sampledMessages = 0;
   // A persisted fingerprint is not evidence of the current market directory.
   for (const quote of store?.load() ?? []) if (states.has(quote.exchange)) quotes.set(`${quote.exchange}:${quote.symbol}`, { ...quote, historyIdentity: null });
@@ -256,10 +265,11 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
           state.lastSourceLagMs = now - update.sourceTime; state.sourceLagObservedAt = now;
           if (state.lastSourceLagMs < -MAX_FUTURE_MS) { state.rejectedFuture++; state.error = '行情时间领先服务器，请检查服务器时钟。'; }
         }
-        const key = `${exchange}:${update.symbol}`, previous = quotes.get(key), next = mergePerpetualQuote(previous, transport === 'rest' ? { ...update, transport } : update, now);
+        const key = `${exchange}:${update.symbol}`, previous = pendingQuotes.get(key) ?? quotes.get(key), next = mergePerpetualQuote(previous, transport === 'rest' ? { ...update, transport } : update, now);
         if (next && next !== previous) {
           const current = withMarketMetadata(next, state.markets?.get(update.symbol));
-          metrics.updates++; changedQuote(key, current);
+          metrics.updates++; pendingQuotes.set(key, current);
+          if (observationIntervalMs <= 0) observe();
           if (transport === 'ws') connection.lastQuoteAt = now;
           state.lastMessageAt = now; state.error = null; attempt = 0;
         }
@@ -286,7 +296,7 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
         if (spec.poll.maxPerMinute && budget.sent >= spec.poll.maxPerMinute) { scheduleTask(poll, Math.max(100, budget.startedAt + 60_000 - now)); return; }
         while (remaining > 0) {
           const message = messages[pollCursor++ % messages.length]; remaining--;
-          const symbol = message.request?.payload?.coin, quote = quotes.get(`${exchange}:${symbol}`);
+          const symbol = message.request?.payload?.coin, quote = pendingQuotes.get(`${exchange}:${symbol}`) ?? quotes.get(`${exchange}:${symbol}`);
           if (spec.poll.staleBookAfterMs && quote?.bid > 0 && quote.ask >= quote.bid && Number.isFinite(quote.bidAskAt)
             && quote.bidAskAt >= now - spec.poll.staleBookAfterMs && quote.bidAskAt <= now + MAX_FUTURE_MS) continue;
           try {
@@ -375,6 +385,9 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
           if (current !== quote) changedQuote(key, current);
         }
         if (signature === state.signature) return;
+        // Retired subscription generations must not publish a buffered old
+        // contract after a directory identity or channel change.
+        for (const [key, quote] of pendingQuotes) if (quote.exchange === exchange) pendingQuotes.delete(key);
         const symbols = new Set(markets.map(market => market.symbol));
         const keepStored = new Set(symbols);
         for (const [key, quote] of quotes) {
@@ -405,6 +418,9 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
   return {
     start() {
       if (running) return; running = true;
+      // Independent of browser subscriptions and SSE cadence. Register first so
+      // equal-interval consumers see the newly committed observation.
+      if (observationIntervalMs > 0) { observationTimer = setInterval(observe, observationIntervalMs); observationTimer.unref?.(); }
       fundingHistory.start();
       priceHistory.start();
       marketMetrics.start();
@@ -452,12 +468,13 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
     },
     async stop() {
       running = false; closeStreams();
-      for (const timer of [refreshTimer, saveTimer, broadcastTimer, metricsTimer, fxTimer, ...timers]) clearTimeout(timer);
+      for (const timer of [observationTimer, refreshTimer, saveTimer, broadcastTimer, metricsTimer, fxTimer, ...timers]) clearTimeout(timer);
       eventLoop.disable();
       timers.clear();
       const pending = [...discoveries.values()];
       for (const item of pending) item.controller.abort();
       for (const connection of [...connections]) connection.dispose();
+      observe();
       await Promise.allSettled(pending.map(item => item.promise));
       await quality?.stop();
       await fundingHistory.stop();
@@ -496,7 +513,9 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
         message: [storageError, missing.length ? '行情待更新：' + missing.join('、') : '', fresh < quotes.size ? (quotes.size - fresh) + ' 条盘口过期或缺失' : ''].filter(Boolean).join('；') };
     },
     closeStreams, snapshot, healthy: () => !storageError && alerts.healthy(),
-    metrics: () => ({ ...metrics, generatedAt: clock(), quotes: quotes.size, pendingWrites: dirty.size, connections: connections.size, clients: clients.size, rssMb: Number((process.memoryUsage.rss() / 1048576).toFixed(1)), storageError, events: healthEvents.filter(item => clock() - item.at <= 3_600_000), auxiliary: [...pollBudgets].map(([host, budget]) => ({ host, sentInWindow: budget.sent, retryAt: budget.blockedUntil })), venues: snapshot().exchanges.map(exchange => ({ ...exchange, sourceLagMs: states.get(exchange.id).lastSourceLagMs, sourceLagObservedAt: states.get(exchange.id).sourceLagObservedAt ?? null, rejectedFuture: states.get(exchange.id).rejectedFuture, reconnects: states.get(exchange.id).reconnects ?? 0, lastConnectedAt: states.get(exchange.id).lastConnectedAt ?? null, lastProtocolError: states.get(exchange.id).lastProtocolError ?? null })) }),
+    metrics: () => ({ ...metrics, generatedAt: clock(), quotes: quotes.size, pendingWrites: dirty.size, pendingObservations: pendingQuotes.size,
+      collection: { observationIntervalMs, discoveryIntervalMs, marketMetricsIntervalMs: MARKET_METRICS_POLL_MS, auxiliaryBookIntervalMs: AUXILIARY_BOOK_POLL_MS },
+      connections: connections.size, clients: clients.size, rssMb: Number((process.memoryUsage.rss() / 1048576).toFixed(1)), storageError, events: healthEvents.filter(item => clock() - item.at <= 3_600_000), auxiliary: [...pollBudgets].map(([host, budget]) => ({ host, sentInWindow: budget.sent, retryAt: budget.blockedUntil })), venues: snapshot().exchanges.map(exchange => ({ ...exchange, sourceLagMs: states.get(exchange.id).lastSourceLagMs, sourceLagObservedAt: states.get(exchange.id).sourceLagObservedAt ?? null, rejectedFuture: states.get(exchange.id).rejectedFuture, reconnects: states.get(exchange.id).reconnects ?? 0, lastConnectedAt: states.get(exchange.id).lastConnectedAt ?? null, lastProtocolError: states.get(exchange.id).lastProtocolError ?? null })) }),
     actions: { 'crossex-settings': ['GET', 'PUT'], quote: ['GET'], summary: ['GET'], opportunities: ['GET'], 'opportunities-v2': ['GET'], stream: ['GET'], diagnostics: ['GET'], quality: ['POST'], 'funding-history': ['POST'], 'price-history': ['POST'], metrics: ['POST'], 'scanner-data': ['POST'], alerts: ['GET', 'PUT'], depth: ['POST'], exit: ['POST'], paper: ['GET', 'POST'], fx: ['GET'] },
     handle(action, method, input) { if (action === 'summary') return this.summary(); if (action === 'funding-history') return fundingHistory.read(input); if (action === 'price-history') return priceHistory.read(input); if (action === 'metrics') return marketMetrics.read(input); if (action === 'scanner-data') return scannerData.read(input); if (action === 'crossex-settings') return method === 'PUT' ? crossex.update(input) : crossex.view(); if (action === 'opportunities-v2') return readOpportunitiesV2(snapshot(), clock(), (exchange, symbol) => states.get(exchange)?.markets?.get(symbol), execution.peekFx(), `${streamId}:${sourceRevision}`, crossex.filter()); if (action === 'opportunities') return createPerpetualOpportunities(snapshot(), clock(), (exchange, symbol) => states.get(exchange)?.markets?.get(symbol), crossex.filter()); if (action === 'quote') return snapshot(); if (action === 'diagnostics') return { ...this.metrics(), quality: quality?.metrics() ?? null, fundingHistory: fundingHistory.metrics(), priceHistory: priceHistory.metrics(), marketMetrics: marketMetrics.metrics(), alerts: alerts.metrics(), execution: execution.metrics(), paper: paper.metrics() }; if (action === 'quality') { if (!quality) throw new Error('质量采集服务未就绪'); return quality.read(input); } if (action === 'alerts') return method === 'PUT' ? alerts.update(input) : alerts.view(); if (action === 'depth') return execution.depth(input); if (action === 'exit') return execution.exit(input); if (action === 'paper') return method === 'POST' ? paper.update(input) : paper.view(); if (action === 'fx') return execution.fx(); },
     stream(request, response) {

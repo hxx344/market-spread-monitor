@@ -45,7 +45,7 @@ test('metrics validate true zero, independent currencies and unavailable values'
   }
 });
 
-test('pending polls only local cache and completed metrics reuse contracts for five minutes', async () => {
+test('pending polls only local cache and completed metrics reuse contracts for thirty seconds', async () => {
   let pending = true;
   const f = fixture(async pairs => report(pairs, pending ? 'pending' : 'ready'));
   f.feed.setPairs([pair()]); await f.advance(1000); assert.equal(f.requests.length, 0);
@@ -53,7 +53,7 @@ test('pending polls only local cache and completed metrics reuse contracts for f
   pending = false; await f.advance(3000); assert.equal(f.requests.length, 2);
   f.feed.setPairs([pair('ETH')]); await f.advance(1200); assert.equal(f.requests.length, 3);
   f.feed.setPairs([{ ...pair(), longKey: 'b:BTC', shortKey: 'a:BTC', price: 200 }]);
-  await f.advance(298799); assert.equal(f.requests.length, 3);
+  await f.advance(28799); assert.equal(f.requests.length, 3);
   await f.advance(1); assert.equal(f.requests.length, 4);
   f.feed.stop(); assert.equal(f.timers.size, 0);
 });
