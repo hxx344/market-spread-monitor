@@ -17,12 +17,10 @@ export function usePerpetualFeed(active: boolean, paused = false) {
     let clock: ReturnType<typeof setInterval> | undefined;
     let background = readActivity.background(document.hidden);
     function synchronizeVisibility(event?: Event) {
-      if (event && ['focus', 'pageshow', 'online'].includes(event.type)) { controls.current?.stop(); controls.current = null; }
       clearInterval(clock);
       if (!active || !readActivity.allowed(document.hidden)) { controls.current?.stop(); controls.current = null; setConnection("paused"); return; }
       const previousBackground = background;
       background = readActivity.background(document.hidden);
-      if (previousBackground && !background) { controls.current?.stop(); controls.current = null; }
       const updateClock = () => {
         // Incoming frames advance time already. Run the clock only while the stream is quiet.
         if (sourceClock.quietFor() >= 1_500) setNow(sourceClock.read());
@@ -39,7 +37,7 @@ export function usePerpetualFeed(active: boolean, paused = false) {
         return;
       }
       if (controls.current) {
-        if (!background && (previousBackground || event?.type === 'focus' || event?.type === 'pageshow')) controls.current.refresh();
+        if (!background && (previousBackground || event?.type === 'focus' || event?.type === 'pageshow' || event?.type === 'online')) controls.current.resume();
         return;
       }
       controls.current = startPerpetualFeed({

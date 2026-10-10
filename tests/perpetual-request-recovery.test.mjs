@@ -6,7 +6,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 const snapshot = generatedAt => ({ schemaVersion: 1, monitorId: 'perpetual', generatedAt, staleAfterMs: 30000,
   status: 'live', exchanges: [{ id: 'binance', status: 'live' }], quotes: [] });
 
-function fixture() {
+function fixture(options = {}) {
   const timers = new Set(), requests = [], streams = [], data = [], states = [], errors = [];
   const feed = startPerpetualFeed({
     fetchSnapshot: signal => new Promise((resolve, reject) => requests.push({ signal, resolve, reject })),
@@ -14,6 +14,7 @@ function fixture() {
     onData: value => data.push(value), onConnection: value => states.push(value), onError: value => errors.push(value),
     schedule: (callback, delay) => { const timer = { callback, delay }; timers.add(timer); return timer; },
     cancel: timer => timers.delete(timer),
+    ...options,
   });
   function run(delay) {
     const pending = [...timers].filter(timer => timer.delay === delay);
@@ -22,6 +23,72 @@ function fixture() {
   }
   return { feed, timers, requests, streams, data, states, errors, run };
 }
+
+test('foreground recovery preserves a healthy stream and its incremental baseline', async t => {
+  let now = 0;
+  const f = fixture({ monotonic: () => now }); t.after(() => f.feed.stop());
+  f.requests[0].resolve({ ...snapshot(1000), streamId: 'live', sequence: 0 }); await tick();
+  f.streams[0].onmessage({ data: JSON.stringify({ ...snapshot(1000), streamId: 'live', sequence: 0 }) });
+  now = 1000;
+  f.feed.resume(); f.feed.resume(); f.feed.resume();
+  assert.equal(f.streams.length, 1); assert.equal(f.streams[0].closed, false);
+  assert.equal(f.requests.length, 1); assert.equal(f.states.at(-1), 'stream');
+  f.streams[0].onmessage({ data: JSON.stringify({ ...snapshot(2000), type: 'patch', streamId: 'live', sequence: 1, baseSequence: 0, patches: [], removed: [] }) });
+  assert.equal(f.data.at(-1).sequence, 1);
+});
+
+test('wake after a frozen timer replaces only the stalled request and ignores its late response', async t => {
+  let now = 0;
+  const f = fixture({ monotonic: () => now }); t.after(() => f.feed.stop());
+  const oldMessage = f.streams[0].onmessage;
+  now = 12_001;
+  f.feed.resume(); f.feed.resume();
+  assert.equal(f.streams.length, 2); assert.equal(f.streams[0].closed, true);
+  assert.equal(f.requests.length, 2); assert.equal(f.requests[0].signal.aborted, true);
+  await tick();
+  assert.equal(f.errors.length, 0, 'retired request must not report an error');
+  assert.equal([...f.timers].filter(timer => timer.delay === 12_000).length, 2, 'new stream and request deadlines survive old cleanup');
+  f.requests[1].resolve(snapshot(3000)); await tick();
+  f.requests[0].resolve(snapshot(9000)); oldMessage({ data: JSON.stringify(snapshot(10000)) }); await tick();
+  assert.equal(f.data.at(-1).generatedAt, 3000);
+});
+
+test('a stale stream resumes once without canceling a recent manual read', async t => {
+  let now = 0;
+  const f = fixture({ monotonic: () => now }); t.after(() => f.feed.stop());
+  f.requests[0].resolve(snapshot(1000)); await tick();
+  f.streams[0].onmessage({ data: JSON.stringify(snapshot(2000)) });
+  now = 11_000; f.feed.refresh();
+  now = 12_001; f.feed.resume(); f.feed.resume();
+  assert.equal(f.streams.length, 2); assert.equal(f.requests.length, 2);
+  assert.equal(f.requests[1].signal.aborted, false);
+  assert.equal(f.data.at(-1).generatedAt, 2000, 'existing quotes remain visible while recovering');
+  f.streams[1].onmessage({ data: JSON.stringify(snapshot(4000)) });
+  f.requests[1].resolve(snapshot(3000)); await tick();
+  assert.equal(f.data.at(-1).generatedAt, 4000); assert.equal(f.states.at(-1), 'stream');
+});
+
+test('foreground recovery immediately retries a failed stream but coalesces repeated events', async t => {
+  let now = 0;
+  const f = fixture({ monotonic: () => now }); t.after(() => f.feed.stop());
+  f.requests[0].resolve(snapshot(1000)); await tick();
+  f.streams[0].onerror();
+  f.feed.resume(); f.feed.resume();
+  assert.equal(f.streams.length, 2); assert.equal(f.requests.length, 2);
+  f.streams[1].onerror(); f.feed.resume();
+  assert.equal(f.streams.length, 2, 'rapid failed restores must not open unbounded connections');
+  now = 1000; f.feed.resume();
+  assert.equal(f.streams.length, 3);
+});
+
+test('resuming an initial connection or a stopped feed does not start extra work', async () => {
+  let now = 0;
+  const f = fixture({ monotonic: () => now });
+  f.feed.resume(); f.feed.resume();
+  assert.equal(f.streams.length, 1); assert.equal(f.requests.length, 1);
+  f.feed.stop(); now = 60_000; f.feed.resume(); await tick();
+  assert.equal(f.streams.length, 1); assert.equal(f.requests.length, 1); assert.equal(f.timers.size, 0);
+});
 
 test('a first snapshot starts alongside SSE and displays data even when the stream is silent', async t => {
   const f = fixture(); t.after(() => f.feed.stop());

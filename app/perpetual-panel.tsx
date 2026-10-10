@@ -196,7 +196,7 @@ function PerpetualPanel({ active = true, interactionActive = active, onSummary, 
   const blockedKey = crossex.data ? JSON.stringify([crossex.data.revision, crossex.data.config]) : "";
   const [inspection, setInspection] = useState<{ key: string; base: string; snapshot: PerpetualSnapshot; ranking: PerpetualSpread[]; page: number; blockedKey: string } | null>(null);
   // Release frozen rows when the policy changes; metadata polling still applies below.
-  if (inspection && (!interactionActive || inspection.blockedKey !== blockedKey)) setInspection(null);
+  if (inspection && inspection.blockedKey !== blockedKey) setInspection(null);
   const paused = opportunitiesActive && inspection !== null;
   const { data: liveData, connection, error, now, refresh } = usePerpetualFeed(opportunitiesActive, paused);
   const data = paused ? inspection.snapshot : liveData;

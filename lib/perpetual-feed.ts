@@ -136,22 +136,24 @@ export function createPerpetualSnapshotAccumulator() {
   };
 }
 
-/** One stream per visible panel; falls back to bounded snapshot requests on transport failure. */
+/** One stream per selected panel; falls back to bounded snapshot requests on transport failure. */
 export function startPerpetualFeed(options: FeedOptions) {
   const schedule = options.schedule ?? ((callback, delay) => setTimeout(callback, delay));
   const cancel = options.cancel ?? (timer => clearTimeout(timer as ReturnType<typeof setTimeout>));
+  const monotonic = options.monotonic ?? (() => performance.now());
   let stopped = false;
   let stream: SnapshotStream | null = null;
   let pollingTimer: unknown, reconnectTimer: unknown, watchdogTimer: unknown;
   let request: AbortController | null = null;
   let requestTimer: unknown;
+  let requestStartedAt = 0, streamActivityAt = 0, resumedAt = -Infinity;
   const accumulate = createPerpetualSnapshotAccumulator();
   let streaming = false;
   let fallback = false;
   let sequenceRecoveries = 0;
   let acceptedVersion = 0;
   let latest: PerpetualSnapshot | null = null;
-  const sourceClock = createPerpetualClock(options.monotonic);
+  const sourceClock = createPerpetualClock(monotonic);
 
   const accept = (value: unknown) => {
     const snapshot = accumulate(value);
@@ -172,10 +174,12 @@ export function startPerpetualFeed(options: FeedOptions) {
     const controller = new AbortController();
     const requestVersion = acceptedVersion;
     request = controller;
+    requestStartedAt = monotonic();
     const canceled = new Promise<never>((_, reject) => {
       controller.signal.addEventListener("abort", () => reject(new PerpetualRequestError("行情快照请求超过 12 秒未完成，请检查价差服务与连接。")), { once: true });
     });
-    requestTimer = schedule(() => controller.abort(), 12_000);
+    const timeout = schedule(() => controller.abort(), 12_000);
+    requestTimer = timeout;
     try {
       // Abort is advisory for a transport. Settle our slot even when it ignores
       // cancellation, so a stalled first read cannot block all future refreshes.
@@ -187,17 +191,19 @@ export function startPerpetualFeed(options: FeedOptions) {
       accept(value);
       if (!streaming) { fallback = true; options.onConnection("polling"); }
     } catch (error) {
-      if (!stopped && !streaming) {
+      if (!stopped && request === controller && !streaming) {
         fallback = true;
         options.onConnection("error");
         options.onError((error instanceof PerpetualRequestError ? error.message : "无法更新行情，请检查价差服务与连接。") + " 5 秒后自动重试，过期报价不参与排名。");
       }
     } finally {
-      clear(requestTimer);
-      if (request === controller) request = null;
-      if (!stopped && fallback) {
-        clear(pollingTimer);
-        pollingTimer = schedule(() => { void loadSnapshot(); }, options.pollIntervalMs?.() ?? 5_000);
+      clear(timeout);
+      if (request === controller) {
+        request = null;
+        if (!stopped && fallback) {
+          clear(pollingTimer);
+          pollingTimer = schedule(() => { void loadSnapshot(); }, options.pollIntervalMs?.() ?? 5_000);
+        }
       }
     }
   }
@@ -225,6 +231,7 @@ export function startPerpetualFeed(options: FeedOptions) {
       stream?.close();
       const current = options.createStream();
       stream = current;
+      streamActivityAt = monotonic();
       current.onmessage = event => {
         if (stopped || current !== stream) return;
         try {
@@ -232,6 +239,7 @@ export function startPerpetualFeed(options: FeedOptions) {
           const accepted = accept(frame);
           if (!accepted) return;
           if (frame.type === "patch") sequenceRecoveries = 0;
+          streamActivityAt = monotonic();
           streaming = true; fallback = false;
           clear(pollingTimer); clear(reconnectTimer);
           options.onConnection("stream");
@@ -255,6 +263,22 @@ export function startPerpetualFeed(options: FeedOptions) {
   void loadSnapshot();
   return {
     refresh: () => { clear(pollingTimer); void loadSnapshot(); },
+    resume() {
+      if (stopped) return;
+      const now = monotonic();
+      // Visibility/focus/pageshow often arrive together. Keep healthy streams
+      // and their delta baseline; only recover transports silent past the watchdog.
+      if (stream && now - streamActivityAt < 12_000 || now - resumedAt < 1_000) return;
+      resumedAt = now;
+      clear(reconnectTimer); clear(pollingTimer);
+      if (request && now - requestStartedAt >= 12_000) {
+        request.abort(); clear(requestTimer); request = null;
+      }
+      streaming = false;
+      options.onConnection("connecting");
+      connect();
+      void loadSnapshot();
+    },
     stop() {
       stopped = true;
       stream?.close(); stream = null;
