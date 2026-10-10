@@ -46,6 +46,8 @@ export interface PerpetualQuote {
   counterCurrency?: string;
   crossexSymbol?: string;
   marketId?: number;
+  /** Current directory fingerprint for funding/price history; null means unverified. */
+  historyIdentity?: string | null;
   comparable?: boolean;
   /** Official directory classification; missing fields remain unverified. */
   assetClass?: string;

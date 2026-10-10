@@ -1,4 +1,7 @@
 /* Opportunity scanner only. The position workspace keeps its existing theme. */
+.perp-scanner .scanner-chart-link { display: block; width: 100%; min-height: 44px; margin: 0; padding: 0; border: 0; border-radius: 2px; background: transparent; color: inherit; text-align: left; }
+.perp-scanner .scanner-chart-link:hover .scanner-symbol { color: var(--scanner-focus); }
+.perp-scanner .scanner-chart-row > :not(.perp-expand-cell) { cursor: pointer; }
 .hub-tabs.hub-perpetual-active:has(.perp-scanner) { width: 100%; max-width: none; min-width: 0; }
 
 .perpetual-panel.perp-scanner {

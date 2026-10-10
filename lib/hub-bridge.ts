@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { readActivity } from './read-activity.ts';
+import { perpetualChartUrl } from './perpetual-chart-state.ts';
 
 export type HubQuery = { symbol?: string; longExchange?: string; shortExchange?: string };
 export type HubProject = 'monitor' | 'crossex';
@@ -20,6 +21,16 @@ export function cleanHubQuery(input: unknown): HubQuery | null {
     query[key as keyof HubQuery] = value;
   }
   return query;
+}
+export function hubSelectionUrl(current: string, projectId: HubProject, query: HubQuery) {
+  // A newly selected asset from the host must leave an older chart selection.
+  const url = new URL(projectId === 'monitor' ? perpetualChartUrl(current, null) : current);
+  for (const key of ['symbol', 'longExchange', 'shortExchange'] as const) {
+    url.searchParams.delete(key);
+    if (query[key]) url.searchParams.set(key, query[key]!);
+  }
+  if (projectId === 'monitor') url.searchParams.set('monitor', 'perpetual');
+  return url.href;
 }
 function post(value: object) { if (connected && targetOrigin) window.parent.postMessage({ ...envelope, ...value }, targetOrigin); }
 export function hubChanged() { post({ type: 'changed', scope: 'summary' }); }
@@ -45,10 +56,7 @@ export function useHubBridge(projectId: HubProject) {
       } else if (connected && value.type === 'activity' && typeof value.active === 'boolean') { hostActive = value.active; readActivity.update(value.active, value.backgroundUpdates); update(); }
       else if (connected && value.type === 'navigate' && value.projectId === projectId) {
         const query = cleanHubQuery(value.query); if (!query) return;
-        const url = new URL(window.location.href);
-        for (const key of ['symbol', 'longExchange', 'shortExchange']) { url.searchParams.delete(key); if (query[key as keyof HubQuery]) url.searchParams.set(key, query[key as keyof HubQuery]!); }
-        if (projectId === 'monitor') url.searchParams.set('monitor', 'perpetual');
-        window.history.replaceState(null, '', url); window.dispatchEvent(new PopStateEvent('popstate'));
+        window.history.replaceState(null, '', hubSelectionUrl(window.location.href, projectId, query)); window.dispatchEvent(new PopStateEvent('popstate'));
       }
     };
     window.addEventListener('message', message); document.addEventListener('visibilitychange', update);

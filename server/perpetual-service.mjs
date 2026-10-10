@@ -11,8 +11,10 @@ import { createPerpetualOpportunities } from './perpetual-opportunities.mjs';
 import { createCrossExFilterService } from './perpetual-crossex-service.mjs';
 import { createOpportunitiesV2Reader } from './perpetual-opportunities-v2.mjs';
 import { createPerpetualFundingHistoryService } from './perpetual-funding-history.mjs';
+import { createPerpetualPriceHistoryService } from './perpetual-price-history.mjs';
 import { createPerpetualMarketMetricsService } from './perpetual-market-metrics.mjs';
 import { createPerpetualScannerDataService } from './perpetual-scanner-data.mjs';
+import { perpetualPriceIdentity } from '../lib/perpetual-price-history.ts';
 
 export const PERPETUAL_STALE_MS = 30_000;
 const MAX_FUTURE_MS = 5_000;
@@ -21,8 +23,9 @@ const priceFields = new Set(['bid', 'ask', 'mark', 'last']);
 const feeFields = ['takerFeeRate', 'takerFeeAt', 'takerFeeSource'];
 const identityFields = ['assetClass', 'identitySource', 'identityVerified'];
 const catalogFields = new Set(['delisting', 'delistingAt', ...feeFields, ...identityFields]);
-const streamValueFields = [...fields, 'base', 'quoteCurrency', 'multiplier', 'displayBase', 'contractUnit', 'collateralCurrency', 'comparable', 'transport', ...catalogFields];
+const streamValueFields = [...fields, 'base', 'quoteCurrency', 'multiplier', 'displayBase', 'contractUnit', 'collateralCurrency', 'historyIdentity', 'comparable', 'transport', ...catalogFields];
 const streamTimeFields = ['bidAt', 'askAt', 'bidAskAt', 'markAt', 'lastAt', 'fundingAt', 'fundingIntervalHoursUpdatedAt', 'nextFundingAtUpdatedAt', 'receivedAt', 'sourceTime'];
+const historyIdentities = new WeakMap();
 
 /** Only changed fields cross the wire. The retained baseline is exactly what readers received. */
 export function createPerpetualPatch(snapshot, previous, freshnessMs = 5_000) {
@@ -134,6 +137,20 @@ function withMarketMetadata(quote, market) {
     if (classified === quote) classified = { ...quote };
     classified[field] = value;
   }
+  // History must match the current directory's complete contract identity,
+  // without copying collateral/channel metadata into comparison eligibility.
+  let historyIdentity = null;
+  if (market && market.exchange === quote.exchange && market.symbol === quote.symbol
+    && market.base === quote.base && market.quoteCurrency === quote.quoteCurrency
+    && (market.multiplier ?? 1) === (quote.multiplier ?? 1)
+    && (market.contractUnit ?? null) === (quote.contractUnit ?? null)) {
+    historyIdentity = historyIdentities.get(market);
+    if (!historyIdentity) { historyIdentity = perpetualPriceIdentity(market); historyIdentities.set(market, historyIdentity); }
+  }
+  if (historyIdentity !== quote.historyIdentity) {
+    if (classified === quote) classified = { ...quote };
+    classified.historyIdentity = historyIdentity;
+  }
   quote = classified;
   const delisting = market?.delisting === true;
   const delistingAt = delisting && Number.isSafeInteger(market.delistingAt) && market.delistingAt > 0 && market.delistingAt <= 8.64e15 ? market.delistingAt : null;
@@ -149,7 +166,7 @@ function withMarketMetadata(quote, market) {
     ? quote : { ...quote, delisting, delistingAt, takerFeeRate, takerFeeAt, takerFeeSource };
 }
 
-export function createPerpetualService({ store, exchanges = EXCHANGES, discover = discoverMarkets, subscriptions = createSubscriptions, parse = parseMessage, control = getControlResponse, WebSocketImpl = PerpetualWebSocket, clock = Date.now, staleAfterMs = PERPETUAL_STALE_MS, retryMs = 5_000, discoveryIntervalMs = 5 * 60_000, saveIntervalMs = 15_000, broadcastIntervalMs = 1_000, watchdogIntervalMs = 10_000, quoteTimeoutMs = 45_000, qualityOptions, fundingHistoryOptions, marketMetricsOptions, alertOptions, paperOptions, notifications, executionOptions, crossexOptions, fxIntervalMs = exchanges === EXCHANGES ? 60000 : 0 } = {}) {
+export function createPerpetualService({ store, exchanges = EXCHANGES, discover = discoverMarkets, subscriptions = createSubscriptions, parse = parseMessage, control = getControlResponse, WebSocketImpl = PerpetualWebSocket, clock = Date.now, staleAfterMs = PERPETUAL_STALE_MS, retryMs = 5_000, discoveryIntervalMs = 5 * 60_000, saveIntervalMs = 15_000, broadcastIntervalMs = 1_000, watchdogIntervalMs = 10_000, quoteTimeoutMs = 45_000, qualityOptions, fundingHistoryOptions, priceHistoryOptions, marketMetricsOptions, alertOptions, paperOptions, notifications, executionOptions, crossexOptions, fxIntervalMs = exchanges === EXCHANGES ? 60000 : 0 } = {}) {
   let sourceRevision = 0;
   const readOpportunitiesV2 = createOpportunitiesV2Reader();
   const crossex = createCrossExFilterService({ clock, ...crossexOptions });
@@ -158,6 +175,7 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
   let running = false, storageError = null, broadcastTimer, saveTimer, refreshTimer, metricsTimer, fxTimer, sequence = 0;
   const quality = store?.saveQualitySample ? createPerpetualQualityService({ getSnapshot: snapshot, store, clock, shouldDeferAuxiliary: () => metrics.eventLoopP99Ms > 80 || metrics.cpuPercent > 160, ...qualityOptions }) : null;
   const fundingHistory = createPerpetualFundingHistoryService({ getSnapshot: snapshot, getMarket: (exchange, symbol) => states.get(exchange)?.markets?.get(symbol), store, clock, ...fundingHistoryOptions });
+  const priceHistory = createPerpetualPriceHistoryService({ getSnapshot: snapshot, getMarket: (exchange, symbol) => states.get(exchange)?.markets?.get(symbol), store, clock, ...priceHistoryOptions });
   const marketMetrics = createPerpetualMarketMetricsService({ getSnapshot: snapshot, getMarket: (exchange, symbol) => states.get(exchange)?.markets?.get(symbol), store, clock, ...marketMetricsOptions });
   const scannerData = createPerpetualScannerDataService({ getSnapshot: snapshot, getMarket: (exchange, symbol) => states.get(exchange)?.markets?.get(symbol), fundingHistory, marketMetrics, clock });
   const alerts = createPerpetualAlertService({ getQuote: key => quotes.get(key), isVenueLive: id => [...connections].some(connection => connection.exchange === id && connection.socket?.readyState === 1), marketHealthy: () => !storageError, clock, notifications, ...alertOptions });
@@ -175,7 +193,8 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
   }
   function changedQuote(key, quote) { sourceRevision++; quotes.set(key, quote); dirty.set(key, quote); if (clients.size) publishDirty.add(key); }
   let cpuBaseline = process.cpuUsage(), sampledAt = performance.now(), sampledMessages = 0;
-  for (const quote of store?.load() ?? []) if (states.has(quote.exchange)) quotes.set(`${quote.exchange}:${quote.symbol}`, quote);
+  // A persisted fingerprint is not evidence of the current market directory.
+  for (const quote of store?.load() ?? []) if (states.has(quote.exchange)) quotes.set(`${quote.exchange}:${quote.symbol}`, { ...quote, historyIdentity: null });
   const later = (fn, ms) => {
     const timer = setTimeout(() => { timers.delete(timer); if (running) fn(); }, ms);
     timer.unref?.(); timers.add(timer); return timer;
@@ -387,6 +406,7 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
     start() {
       if (running) return; running = true;
       fundingHistory.start();
+      priceHistory.start();
       marketMetrics.start();
       if (fxIntervalMs > 0) { const refreshFx = () => void execution.fx().catch(() => {}); refreshFx(); fxTimer = setInterval(refreshFx, Math.max(60000, fxIntervalMs)); fxTimer.unref?.(); }
       quality?.start();
@@ -441,6 +461,7 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
       await Promise.allSettled(pending.map(item => item.promise));
       await quality?.stop();
       await fundingHistory.stop();
+      await priceHistory.stop();
       await marketMetrics.stop();
       await alerts.stop();
       await paper.stop();
@@ -476,8 +497,8 @@ export function createPerpetualService({ store, exchanges = EXCHANGES, discover 
     },
     closeStreams, snapshot, healthy: () => !storageError && alerts.healthy(),
     metrics: () => ({ ...metrics, generatedAt: clock(), quotes: quotes.size, pendingWrites: dirty.size, connections: connections.size, clients: clients.size, rssMb: Number((process.memoryUsage.rss() / 1048576).toFixed(1)), storageError, events: healthEvents.filter(item => clock() - item.at <= 3_600_000), auxiliary: [...pollBudgets].map(([host, budget]) => ({ host, sentInWindow: budget.sent, retryAt: budget.blockedUntil })), venues: snapshot().exchanges.map(exchange => ({ ...exchange, sourceLagMs: states.get(exchange.id).lastSourceLagMs, sourceLagObservedAt: states.get(exchange.id).sourceLagObservedAt ?? null, rejectedFuture: states.get(exchange.id).rejectedFuture, reconnects: states.get(exchange.id).reconnects ?? 0, lastConnectedAt: states.get(exchange.id).lastConnectedAt ?? null, lastProtocolError: states.get(exchange.id).lastProtocolError ?? null })) }),
-    actions: { 'crossex-settings': ['GET', 'PUT'], quote: ['GET'], summary: ['GET'], opportunities: ['GET'], 'opportunities-v2': ['GET'], stream: ['GET'], diagnostics: ['GET'], quality: ['POST'], 'funding-history': ['POST'], metrics: ['POST'], 'scanner-data': ['POST'], alerts: ['GET', 'PUT'], depth: ['POST'], exit: ['POST'], paper: ['GET', 'POST'], fx: ['GET'] },
-    handle(action, method, input) { if (action === 'summary') return this.summary(); if (action === 'funding-history') return fundingHistory.read(input); if (action === 'metrics') return marketMetrics.read(input); if (action === 'scanner-data') return scannerData.read(input); if (action === 'crossex-settings') return method === 'PUT' ? crossex.update(input) : crossex.view(); if (action === 'opportunities-v2') return readOpportunitiesV2(snapshot(), clock(), (exchange, symbol) => states.get(exchange)?.markets?.get(symbol), execution.peekFx(), `${streamId}:${sourceRevision}`, crossex.filter()); if (action === 'opportunities') return createPerpetualOpportunities(snapshot(), clock(), (exchange, symbol) => states.get(exchange)?.markets?.get(symbol), crossex.filter()); if (action === 'quote') return snapshot(); if (action === 'diagnostics') return { ...this.metrics(), quality: quality?.metrics() ?? null, fundingHistory: fundingHistory.metrics(), marketMetrics: marketMetrics.metrics(), alerts: alerts.metrics(), execution: execution.metrics(), paper: paper.metrics() }; if (action === 'quality') { if (!quality) throw new Error('质量采集服务未就绪'); return quality.read(input); } if (action === 'alerts') return method === 'PUT' ? alerts.update(input) : alerts.view(); if (action === 'depth') return execution.depth(input); if (action === 'exit') return execution.exit(input); if (action === 'paper') return method === 'POST' ? paper.update(input) : paper.view(); if (action === 'fx') return execution.fx(); },
+    actions: { 'crossex-settings': ['GET', 'PUT'], quote: ['GET'], summary: ['GET'], opportunities: ['GET'], 'opportunities-v2': ['GET'], stream: ['GET'], diagnostics: ['GET'], quality: ['POST'], 'funding-history': ['POST'], 'price-history': ['POST'], metrics: ['POST'], 'scanner-data': ['POST'], alerts: ['GET', 'PUT'], depth: ['POST'], exit: ['POST'], paper: ['GET', 'POST'], fx: ['GET'] },
+    handle(action, method, input) { if (action === 'summary') return this.summary(); if (action === 'funding-history') return fundingHistory.read(input); if (action === 'price-history') return priceHistory.read(input); if (action === 'metrics') return marketMetrics.read(input); if (action === 'scanner-data') return scannerData.read(input); if (action === 'crossex-settings') return method === 'PUT' ? crossex.update(input) : crossex.view(); if (action === 'opportunities-v2') return readOpportunitiesV2(snapshot(), clock(), (exchange, symbol) => states.get(exchange)?.markets?.get(symbol), execution.peekFx(), `${streamId}:${sourceRevision}`, crossex.filter()); if (action === 'opportunities') return createPerpetualOpportunities(snapshot(), clock(), (exchange, symbol) => states.get(exchange)?.markets?.get(symbol), crossex.filter()); if (action === 'quote') return snapshot(); if (action === 'diagnostics') return { ...this.metrics(), quality: quality?.metrics() ?? null, fundingHistory: fundingHistory.metrics(), priceHistory: priceHistory.metrics(), marketMetrics: marketMetrics.metrics(), alerts: alerts.metrics(), execution: execution.metrics(), paper: paper.metrics() }; if (action === 'quality') { if (!quality) throw new Error('质量采集服务未就绪'); return quality.read(input); } if (action === 'alerts') return method === 'PUT' ? alerts.update(input) : alerts.view(); if (action === 'depth') return execution.depth(input); if (action === 'exit') return execution.exit(input); if (action === 'paper') return method === 'POST' ? paper.update(input) : paper.view(); if (action === 'fx') return execution.fx(); },
     stream(request, response) {
       const gzip = /(?:^|,)\s*gzip\s*(?:,|$)/i.test(request.headers['accept-encoding'] ?? '');
       response.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no', Vary: 'Accept-Encoding', ...(gzip ? { 'Content-Encoding': 'gzip' } : {}) });

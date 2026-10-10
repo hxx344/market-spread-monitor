@@ -17,7 +17,7 @@ export async function openPerpetualStore(filename) {
     db.exec('CREATE TABLE IF NOT EXISTS quotes (id TEXT PRIMARY KEY, payload TEXT NOT NULL); PRAGMA user_version=1;');
     // Additive cache tables keep older binaries compatible during installer rollback.
     db.exec('CREATE TABLE IF NOT EXISTS quality_samples (bucket INTEGER PRIMARY KEY, payload BLOB NOT NULL);');
-    db.exec('CREATE TABLE IF NOT EXISTS funding_history_cache (id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL, payload BLOB NOT NULL); CREATE TABLE IF NOT EXISTS contract_metrics_cache (id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL, payload BLOB NOT NULL);');
+    db.exec('CREATE TABLE IF NOT EXISTS price_history_cache (id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL, payload BLOB NOT NULL); CREATE TABLE IF NOT EXISTS funding_history_cache (id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL, payload BLOB NOT NULL); CREATE TABLE IF NOT EXISTS contract_metrics_cache (id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL, payload BLOB NOT NULL);');
     const upsert = db.prepare('INSERT INTO quotes(id,payload) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload');
     const insertSample = db.prepare('INSERT INTO quality_samples(bucket,payload) VALUES (?,?) ON CONFLICT(bucket) DO NOTHING');
     const pruneSamples = db.prepare('DELETE FROM quality_samples WHERE bucket<=? OR bucket NOT IN (SELECT bucket FROM quality_samples ORDER BY bucket DESC LIMIT 1440)');
@@ -47,10 +47,12 @@ export async function openPerpetualStore(filename) {
         },
       };
     }
-    const fundingCache = publicCache('funding_history_cache'), metricsCache = publicCache('contract_metrics_cache');
+    const priceCache = publicCache('price_history_cache'), fundingCache = publicCache('funding_history_cache'), metricsCache = publicCache('contract_metrics_cache');
     let closed = false;
     return {
       load() { return db.prepare('SELECT payload FROM quotes').all().map(row => JSON.parse(row.payload)); },
+      loadPriceHistory: priceCache.load,
+      savePriceHistory: priceCache.save,
       loadFundingHistory: fundingCache.load,
       saveFundingHistory: fundingCache.save,
       loadContractMetrics: metricsCache.load,

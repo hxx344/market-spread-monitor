@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { trustedHubOrigin, cleanHubQuery, observeNetworkActivity } from '../lib/hub-bridge.ts';
+import { trustedHubOrigin, cleanHubQuery, observeNetworkActivity, hubSelectionUrl } from '../lib/hub-bridge.ts';
 
 test('bridge trusts only the exact isolated proxy hostname, matching scheme and port', () => {
   const hostname = 'p-' + 'a'.repeat(24) + '.hub.localhost';
@@ -25,4 +25,12 @@ test('network transitions update activity immediately and are detached when the 
   online = true; source.dispatchEvent(new Event('online')); assert.deepEqual(transitions, [false, true]);
   stop(); source.dispatchEvent(new Event('offline')); source.dispatchEvent(new Event('online'));
   assert.deepEqual(transitions, [false, true]);
+});
+
+test('a new host asset selection leaves the old chart and replaces only navigation fields', () => {
+  const current = 'https://local.example/?monitor=perpetual&perpView=chart&chartBase=BTC&chartLong=binance%3ABTCUSDT&chartShort=aster%3ABTCUSDT&chartDays=30&symbol=BTC&longExchange=binance&goldOil=bz';
+  const next = new URL(hubSelectionUrl(current, 'monitor', { symbol: 'ETH', shortExchange: 'bybit' }));
+  assert.equal(next.searchParams.get('symbol'), 'ETH'); assert.equal(next.searchParams.get('shortExchange'), 'bybit');
+  assert.equal(next.searchParams.get('monitor'), 'perpetual'); assert.equal(next.searchParams.get('goldOil'), 'bz');
+  for (const key of ['perpView', 'chartBase', 'chartLong', 'chartShort', 'chartDays', 'longExchange']) assert.equal(next.searchParams.has(key), false);
 });

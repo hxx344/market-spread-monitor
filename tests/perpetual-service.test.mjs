@@ -11,6 +11,7 @@ import { createPerpetualService, mergePerpetualQuote, createPerpetualDelta, crea
 import { openPerpetualStore } from '../server/perpetual-store.mjs';
 import { createHandler } from '../server/http.mjs';
 import { createSubscriptions, parseMessage, getControlResponse } from '../modules/perpetual/exchanges.mjs';
+import { perpetualPriceIdentity } from '../lib/perpetual-price-history.ts';
 
 const update = (patch = {}) => ({ exchange: 'test', symbol: 'BTCUSDT', base: 'BTC', quoteCurrency: 'USDT', bid: 100, ask: 101, sourceTime: 1000, ...patch });
 
@@ -296,6 +297,85 @@ test('official categories reach restored snapshots while CrossEx-specific enrich
   now = 3000; metadata = { ...metadata, identityVerified: false };
   await until(() => service.handle('opportunities', 'GET').quotes.length === 0);
   assert.deepEqual(service.snapshot().quotes[0], { ...retained, identityVerified: false }); assert.equal(sockets.length, 1);
+});
+
+test('directory fingerprints join public HTTP quotes and streamed metadata to both history services without CrossEx enrichment', async t => {
+  const observedAt = Date.UTC(2026, 9, 11, 12);
+  let now = observedAt;
+  const rows = [update({ exchange: 'binance', sourceTime: observedAt }), update({ exchange: 'lighter', symbol: 'BTC', quoteCurrency: 'USDC', sourceTime: observedAt })];
+  let markets = [{ ...rows[0], collateralCurrency: 'USDT' }, { ...rows[1], marketId: 1 }];
+  const { service, sockets } = setup({ clock: () => now, discoveryIntervalMs: 20,
+    exchanges: rows.map(row => ({ id: row.exchange, name: row.exchange, kind: 'cex' })),
+    discover: async exchange => markets.filter(market => market.exchange === exchange),
+    subscriptions: (exchange, discovered) => [{ url: `wss://example.invalid/${exchange}`, subscribe: [], markets: discovered }],
+    fundingHistoryOptions: { reader: async (_market, range) => [{ time: range.to, rate: 0.0001 }], hostSpacingMs: 0 },
+    priceHistoryOptions: { reader: async (_market, range) => [{ time: range.to, close: 100 }], hostSpacingMs: 0 },
+  });
+  const server = createServer(createHandler({ services: new Map([['perpetual', service]]), username: 'test', password: 'test-password', nextHandler: (_request, response) => { response.writeHead(404); response.end(); } }));
+  t.after(async () => { await service.stop(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  service.start(); await until(() => sockets.length === 2);
+  for (const row of rows) { const socket = sockets.find(socket => socket.url.endsWith(`/${row.exchange}`)); socket.open(); socket.message([row]); }
+  const baseUrl = `http://127.0.0.1:${server.address().port}/api/monitors/perpetual/`;
+  const headers = { Authorization: `Basic ${Buffer.from('test:test-password').toString('base64')}`, 'Content-Type': 'application/json' };
+  const httpRead = async (action, body) => {
+    const response = await fetch(baseUrl + action, { headers, ...(body ? { method: 'POST', body: JSON.stringify(body) } : {}) });
+    assert.equal(response.status, 200); return response.json();
+  };
+  const snapshot = await httpRead('quote'), baseline = new Map(snapshot.quotes.map(quote => [`${quote.exchange}:${quote.symbol}`, quote]));
+  for (const market of markets) {
+    const publicQuote = baseline.get(`${market.exchange}:${market.symbol}`);
+    assert.equal(publicQuote.historyIdentity, perpetualPriceIdentity(market));
+    assert.equal(publicQuote.collateralCurrency, undefined); assert.equal(publicQuote.marketId, undefined);
+    assert.notEqual(publicQuote.historyIdentity, perpetualPriceIdentity(publicQuote), 'The public quote intentionally omits catalog-only identity fields');
+  }
+  const pair = { base: 'BTC', longKey: 'binance:BTCUSDT', shortKey: 'lighter:BTC' };
+  const funding = await httpRead('funding-history', { pairs: [pair] }), price = await httpRead('price-history', { pair, days: 7 });
+  for (const [key, quote] of baseline) {
+    assert.equal(funding.legs[key].identity, quote.historyIdentity);
+    assert.equal(price.legs[key].identity, quote.historyIdentity);
+  }
+  await until(() => Object.values(service.handle('funding-history', 'POST', { pairs: [pair] }).legs).every(leg => leg.records.length)
+    && Object.values(service.handle('price-history', 'POST', { pair, days: 7 }).legs).every(leg => leg.points.length));
+  const response = Object.assign(new EventEmitter(), {
+    packets: [], writableLength: 0, writableNeedDrain: false, destroyed: false, writableEnded: false,
+    writeHead() {}, write(message) { this.packets.push(JSON.parse(message.split('data: ')[1].trim())); },
+    end() { this.writableEnded = true; this.emit('close'); }, destroy() { this.destroyed = true; this.emit('close'); },
+  });
+  service.stream({ headers: {} }, response);
+  assert.equal(response.packets[0].quotes.find(quote => quote.exchange === 'lighter').historyIdentity, baseline.get(pair.shortKey).historyIdentity);
+
+  now += 1000; markets = [markets[0], { ...markets[1], marketId: 2 }];
+  const identity = perpetualPriceIdentity(markets[1]);
+  await until(() => response.packets.some(packet => packet.patches?.some(([key, patch]) => key === pair.shortKey && patch.historyIdentity === identity)));
+  const patch = response.packets.flatMap(packet => packet.patches ?? []).find(([key, patch]) => key === pair.shortKey && patch.historyIdentity === identity)[1];
+  assert.deepEqual(patch, { historyIdentity: identity, receivedAt: observedAt });
+  const changed = service.snapshot().quotes.find(quote => quote.exchange === 'lighter');
+  for (const field of ['bid', 'ask', 'bidAskAt', 'receivedAt', 'sourceTime']) assert.equal(changed[field], baseline.get(pair.shortKey)[field]);
+  assert.equal(changed.marketId, undefined); assert.equal(changed.collateralCurrency, undefined);
+  assert.equal(createPerpetualDelta(service.snapshot(), baseline).updates.find(quote => quote.exchange === 'lighter').historyIdentity, identity);
+  assert.equal(service.handle('funding-history', 'POST', { pairs: [pair] }).legs[pair.shortKey].identity, identity);
+  assert.equal(service.handle('price-history', 'POST', { pair, days: 7 }).legs[pair.shortKey].identity, identity);
+});
+
+test('history fingerprints reject restored claims, absent markets and quote-directory identity mismatches', async t => {
+  let now = 1000;
+  const stored = { ...mergePerpetualQuote(null, update(), now), historyIdentity: perpetualPriceIdentity(update()) };
+  const { service, sockets } = setup({ clock: () => now, store: { load: () => [stored], save() {}, prune() {}, close() {} } });
+  t.after(() => service.stop());
+  assert.equal(service.snapshot().quotes[0].historyIdentity, null, 'A persisted fingerprint does not establish a current directory');
+  service.start(); await until(() => sockets.length === 1);
+  assert.equal(service.snapshot().quotes[0].historyIdentity, perpetualPriceIdentity(update()));
+  sockets[0].open();
+  for (const mismatch of [{ base: 'OTHER' }, { quoteCurrency: 'USDC' }, { multiplier: 1000 }, { contractUnit: 'different unit' }, { symbol: 'UNKNOWN' }]) {
+    now++;
+    sockets[0].message([update({ ...mismatch, sourceTime: now, historyIdentity: stored.historyIdentity })]);
+    const quote = service.snapshot().quotes.find(quote => quote.symbol === (mismatch.symbol ?? 'BTCUSDT'));
+    assert.equal(quote.historyIdentity, null, `Unverified directory identity: ${JSON.stringify(mismatch)}`);
+  }
+  const previous = { ...service.snapshot().quotes[0], historyIdentity: stored.historyIdentity };
+  const cleared = createPerpetualPatch({ quotes: [{ ...previous, historyIdentity: null }] }, new Map([['test:BTCUSDT', previous]])).patches[0][1];
+  assert.deepEqual(cleared, { historyIdentity: null, receivedAt: previous.receivedAt });
 });
 
 test('official classification refreshes and clears without refreshing prices or changing comparison eligibility', async t => {
