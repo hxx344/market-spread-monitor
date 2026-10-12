@@ -55,6 +55,8 @@ export async function openMarketStore(filename, { clock = Date.now } = {}) {
       ON CONFLICT(dataset,time) DO UPDATE SET payload=excluded.payload,source_ms=excluded.source_ms
       WHERE excluded.source_ms>=market_observations.source_ms AND excluded.payload<>market_observations.payload`);
     const save = db.prepare('UPDATE market_datasets SET payload=?,source_ms=?,saved_ms=?,attempt_ms=?,success_ms=?,error=NULL WHERE key=?');
+    const recordFailure = db.prepare('UPDATE market_datasets SET attempt_ms=?,error=? WHERE key=?');
+    const countObservations = db.prepare('SELECT count(*) AS count FROM market_observations WHERE dataset=?');
     let closed = false;
     return {
       raw(id, action) { const key = keyFor(id, action), row = get.get(storageKey(key)); return row.payload ? decode(key, row.payload) : null; },
@@ -79,7 +81,7 @@ export async function openMarketStore(filename, { clock = Date.now } = {}) {
         return true;
       },
       fail(id, action, message) {
-        db.prepare('UPDATE market_datasets SET attempt_ms=?,error=? WHERE key=?').run(clock(), message, storageKey(keyFor(id, action)));
+        recordFailure.run(clock(), message, storageKey(keyFor(id, action)));
       },
       read(id, action, { maxAgeMs = action === 'quote' || action.endsWith('/quote') ? 45_000 : 615_000, fresh = false } = {}) {
         const key = keyFor(id, action), row = get.get(storageKey(key));
@@ -89,7 +91,7 @@ export async function openMarketStore(filename, { clock = Date.now } = {}) {
         return { ...decode(key, row.payload), status: stale ? 'snapshot' : 'live', collection: { source: 'database', stale, maxAgeMs, lastAttemptAt: row.attempt_ms === null ? null : new Date(row.attempt_ms).toISOString(), lastSuccessAt: row.success_ms === null ? null : new Date(row.success_ms).toISOString(), error: row.error } };
       },
       status() { return datasetKeys.map(key => { const { payload: _payload, ...row } = get.get(storageKey(key)); return { ...row, key }; }).sort((a, b) => a.key.localeCompare(b.key)); },
-      count(id, action) { return db.prepare('SELECT count(*) AS count FROM market_observations WHERE dataset=?').get(storageKey(keyFor(id, action))).count; },
+      count(id, action) { return countObservations.get(storageKey(keyFor(id, action))).count; },
       close() { if (!closed) { closed = true; db.close(); } },
     };
   } catch (error) { db.close(); throw error; }

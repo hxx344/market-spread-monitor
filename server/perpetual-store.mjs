@@ -21,6 +21,9 @@ export async function openPerpetualStore(filename) {
     const upsert = db.prepare('INSERT INTO quotes(id,payload) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload');
     const insertSample = db.prepare('INSERT INTO quality_samples(bucket,payload) VALUES (?,?) ON CONFLICT(bucket) DO NOTHING');
     const pruneSamples = db.prepare('DELETE FROM quality_samples WHERE bucket<=? OR bucket NOT IN (SELECT bucket FROM quality_samples ORDER BY bucket DESC LIMIT 1440)');
+    const selectQuotes = db.prepare('SELECT payload FROM quotes');
+    const removeQuote = db.prepare('DELETE FROM quotes WHERE id=?');
+    const selectExchangeQuotes = db.prepare('SELECT id FROM quotes WHERE id >= ? AND id < ?');
     function publicCache(table) {
       db.exec(`CREATE INDEX IF NOT EXISTS ${table}_updated_at ON ${table}(updated_at DESC)`);
       const selectOne = db.prepare(`SELECT payload FROM ${table} WHERE id=?`);
@@ -50,7 +53,7 @@ export async function openPerpetualStore(filename) {
     const priceCache = publicCache('price_history_cache'), fundingCache = publicCache('funding_history_cache'), metricsCache = publicCache('contract_metrics_cache');
     let closed = false;
     return {
-      load() { return db.prepare('SELECT payload FROM quotes').all().map(row => JSON.parse(row.payload)); },
+      load() { return selectQuotes.all().map(row => JSON.parse(row.payload)); },
       loadPriceHistory: priceCache.load,
       savePriceHistory: priceCache.save,
       loadFundingHistory: fundingCache.load,
@@ -59,6 +62,7 @@ export async function openPerpetualStore(filename) {
       saveContractMetrics: metricsCache.save,
       *loadQualitySamples(now) {
         // Decode one minute at a time: no full-day JSON allocation on restart.
+        // Each iterator needs its own statement so interleaved readers stay independent.
         for (const row of db.prepare('SELECT bucket,payload FROM quality_samples WHERE bucket>? AND bucket<=? ORDER BY bucket LIMIT 1440').iterate(now - 86_400_000, now)) {
           try { yield { bucket: row.bucket, rows: JSON.parse(gunzipSync(row.payload, { maxOutputLength: 2_000_000 }).toString()) }; }
           catch { /* A corrupt public-history bucket remains a gap, never fake data. */ }
@@ -76,12 +80,11 @@ export async function openPerpetualStore(filename) {
         catch (error) { db.exec('ROLLBACK'); throw error; }
       },
       prune(exchange, symbols) {
-        const remove = db.prepare('DELETE FROM quotes WHERE id=?');
         db.exec('BEGIN IMMEDIATE');
         try {
           const prefix = `${exchange}:`;
-          for (const row of db.prepare('SELECT id FROM quotes WHERE id >= ? AND id < ?').all(prefix, `${exchange};`)) {
-            if (!symbols.has(row.id.slice(prefix.length))) remove.run(row.id);
+          for (const row of selectExchangeQuotes.all(prefix, `${exchange};`)) {
+            if (!symbols.has(row.id.slice(prefix.length))) removeQuote.run(row.id);
           }
           db.exec('COMMIT');
         } catch (error) { db.exec('ROLLBACK'); throw error; }
