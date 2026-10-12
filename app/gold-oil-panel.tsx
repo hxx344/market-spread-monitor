@@ -18,14 +18,14 @@ const time = (value: number | undefined) => value === undefined ? '—' : summar
 const extraStyles = `
 .gold-chart{height:340px;min-width:0}.gold-funding-chart{height:230px}
 .funding-history-period{font-size:12px;line-height:1.7;color:var(--muted)}
-.gold-svg-chart{height:100%;width:100%;position:relative}.gold-chart-svg{display:block;overflow:visible;touch-action:pan-y}.gold-chart-svg text{fill:var(--muted);font:11px Arial,sans-serif}.gold-chart-tooltip{position:absolute;top:4px;left:80px;max-width:calc(100% - 90px);padding:7px 10px;background:var(--surface,#fff);border:1px solid var(--line,#dce5e7);border-radius:6px;font-size:11px;line-height:1.7;pointer-events:none}.gold-chart-tooltip span{display:block}
+.gold-svg-chart{height:100%;width:100%;position:relative}.gold-chart-svg{display:block;overflow:visible;touch-action:pan-y}.gold-chart-svg text{fill:var(--muted);font:11px Arial,sans-serif}.gold-chart-tooltip{position:absolute;top:4px;left:80px;max-width:calc(100% - 90px);padding:7px 10px;background:var(--surface,var(--card));border:1px solid var(--line,var(--border));border-radius:6px;font-size:11px;line-height:1.7;pointer-events:none}.gold-chart-tooltip span{display:block}
 .gold-cursor{display:block;width:100%;accent-color:var(--accent);margin:12px 0}
 .gold-cursor-reading{display:block;color:var(--muted);font-size:12px;min-height:24px}
 .gold-empty{display:grid;place-items:center;height:100%;color:var(--muted);font-size:14px}
 .gold-chart svg:focus-visible{outline:2px solid var(--accent)}
 .gold-oil-selector{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:10px;margin-top:16px}.gold-oil-selector>span{font-size:12px;color:var(--muted)}.gold-oil-selector .range-buttons{justify-self:start;margin-left:0}.gold-oil-selector .range-buttons button{min-height:40px;padding:8px 14px}
 .gold-range-unit{font-size:12px;color:var(--muted)}
-.funding-basis span{font-size:12px;color:var(--accent);padding:8px 12px}.gold-data-stale{color:#9a6718}
+.funding-basis span{font-size:12px;color:var(--accent);padding:8px 12px}.gold-data-stale{color:var(--warning)}
 .view-tabs button[aria-pressed=true]{color:var(--accent);background:transparent}
 .view-tabs button[aria-pressed=true]:after{content:'';height:3px;background:var(--accent);position:absolute;bottom:-1px;left:0;right:0;border-radius:3px 3px 0 0}
 .monthly-chart{overflow-x:auto;overflow-y:hidden}.month-item{min-width:56px}

@@ -15,10 +15,10 @@ type Draft = { from: string; to: string; notional: string; bybitMakerRate: strin
 type HedgeResult = ReturnType<typeof calculateOilFundingHedge>;
 type HedgePoint = HedgeResult["points"][number];
 const metrics = [
-  { key: "funding", label: "累计资金费", color: "#147d64", dash: undefined, step: true, line: "绿色实线", formula: "四腿已结算资金费收支合计", note: "未扣手续费；正数收款，负数付款" },
-  { key: "fundingNet", label: "扣开仓费后资金费", color: "#356dc4", dash: "7 3", step: true, line: "蓝色长虚线", formula: "累计资金费 − 开仓手续费", note: "未计价格盈亏与平仓手续费" },
-  { key: "netPnl", label: "模拟平仓后总盈亏", color: "#7a4caa", dash: undefined, step: false, line: "紫色实线", formula: "资金费 + 价格盈亏 − 开平仓手续费", note: "全部手续费已扣；正数盈利，负数亏损" },
-  { key: "makerCost", label: "开平仓手续费", color: "#9a6718", dash: "3 3", step: false, line: "橙色短虚线", formula: "开仓费 + 该时点估算的平仓费", note: "正数为支出，负数为返佣" },
+  { key: "funding", label: "累计资金费", color: "var(--positive)", dash: undefined, step: true, line: "绿色实线", formula: "四腿已结算资金费收支合计", note: "未扣手续费；正数收款，负数付款" },
+  { key: "fundingNet", label: "扣开仓费后资金费", color: "var(--chart-2)", dash: "7 3", step: true, line: "蓝色长虚线", formula: "累计资金费 − 开仓手续费", note: "未计价格盈亏与平仓手续费" },
+  { key: "netPnl", label: "模拟平仓后总盈亏", color: "var(--chart-5)", dash: undefined, step: false, line: "紫色实线", formula: "资金费 + 价格盈亏 − 开平仓手续费", note: "全部手续费已扣；正数盈利，负数亏损" },
+  { key: "makerCost", label: "开平仓手续费", color: "var(--warning)", dash: "3 3", step: false, line: "橙色短虚线", formula: "开仓费 + 该时点估算的平仓费", note: "正数为支出，负数为返佣" },
 ] as const;
 const money = (value: number | null | undefined, signed = true, digits = 2) => value == null ? "—" : `${signed && value > 0 ? "+" : value < 0 ? "−" : ""}${Math.abs(value).toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
 const percent = (value: number | null | undefined) => value == null ? "—" : `${money(value, true, 3)}%`;
@@ -151,7 +151,7 @@ function OilFundingHedge({ active, now }: { active: boolean; now: number }) {
     <div className="oil-hedge-chart-meta"><span>金额（USDT）</span><span>北京时间 · 缺失保留断点</span></div>
     <div className="oil-hedge-chart" role="group" aria-label="四腿模拟收益与 maker 成本曲线，详细金额见下方数值明细" aria-describedby={`${id}-reading ${id}-legend`}>
       {result?.points.some(point => metrics.some(metric => point[metric.key] !== null)) ? <ResponsiveContainer width="100%" height="100%" minWidth={0} initialDimension={{ width: 900, height: 300 }}><LineChart data={result.points} margin={{ top: 12, right: 10, left: 0, bottom: 6 }} accessibilityLayer>
-        <CartesianGrid stroke="#e0e7ef" strokeDasharray="3 5" vertical={false}/><XAxis dataKey="time" type="number" domain={[settings.from, settings.to]} tickFormatter={shortStamp} minTickGap={70} stroke="#66748a" axisLine={false} tickLine={false} tick={{ fontSize: 11 }}/><YAxis orientation="right" width={70} tickFormatter={value => Number(value).toLocaleString("en-US", { maximumFractionDigits: 2 })} domain={[(min: number) => Math.min(0, min), (max: number) => Math.max(0, max)]} stroke="#66748a" axisLine={false} tickLine={false} tick={{ fontSize: 11 }}/><ReferenceLine y={0} stroke="#8794a6" strokeDasharray="4 4" label={{ value: "0 · 盈亏分界", position: "insideBottomLeft", fill: "#66748a", fontSize: 11 }}/><Tooltip content={<HedgeTooltip/>} wrapperStyle={{ maxWidth: "100%" }}/>
+        <CartesianGrid stroke="var(--border)" strokeDasharray="3 5" vertical={false}/><XAxis dataKey="time" type="number" domain={[settings.from, settings.to]} tickFormatter={shortStamp} minTickGap={70} stroke="var(--muted-foreground)" axisLine={false} tickLine={false} tick={{ fontSize: 11 }}/><YAxis orientation="right" width={70} tickFormatter={value => Number(value).toLocaleString("en-US", { maximumFractionDigits: 2 })} domain={[(min: number) => Math.min(0, min), (max: number) => Math.max(0, max)]} stroke="var(--muted-foreground)" axisLine={false} tickLine={false} tick={{ fontSize: 11 }}/><ReferenceLine y={0} stroke="var(--muted-foreground)" strokeDasharray="4 4" label={{ value: "0 · 盈亏分界", position: "insideBottomLeft", fill: "var(--muted-foreground)", fontSize: 11 }}/><Tooltip content={<HedgeTooltip/>} wrapperStyle={{ maxWidth: "100%" }}/>
         {metrics.map(metric => <Line key={metric.key} dataKey={metric.key} name={metric.label} type={metric.step ? "stepAfter" : "linear"} stroke={metric.color} strokeWidth={metric.key === "netPnl" ? 2.2 : 1.8} strokeDasharray={metric.dash} dot={false} activeDot={{ r: 4 }} connectNulls={false} isAnimationActive={false}/>)}
       </LineChart></ResponsiveContainer> : <div className="oil-hedge-empty"><strong>{history.loading ? "正在读取四腿历史…" : "所选区间暂无可用估值"}</strong><p>需要四腿开仓价格与历史结算数据；缺失值不按零计算。</p></div>}
     </div>

@@ -57,7 +57,7 @@ async page => {
     check(await panel.locator('.metric').count() === 4, 'Same four-card layout as oil');
     check(await page.getByRole('article', { name: '金油比', exact: true }).locator('.spark-line').count() === 2, 'Overview sparkline preserves the missing-data gap');
     check((await panel.locator('.funding-metrics').innerText()).includes('+43.80%'), 'Current fees honor different settlement periods');
-    check(await panel.locator('.metric.featured').evaluate(node => getComputedStyle(node).backgroundColor) === 'rgb(231, 244, 243)', 'Shared oil stylesheet loaded in shadow root');
+    check(await panel.locator('.metric.featured').evaluate(node => getComputedStyle(node).backgroundColor) === 'rgb(16, 45, 64)', 'Shared dark oil stylesheet loaded in shadow root');
     await panel.getByRole('button', { name: '1 天', exact: true }).click();
     check((await panel.innerText()).includes('95 / 96'), 'One-day range uses completed periods');
     await panel.getByRole('button', { name: '1 月', exact: true }).click();

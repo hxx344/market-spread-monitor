@@ -97,7 +97,7 @@ const TimePlot = memo(function TimePlot({ title, series, bars, start, end, curso
           : <rect key={day.to} x={x} width={barWidth} y={Math.min(geometry.y(0), geometry.y(day.netPercent)) - (day.netPercent === 0 ? 1 : 0)} height={Math.max(2, Math.abs(geometry.y(day.netPercent) - geometry.y(0)))} className={`perp-chart-bar ${polarity(day.netPercent)}`}><title>{stamp(day.to)} · {percent(day.netPercent)}</title></rect>; })}
         {series.map((line, index) => <path key={line.label} d={geometry.paths[index]} fill="none" stroke={line.color} strokeWidth="1.8" strokeDasharray={line.dashed ? '5 3' : undefined} vectorEffect="non-scaling-stroke"/>)}
         {start <= cursor && cursor <= end ? <line className="perp-chart-crosshair" x1={geometry.x(cursor)} x2={geometry.x(cursor)} y1={geometry.top} y2={geometry.bottom}/> : null}
-        {series.map(line => { const selected = valueAt(line.points, cursor, line.step); return selected ? <circle key={line.label} cx={geometry.x(line.step ? cursor : selected.time)} cy={geometry.y(selected.value!)} r="3.4" fill={line.color} stroke="var(--scanner-bg, #24231f)" strokeWidth="1.5"/> : null; })}
+        {series.map(line => { const selected = valueAt(line.points, cursor, line.step); return selected ? <circle key={line.label} cx={geometry.x(line.step ? cursor : selected.time)} cy={geometry.y(selected.value!)} r="3.4" fill={line.color} stroke="var(--scanner-bg, var(--card))" strokeWidth="1.5"/> : null; })}
       </g>
       {[0, .5, 1].map(fraction => { const at = start + fraction * (end - start); return <text key={fraction} x={geometry.x(at)} y="179" textAnchor={fraction === 0 ? 'start' : fraction === 1 ? 'end' : 'middle'} className="perp-chart-axis">{end > 0 ? dayFormat.format(at) : '—'}</text>; })}
     </svg>
@@ -176,12 +176,12 @@ function PerpetualChart({ selection, snapshot, active, now, onSelectionChange, o
   const times = useMemo(() => [...new Set([start, end, ...priceData.hours, ...analysis.events.map(event => event.time), ...analysis.daily.map(day => day.to)])].sort((left, right) => left - right), [start, end, priceData.hours, analysis.events, analysis.daily]);
   const cursorIndex = nearestIndex(times, cursorTime ?? end), cursor = times[cursorIndex];
   const selectTime = useCallback((time: number) => setCursorTime(time), []);
-  const spreadSeries = useMemo<Series[]>(() => [{ label: '小时收盘价差', color: 'var(--scanner-focus, #e4c86d)', points: priceData.spread }], [priceData.spread]);
+  const spreadSeries = useMemo<Series[]>(() => [{ label: '小时收盘价差', color: 'var(--scanner-focus, var(--primary))', points: priceData.spread }], [priceData.spread]);
   const priceSeries = useMemo<Series[]>(() => [
     { label: '做多腿', color: 'var(--chart-long)', points: priceData.points[0] ?? emptyPoints },
     { label: '做空腿', color: 'var(--chart-short)', points: priceData.points[1] ?? emptyPoints, dashed: true },
   ], [priceData.points]);
-  const cumulativeSeries = useMemo<Series[]>(() => [{ label: '累计净资金费', color: 'var(--scanner-focus, #e4c86d)', points: fundingPoints, step: true }], [fundingPoints]);
+  const cumulativeSeries = useMemo<Series[]>(() => [{ label: '累计净资金费', color: 'var(--scanner-focus, var(--primary))', points: fundingPoints, step: true }], [fundingPoints]);
   const selectedSpread = valueAt(priceData.spread, cursor), selectedPrices = priceData.points.map(points => valueAt(points, cursor));
   const selectedCumulative = valueAt(fundingPoints, cursor, true), selectedDay = analysis.daily.find(day => cursor > day.from && cursor <= day.to);
   const priceStates = priceData.legs.map((leg, index) => priceState(leg, start, end, clock, Boolean(prices.error), priceData.points[index].filter(point => point.value !== null).length, priceData.hours.length));
