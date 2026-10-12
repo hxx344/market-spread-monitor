@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import Chart, { FundingChart } from './gold-oil-svg-chart';
-import { GOLD_OIL_STALE_MS, GOLD_OIL_INTERVAL_MS, GOLD_OIL_INSTRUMENTS, GOLD_OIL_EXCHANGES, goldOilVariantKey, goldOilUnits, goldOilChartPoints, type GoldOilType, type GoldOilExchange } from '../lib/gold-oil';
-import { currentGoldOilFunding, analyzeAvailableGoldOilFunding } from '../lib/gold-oil-funding';
+import { GOLD_OIL_STALE_MS, GOLD_OIL_INTERVAL_MS, GOLD_OIL_INSTRUMENTS, GOLD_OIL_EXCHANGES, goldOilVariantKey, goldOilUnits, goldOilChartPoints, type GoldOilType, type GoldOilExchange, type GoldOilPoint } from '../lib/gold-oil';
+import { currentGoldOilFunding, analyzeAvailableGoldOilFunding, type GoldOilFundingHistory } from '../lib/gold-oil-funding';
 import { goldOilStatistics, sampleGoldOilPoints, adjacentRatioChange } from '../lib/gold-oil-analysis';
 import { goldOilSummary, goldOilTrend, summaryTimestamp, type SummaryProps } from '../lib/monitor-summary';
 import type { InitialMarketData } from '../lib/initial-market';
@@ -31,6 +31,22 @@ const extraStyles = `
 .monthly-chart{overflow-x:auto;overflow-y:hidden}.month-item{min-width:56px}
 @media(max-width:700px){.gold-chart{height:280px}.plot-heading{flex-wrap:wrap}.chart-legend{flex-wrap:wrap;gap:10px}.gold-cursor-reading{line-height:1.8}.funding-basis{margin-top:10px}}
 `;
+
+// Quote polling, freshness ticks and cursor movement do not change historical rows.
+const GoldOilDetails = memo(function GoldOilDetails({ points, fundingByCandle, funding, oilType, exchange, page, onPageChange }: {
+  points: GoldOilPoint[];
+  fundingByCandle: Map<number, { net: number; oil: number; xau: number }>;
+  funding: GoldOilFundingHistory | null;
+  oilType: GoldOilType;
+  exchange: GoldOilExchange;
+  page: number;
+  onPageChange: (page: number) => void;
+}) {
+  const instrument = GOLD_OIL_INSTRUMENTS[oilType], source = GOLD_OIL_EXCHANGES[exchange].name, units = goldOilUnits(oilType, exchange);
+  const pageCount = Math.max(1, Math.ceil(points.length / 200)), selectedPage = Math.min(page, pageCount - 1), pageEnd = points.length - selectedPage * 200;
+  const tableRows = points.slice(Math.max(0, pageEnd - 200), pageEnd).reverse();
+  return <details className="data-details panel"><summary><span>15 分钟价格与资金费明细 <span className="table-count">{points.length} 条</span></span><span className="details-arrow">＋</span></summary><nav className="table-pagination" aria-label="明细翻页"><span aria-live="polite">第 {selectedPage + 1} / {pageCount} 页 · 每页 200 条</span><div><button disabled={selectedPage === 0} onClick={() => onPageChange(selectedPage - 1)}>上一页</button><button disabled={selectedPage >= pageCount - 1} onClick={() => onPageChange(selectedPage + 1)}>下一页</button></div></nav><div className="table-scroll" tabIndex={0} role="region" aria-label="金油比价格与资金费明细"><table><caption>{source} · 按 K 线起始时间倒序（北京时间）。黄金 USDT/盎司，原油 {units.oil}，比值及变化为{units.ratio}。资金费为该 15 分钟内实际结算记录之和，以两腿总名义为分母。</caption><thead><tr>{['时间 · 北京时间', '黄金', instrument.name, '金油比', '较上根 K 线', '做多资金费', '做空资金费', '结算记录'].map(label => <th key={label} scope="col">{label}</th>)}</tr></thead><tbody>{tableRows.map((row, index) => { const event = fundingByCandle.get(row.time); return <tr key={row.time}><td>{time(row.time)}</td><td>{format(row.xau, 2)}</td><td>{format(row.oil)}</td><td>{format(row.ratio)}</td><td>{signed(adjacentRatioChange(points, pageEnd - index - 1))}</td><td>{event ? percent(-event.net) : '—'}</td><td>{event ? percent(event.net) : '—'}</td><td>{event ? `XAU ${event.xau} 次 / ${instrument.code} ${event.oil} 次` : funding && row.time >= funding.coverageStart && row.time + GOLD_OIL_INTERVAL_MS <= funding.coverageEnd ? '无结算记录' : '未查询覆盖'}</td></tr>; })}</tbody></table></div></details>;
+});
 
 export default function GoldOilPanel({ initial, active = true, summaryActive = true, onSummary, oilType = 'cl', onOilTypeChange, exchange = 'binance', onExchangeChange }: SummaryProps & { initial?: InitialMarketData | null; active?: boolean; summaryActive?: boolean; oilType?: GoldOilType; onOilTypeChange?: (value: GoldOilType) => void; exchange?: GoldOilExchange; onExchangeChange?: (value: GoldOilExchange) => void }) {
   const feed = useGoldOilFeed(initial, active, summaryActive, oilType, exchange), { quote, history, funding, quoteError, historyError, fundingError } = feed;
@@ -67,8 +83,6 @@ export default function GoldOilPanel({ initial, active = true, summaryActive = t
   const stale = quote && (quote.status === 'snapshot' || quoteError || now - Date.parse(quote.fetchedAt) > GOLD_OIL_STALE_MS);
   const historyStale = history && (history.status === 'snapshot' || historyError || now - Date.parse(history.fetchedAt) > 150_000 || !latest || now - latest.time - 2 * GOLD_OIL_INTERVAL_MS > 150_000);
   const fundingStale = funding && (funding.status === 'snapshot' || fundingError || now - Date.parse(funding.fetchedAt) > 615_000);
-  const pageCount = Math.max(1, Math.ceil(points.length / 200)), selectedPage = Math.min(page, pageCount - 1), pageEnd = points.length - selectedPage * 200;
-  const tableRows = points.slice(Math.max(0, pageEnd - 200), pageEnd).reverse();
   const selectedPoint = points[Math.min(cursor ?? points.length - 1, points.length - 1)];
   const rangeLabel = ranges.find(range => range.days === days)!.label;
   const maxMonth = Math.max(1, ...stats?.months.map(month => month.average) ?? []);
@@ -115,7 +129,7 @@ export default function GoldOilPanel({ initial, active = true, summaryActive = t
 
       <section className="bottom-grid"><article className="panel monthly-panel"><div className="section-heading"><div><h2>月度金油比</h2><p>所选区间各月有效 15 分钟比值的平均值</p></div><span className="unit-label">{units.ratio}</span></div><div className="monthly-chart" role="list" aria-label="月度平均金油比">{stats?.months.map(month => <div className="month-item" role="listitem" tabIndex={0} aria-label={`${month.month}：${format(month.average)} ${units.ratio}，${month.count} 个有效样本`} key={month.month}><div className="month-bar-area" aria-hidden="true"><div className="month-bar" style={{ height: `${month.average / maxMonth * 80}%`, bottom: 0 }}/><span className="month-value" style={{ bottom: `calc(${month.average / maxMonth * 80}% + 6px)` }}>{format(month.average)}</span></div><span className="month-label">{month.month}</span></div>)}</div><p className="monthly-note">月份按 UTC 划分；首尾月可能仅覆盖部分日期，缺失时段不参与均值。</p></article><article className="panel methodology"><p className="eyebrow">READING THE RATIO</p><h2>如何读这条金油比？</h2><p>{units.ratio === '报价比' ? 'Bybit BZ 按两腿原始标记报价计算。' : `比值表示每盎司黄金对应的${instrument.name}桶数。`}顶部为当前标记价格，历史为同一 UTC 15 分钟已收盘标记价。</p><div className="formula"><span>XAUUSDT ÷ {instrument.symbol}</span><b>{units.ratio}</b></div><p className="methodology-fine">做多金油比对应多黄金、空原油；做空相反。{units.ratio === '报价比' ? '黄金按盎司、BZ 按原始合约报价计价。' : '黄金按盎司、原油按桶计价。'}资金费使用等 USDT 名义，不能套用等桶数配仓。</p><p className="methodology-fine">原油合约可能包含底层期货换月与期限结构影响；资金费年化不包含价格盈亏。</p></article></section>
 
-      <details className="data-details panel"><summary><span>15 分钟价格与资金费明细 <span className="table-count">{points.length} 条</span></span><span className="details-arrow">＋</span></summary><nav className="table-pagination" aria-label="明细翻页"><span aria-live="polite">第 {selectedPage + 1} / {pageCount} 页 · 每页 200 条</span><div><button disabled={selectedPage === 0} onClick={() => setPage(selectedPage - 1)}>上一页</button><button disabled={selectedPage >= pageCount - 1} onClick={() => setPage(selectedPage + 1)}>下一页</button></div></nav><div className="table-scroll" tabIndex={0} role="region" aria-label="金油比价格与资金费明细"><table><caption>{source} · 按 K 线起始时间倒序（北京时间）。黄金 USDT/盎司，原油 {units.oil}，比值及变化为{units.ratio}。资金费为该 15 分钟内实际结算记录之和，以两腿总名义为分母。</caption><thead><tr>{['时间 · 北京时间', '黄金', instrument.name, '金油比', '较上根 K 线', '做多资金费', '做空资金费', '结算记录'].map(label => <th key={label} scope="col">{label}</th>)}</tr></thead><tbody>{tableRows.map((row, index) => { const event = fundingByCandle.get(row.time); return <tr key={row.time}><td>{time(row.time)}</td><td>{format(row.xau, 2)}</td><td>{format(row.oil)}</td><td>{format(row.ratio)}</td><td>{signed(adjacentRatioChange(points, pageEnd - index - 1))}</td><td>{event ? percent(-event.net) : '—'}</td><td>{event ? percent(event.net) : '—'}</td><td>{event ? `XAU ${event.xau} 次 / ${instrument.code} ${event.oil} 次` : funding && row.time >= funding.coverageStart && row.time + GOLD_OIL_INTERVAL_MS <= funding.coverageEnd ? '无结算记录' : '未查询覆盖'}</td></tr>; })}</tbody></table></div></details>
+      <GoldOilDetails points={points} fundingByCandle={fundingByCandle} funding={funding} oilType={oilType} exchange={exchange} page={page} onPageChange={setPage}/>
       <footer><div className="footer-brand">GOLD / OIL<span>{instrument.code}-XAU</span></div><p>来源：{source} XAUUSDT / {instrument.symbol} · 标记价格与实际结算资金费</p><p className="footer-note">共同历史从两腿较晚上市时间开始；缺失时段断线，不补值。</p></footer>
     </main></div>
   </>, root)}</div>;
